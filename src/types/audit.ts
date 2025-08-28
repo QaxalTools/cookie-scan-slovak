@@ -52,7 +52,6 @@ export interface AuditData {
     verdict: 'súlad' | 'čiastočný súlad' | 'nesúlad' | 'neúplné dáta';
     overall: string;
     risks: string;
-    riskScore: number; // 0-100
     data_source?: string;
   };
 
@@ -96,13 +95,6 @@ export interface AuditData {
     source: '1P' | '3P';
     createdPreConsent: boolean;
     note: string;
-  }>;
-  dataTransfers?: Array<{
-    service: string;
-    parameter: string;
-    sampleValue: string;
-    containsPersonalData: boolean;
-    preConsent: boolean;
   }>;
   consentManagement: {
     hasConsentTool: boolean;
@@ -151,27 +143,6 @@ export interface AuditData {
     requests: number;
   }>;
 
-  // Consent UX Analysis (optional - added during audit)
-  consentUx?: ConsentUxResult;
-
   // Internal JSON for consistency
   _internal: InternalAuditJson;
-}
-
-export interface ConsentUxResult {
-  screenshot?: string; // data URL base64
-  used?: 'edge' | 'client';
-  confidence?: number;
-  text?: string;
-  analysis?: {
-    bannerPresent: boolean;
-    acceptButtonFound: boolean;
-    rejectButtonFound: boolean;
-    settingsButtonFound: boolean;
-    uxAssessment: {
-      balance: string;
-      clarity: string;
-      overallScore: string;
-    };
-  };
 }

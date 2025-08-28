@@ -1,10 +1,7 @@
-import { useState } from 'react';
-import { generatePDFReport } from '@/utils/pdfGenerator';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SimulationBadge } from '@/components/SimulationBadge';
-import { LiveBadge } from '@/components/LiveBadge';
 import { 
   CheckCircle, 
   XCircle, 
@@ -13,74 +10,16 @@ import {
   Cookie, 
   Eye, 
   Mail,
-  Download,
-  Camera,
-  Users,
-  Database,
-  Lock,
-  FileText,
-  Monitor,
-  Scale,
-  Loader2,
-  Send
+  Download
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { calculateRiskScoresFromDisplay, calculateOverallRiskFromScores } from '@/utils/riskScoring';
-import { useToast } from '@/hooks/use-toast';
 
 interface AuditResultsProps {
   data: AuditData;
   onGenerateEmail: () => void;
 }
 
-// Helper function to get consistent status colors
-const getStatusColor = (status: 'ok' | 'warning' | 'error'): string => {
-  switch (status) {
-    case 'ok': return 'text-green-600';
-    case 'warning': return 'text-orange-600';
-    case 'error': return 'text-red-600';
-    default: return 'text-gray-600';
-  }
-};
-
-const getStatusBgColor = (status: 'ok' | 'warning' | 'error'): string => {
-  switch (status) {
-    case 'ok': return 'bg-green-600';
-    case 'warning': return 'bg-orange-500';
-    case 'error': return 'bg-red-600';
-    default: return 'bg-gray-600';
-  }
-};
-
-const getStatusIcon = (status: 'ok' | 'warning' | 'error') => {
-  switch (status) {
-    case 'ok': return <CheckCircle className="h-4 w-4" />;
-    case 'warning': return <AlertTriangle className="h-4 w-4" />;
-    case 'error': return <XCircle className="h-4 w-4" />;
-    default: return <AlertTriangle className="h-4 w-4" />;
-  }
-};
-
-const getRiskScoreColor = (score: number): string => {
-  if (score <= 30) return 'bg-green-600';
-  if (score <= 60) return 'bg-orange-500';
-  return 'bg-red-600';
-};
-
-const getVerdictColor = (verdict: string): string => {
-  switch (verdict) {
-    case 'súlad': return 'bg-green-600';
-    case 'čiastočný súlad': return 'bg-orange-500';
-    case 'nesúlad': return 'bg-red-600';
-    default: return 'bg-gray-500';
-  }
-};
-
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
-  const { toast } = useToast();
-  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
-
   // Consistency checks
   const performConsistencyChecks = () => {
     const checks = [];
@@ -121,490 +60,591 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
     URL.revokeObjectURL(url);
   };
 
-  const handleDownloadPDF = async () => {
-    setIsGeneratingPDF(true);
-    try {
-      const pdf = await generatePDFReport(data);
-      const dateStr = new Date().toISOString().split('T')[0];
-      pdf.save(`gdpr-audit-report-${dateStr}.pdf`);
-      
-      toast({
-        title: "PDF vygenerované",
-        description: "GDPR audit report bol úspešne stiahnutý ako PDF.",
-      });
-    } catch (error) {
-      console.error('Error generating PDF:', error);
-      toast({
-        title: "Chyba pri generovaní PDF",
-        description: "Nepodarilo sa vygenerovať PDF report. Skúste to znova.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsGeneratingPDF(false);
+  const handleDownloadPDF = () => {
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>GDPR Audit Report</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+              h1, h2, h3 { color: #333; }
+              .header { text-align: center; margin-bottom: 30px; }
+              .section { margin-bottom: 25px; }
+              table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+              th { background-color: #f5f5f5; }
+              .status-ok { color: green; font-weight: bold; }
+              .status-warning { color: orange; font-weight: bold; }
+              .status-error { color: red; font-weight: bold; }
+              @media print { body { margin: 0; } }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>GDPR Cookie Audit Report</h1>
+              <p>Dátum: ${new Date().toLocaleDateString('sk-SK')}</p>
+            </div>
+            
+            <div class="section">
+              <h2>A) Manažérsky sumár</h2>
+              <p><strong>Verdikt:</strong> ${data.managementSummary.verdict.toUpperCase()}</p>
+              <p><strong>Celkové hodnotenie:</strong> ${data.managementSummary.overall}</p>
+              <p><strong>Riziká:</strong> ${data.managementSummary.risks}</p>
+              ${data.managementSummary.data_source ? `<p><strong>Zdroj dát:</strong> ${data.managementSummary.data_source}</p>` : ''}
+            </div>
+
+            <div class="section">
+              <h2>B) Detailná analýza</h2>
+              
+              <h3>1. HTTPS zabezpečenie</h3>
+              <p class="status-${data.detailedAnalysis.https.status}">${data.detailedAnalysis.https.comment}</p>
+              
+              <h3>2. Tretie strany (${data.detailedAnalysis.thirdParties.total})</h3>
+              <table>
+                <tr><th>Doména</th><th>Počet požiadaviek</th></tr>
+                ${data.detailedAnalysis.thirdParties.list.map(party => 
+                  `<tr><td>${party.domain}</td><td>${party.requests}</td></tr>`
+                ).join('')}
+              </table>
+              
+              <h3>3. Trackery a web-beacony</h3>
+              <table>
+                <tr><th>Služba</th><th>Host</th><th>Dôkaz</th><th>Pred súhlasom</th><th>Stav</th></tr>
+                ${data.detailedAnalysis.trackers.map(tracker =>
+                  `<tr><td>${tracker.service}</td><td>${tracker.host}</td><td>${tracker.evidence}</td><td>${tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}</td><td class="status-${tracker.status}">${tracker.status.toUpperCase()}</td></tr>`
+                ).join('')}
+              </table>
+              
+              ${data._internal?.beacons?.filter(b => b.pre_consent).length > 0 ? `
+              <h4>Pred-súhlasové trackery (${data._internal.beacons.filter(b => b.pre_consent).length})</h4>
+              <ul>
+                ${data._internal.beacons.filter(b => b.pre_consent).map(beacon =>
+                  `<li><strong>${beacon.service}:</strong> ${beacon.sample_url}</li>`
+                ).join('')}
+              </ul>` : ''}
+              
+              <h3>4. Cookies (${data.detailedAnalysis.cookies.total})</h3>
+              <p><strong>First-party:</strong> ${data.detailedAnalysis.cookies.firstParty} | <strong>Third-party:</strong> ${data.detailedAnalysis.cookies.thirdParty}</p>
+              <table>
+                <tr><th>Názov</th><th>Typ</th><th>Kategória</th><th>Expirácia (dni)</th><th>Stav</th></tr>
+                ${data.detailedAnalysis.cookies.details.map(cookie => {
+                  const internalCookie = data._internal?.cookies?.find(ic => ic.name === cookie.name && ic.domain === cookie.domain);
+                  let retentionDays = 'Neznáme';
+                  if (internalCookie?.expiry_days !== null && internalCookie?.expiry_days !== undefined) {
+                    retentionDays = internalCookie.expiry_days.toString();
+                  } else if (cookie.expiration.includes('Session')) {
+                    retentionDays = 'Session';
+                  }
+                  return `<tr><td>${cookie.name}</td><td>${cookie.type === 'first-party' ? '1P' : '3P'}</td><td>${cookie.category}</td><td>${retentionDays}</td><td class="status-${cookie.status}">${cookie.status.toUpperCase()}</td></tr>`;
+                }).join('')}
+              </table>
+              
+              <h3>5. LocalStorage/SessionStorage</h3>
+              ${data._internal?.storage && data._internal.storage.length > 0 ? `
+              <table>
+                <tr><th>Kľúč</th><th>Scope</th><th>Vzorová hodnota</th><th>Osobné údaje</th><th>Zdroj a timing</th></tr>
+                ${data._internal.storage.map(item => `
+                  <tr><td style="font-family: monospace;">${item.key}</td><td>${item.scope}</td><td style="font-family: monospace; font-size: 12px;">${item.sample_value.length > 50 ? item.sample_value.substring(0, 50) + '...' : item.sample_value}</td><td class="status-${item.contains_personal_data ? 'error' : 'ok'}">${item.contains_personal_data ? 'Áno' : 'Nie'}</td><td style="font-size: 11px;">${item.source_party ? 'Via ' + item.source_party + ' | ' : ''}${item.created_pre_consent ? 'Pred súhlasom' : 'Po súhlase'}</td></tr>
+                `).join('')}
+              </table>
+              ${data._internal.storage.some(item => item.contains_personal_data) ? `
+              <p class="status-error"><strong>⚠️ Poznámka:</strong> Nájdené osobné údaje v storage bez užívateľského súhlasu.</p>
+              ` : ''}
+              ` : '<p>Žiadne údaje v LocalStorage/SessionStorage neboli nájdené.</p>'}
+              
+              <h3>6. Consent Management</h3>
+              <p><strong>Consent nástroj:</strong> ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}</p>
+              <p><strong>Trackery pred súhlasom:</strong> ${data.detailedAnalysis.consentManagement.trackersBeforeConsent}</p>
+              <p><strong>Dôkazy:</strong> ${data.detailedAnalysis.consentManagement.evidence}</p>
+              ${data._internal?.cmp?.present && data._internal?.cmp?.cookie_name ? `
+              <p><strong>Detekovaná consent cookie:</strong> ${data._internal.cmp.cookie_name} (${data._internal.cmp.raw_value.substring(0, 30)}...)</p>
+              ` : ''}
+              
+              <h3>7. Dáta odosielané tretím stranám</h3>
+              ${(() => {
+                const servicesData = new Map();
+                const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo', 'ev', 'en'];
+                
+                if (data._internal?.beacons) {
+                  data._internal.beacons.forEach(beacon => {
+                    if (!servicesData.has(beacon.service)) {
+                      servicesData.set(beacon.service, { params: [], hasPreConsent: false });
+                    }
+                    
+                    if (beacon.pre_consent) {
+                      servicesData.get(beacon.service).hasPreConsent = true;
+                    }
+                    
+                    try {
+                      const url = new URL(beacon.sample_url);
+                      url.searchParams.forEach((value, key) => {
+                        if (piiKeywords.some(k => key.toLowerCase().includes(k))) {
+                          const serviceData = servicesData.get(beacon.service);
+                          const existingParam = serviceData.params.find(p => p.parameter === key);
+                          if (!existingParam) {
+                            serviceData.params.push({
+                              parameter: key,
+                              sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
+                              isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
+                              preConsent: beacon.pre_consent
+                            });
+                          }
+                        }
+                      });
+                    } catch (e) {}
+                  });
+                }
+                
+                let tableContent = '';
+                servicesData.forEach((serviceData, serviceName) => {
+                  if (serviceData.params.length === 0) {
+                    tableContent += `<tr><td>${serviceName}</td><td>—</td><td>žiadne identifikátory nezachytené</td><td>—</td><td class="status-${serviceData.hasPreConsent ? 'error' : 'ok'}">${serviceData.hasPreConsent ? 'ÁNO' : 'NIE'}</td></tr>`;
+                  } else {
+                    serviceData.params.forEach(param => {
+                      tableContent += `<tr><td>${serviceName}</td><td style="font-family: monospace;">${param.parameter}</td><td style="font-family: monospace;">${param.sampleValue}</td><td class="status-${param.isPII ? 'error' : 'ok'}">${param.isPII ? 'ÁNO' : 'NIE'}</td><td class="status-${param.preConsent ? 'error' : 'ok'}">${param.preConsent ? 'ÁNO' : 'NIE'}</td></tr>`;
+                    });
+                  }
+                });
+                
+                return servicesData.size > 0 ? `
+                <table>
+                  <tr><th>Služba</th><th>Parameter</th><th>Vzor hodnoty</th><th>Osobné údaje?</th><th>Pred súhlasom?</th></tr>
+                  ${tableContent}
+                </table>
+                <p style="font-size: 12px; color: #666;">Zobrazené sú zachytené vzorové hodnoty z požiadaviek/beaconov odoslaných tretím stranám.</p>
+                ` : '<p>Neboli nájdené relevantné parametre odosielané tretím stranám.</p>';
+              })()}
+              
+              <h3>8. UX analýza cookie lišty</h3>
+              ${(() => {
+                const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
+                const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0;
+                const isPresent = hasCMP;
+                const defaultBehavior = preConsentTrackers ? 'Opt-in (nevyžaduje súhlas)' : 'Opt-out (blokuje trackery)';
+                const balancedButtons = preConsentTrackers ? 'Nie (nevyvážená)' : 'Áno (pravdepodobné)';
+                const detailedSettings = data._internal?.cmp?.present ? 'Áno (detekovaný CMP nástroj)' : 'Neznáme';
+                let assessment = 'Chýba';
+                if (hasCMP) {
+                  assessment = preConsentTrackers ? 'Nevyvážená' : 'Transparentná';
+                }
+                return `
+                <table>
+                  <tr><th>Charakteristika</th><th>Hodnota</th></tr>
+                  <tr><td>Prítomnosť cookie lišty</td><td class="status-${isPresent ? 'ok' : 'error'}">${isPresent ? 'Áno' : 'Nie'}</td></tr>
+                  <tr><td>Predvolené správanie</td><td>${defaultBehavior}</td></tr>
+                  <tr><td>Rovnocenné tlačidlá</td><td>${balancedButtons}</td></tr>
+                  <tr><td>Detailné nastavenia</td><td>${detailedSettings}</td></tr>
+                </table>
+                <p><strong>Celkové hodnotenie UX:</strong> <span class="status-${assessment === 'Transparentná' ? 'ok' : assessment === 'Nevyvážená' ? 'warning' : 'error'}">${assessment.toUpperCase()}</span></p>
+                `;
+              })()}
+              
+              <h3>9. Retenčné doby cookies</h3>
+              ${(() => {
+                const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
+                  const internalCookie = data._internal?.cookies?.find(ic => ic.name === cookie.name && ic.domain === cookie.domain);
+                  if (internalCookie?.expiry_days && internalCookie.expiry_days > 365) {
+                    return cookie.category.toLowerCase().includes('marketing') || cookie.category.toLowerCase().includes('analytics');
+                  }
+                  return false;
+                });
+                return longRetentionCookies.length > 0 ? `<p class="status-warning"><strong>⚠️ Poznámka k retenčným dobám:</strong> ${longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok, čo môže byť nad rámec primeranosti podľa GDPR. Odporúčame skrátiť doby uchovávania na maximálne 12 mesiacov.</p>` : '<p class="status-ok">Retenčné doby cookies sú v súlade s odporúčaniami GDPR (pod 1 rok pre marketing/analytické cookies).</p>';
+              })()}
+              
+              <h3>10. Právne zhrnutie</h3>
+              <p>${data.detailedAnalysis.legalSummary}</p>
+              
+              <h4>Relevantné právne ustanovenia:</h4>
+              <ul>
+                <li><strong>Článok 5(3) ePrivacy Directive:</strong> Ukladanie nenutných cookies bez súhlasu používateľa</li>
+                <li><strong>Článok 6 GDPR:</strong> Spracúvanie IP adries, user_id a online identifikátorov</li>
+                <li><strong>Články 12-14 GDPR:</strong> Povinnosť informovať používateľov a zabezpečiť transparentnosť</li>
+                <li><strong>Článok 5(1)(e) GDPR:</strong> Princíp minimalizácie údajov a primerané doby uchovávania</li>
+              </ul>
+              
+              <h3>11. Rizikový scoring</h3>
+              ${(() => {
+                const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
+                                  data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
+                const cmpScore = !data.detailedAnalysis.consentManagement.hasConsentTool ? 5 :
+                                data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 1;
+                const cookiesScore = data.detailedAnalysis.cookies.details.some(c => 
+                  c.category.toLowerCase().includes('marketing') || c.category.toLowerCase().includes('analytics')
+                ) && data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 2;
+                const storageScore = data._internal?.storage?.some(s => s.contains_personal_data && s.created_pre_consent) ? 5 : 1;
+                const preConsentBeacons = data._internal?.beacons?.filter(b => b.pre_consent)?.length || 0;
+                const trackersScore = preConsentBeacons === 0 ? 0 : preConsentBeacons <= 3 ? 3 : preConsentBeacons <= 7 ? 4 : 5;
+                const uxScore = !data.detailedAnalysis.consentManagement.hasConsentTool ? 5 :
+                               data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 1;
+                const totalScore = (httpsScore + cmpScore + cookiesScore + storageScore + trackersScore + uxScore) / 6;
+                const overallRisk = totalScore <= 1.5 ? 'Nízke' : totalScore <= 3 ? 'Stredné' : 'Vysoké';
+                
+                const riskAreas = [
+                  { area: 'HTTPS', score: httpsScore, note: httpsScore <= 1 ? 'Správne implementované' : 'Problémy so zabezpečením' },
+                  { area: 'CMP', score: cmpScore, note: cmpScore === 5 ? 'Chýba nástroj' : cmpScore === 4 ? 'Neblokuje trackery' : 'Správne funguje' },
+                  { area: 'Cookies', score: cookiesScore, note: cookiesScore >= 4 ? 'Marketing cookies pred súhlasom' : 'Akceptovateľné' },
+                  { area: 'Storage', score: storageScore, note: storageScore === 5 ? 'Osobné údaje pred súhlasom' : 'V poriadku' },
+                  { area: 'Trackery', score: trackersScore, note: preConsentBeacons + ' pred-súhlasových trackerov' },
+                  { area: 'UX lišta', score: uxScore, note: uxScore === 5 ? 'Chýba' : uxScore === 4 ? 'Nevyvážená' : 'Transparentná' }
+                ];
+                
+                return `
+                <table>
+                  <tr><th>Oblasť</th><th>Skóre (0-5)</th><th>Poznámka</th></tr>
+                  ${riskAreas.map(area => 
+                    `<tr><td><strong>${area.area}</strong></td><td class="status-${area.score <= 1 ? 'ok' : area.score <= 3 ? 'warning' : 'error'}">${area.score}/5</td><td style="font-size: 12px;">${area.note}</td></tr>`
+                  ).join('')}
+                </table>
+                <p><strong>Celkové riziko:</strong> <span class="status-${overallRisk === 'Nízke' ? 'ok' : overallRisk === 'Stredné' ? 'warning' : 'error'}">${overallRisk.toUpperCase()}</span> (Priemerné skóre: ${totalScore.toFixed(1)}/5)</p>
+                `;
+              })()}
+            </div>
+
+            <div class="section">
+              <h2>C) OK vs. Rizikové</h2>
+              <table>
+                <tr><th>Oblasť</th><th>Stav</th><th>Komentár</th></tr>
+                ${data.riskTable.map(risk =>
+                  `<tr><td>${risk.area}</td><td class="status-${risk.status}">${risk.status.toUpperCase()}</td><td>${risk.comment}</td></tr>`
+                ).join('')}
+              </table>
+            </div>
+
+            <div class="section">
+              <h2>D) Odporúčania</h2>
+              ${data.recommendations.map(rec =>
+                `<div style="margin-bottom: 15px;"><h4>${rec.title}</h4><p>${rec.description}</p></div>`
+              ).join('')}
+            </div>
+
+            ${consistencyIssues.length === 0 ? `
+            <div class="section">
+              <p style="color: green;"><strong>✓ Kontrola konzistencie:</strong> Počty v tabuľkách sa zhodujú so súhrnom.</p>
+            </div>
+            ` : ''}
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.print();
     }
   };
 
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'ok':
+        return <CheckCircle className="h-4 w-4 text-green-600" />;
+      case 'warning':
+        return <AlertTriangle className="h-4 w-4 text-yellow-600" />;
+      case 'error':
+        return <XCircle className="h-4 w-4 text-red-600" />;
+      default:
+        return <AlertTriangle className="h-4 w-4 text-gray-600" />;
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case 'ok':
+        return <Badge variant="secondary" className="bg-green-100 text-green-800">OK</Badge>;
+      case 'warning':
+        return <Badge variant="outline" className="border-yellow-300 text-yellow-800">VAROVANIE</Badge>;
+      case 'error':
+        return <Badge variant="destructive">PROBLÉM</Badge>;
+      default:
+        return <Badge variant="outline">NEZNÁME</Badge>;
+    }
+  };
 
   return (
-    <div id="audit-report" className="space-y-8">
-        {/* INCOMPLETE Banner */}
-        {data._internal?.verdict === 'INCOMPLETE' && (
-          <div className="mb-6 border border-yellow-600 bg-yellow-50 text-yellow-800 rounded p-4 flex gap-2 items-start">
-            <AlertTriangle className="h-5 w-5 text-yellow-600 mt-0.5 flex-shrink-0" />
-            <div>
-              <div className="font-medium mb-1">INCOMPLETE – zber alebo parsing neúplný</div>
-              <div className="text-sm">
-                Dáta môžu byť neúplné kvôli technickým obmedzeniam pri zbere z webstránky.
-                {data._internal?.reasons && data._internal.reasons.length > 0 && (
-                  <div className="mt-2">
-                    <strong>Dôvody:</strong>
-                    <ul className="list-disc list-inside mt-1">
-                      {data._internal.reasons.map((reason, i) => <li key={i}>{reason}</li>)}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Header */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="h-6 w-6" />
-                GDPR Cookie Audit Report
-                {data.managementSummary.data_source?.includes('Simulácia') ? (
-                  <SimulationBadge />
-                ) : (
-                  <LiveBadge />
-                )}
-              </CardTitle>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={handleDownloadPDF} disabled={isGeneratingPDF}>
-                {isGeneratingPDF ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <FileText className="h-4 w-4 mr-2" />
-                )}
-                PDF
-              </Button>
-              <Button variant="outline" size="sm" onClick={handleDownloadJSON}>
-                <Download className="h-4 w-4 mr-2" />
-                JSON
-              </Button>
-              <Button onClick={onGenerateEmail}>
-                <Mail className="h-4 w-4 mr-2" />
-                Generovať email
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-      </Card>
-
-      {/* Consistency Issues */}
+    <div className="w-full max-w-6xl mx-auto space-y-6 p-4">
+      <SimulationBadge />
+      
+      {/* Show consistency issues banner if any */}
       {consistencyIssues.length > 0 && (
-        <Alert variant="destructive">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertDescription>
-            <strong>Data Consistency Issues:</strong>
-            <ul className="mt-2 list-disc list-inside">
-              {consistencyIssues.map((issue, index) => (
-                <li key={index} className="text-sm">{issue}</li>
-              ))}
-            </ul>
-          </AlertDescription>
-        </Alert>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <h3 className="font-semibold text-red-800 mb-2">⚠️ INCOMPLETE DATA DETECTED</h3>
+          <div className="text-sm text-red-700 space-y-1">
+            {consistencyIssues.map((issue, index) => (
+              <div key={index}>• {issue}</div>
+            ))}
+          </div>
+          <p className="text-xs text-red-600 mt-2">
+            Môžu chýbať niektoré dáta alebo môže byť narušená presnosť analýzy.
+          </p>
+        </div>
       )}
 
-      {/* A) Management Summary */}
-      <Card>
+      {/* A) Manažérsky sumár */}
+      <Card className="shadow-medium">
         <CardHeader>
-          <CardTitle>A) Manažérsky sumár</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5" />
+            A) Manažérsky sumár
+          </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {(() => {
-            // Calculate risk scores using utility function
-            const riskScores = calculateRiskScoresFromDisplay(data);
-            const { averageScore, riskLevel, riskColor } = calculateOverallRiskFromScores(riskScores);
-
-            return (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">Verdikt:</span>
-                    <Badge className={`text-white ${getVerdictColor(data.managementSummary.verdict)}`}>
-                      {data.managementSummary.verdict.toUpperCase()}
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">Celkové riziko:</span>
-                    <Badge className={`text-white ${riskColor}`}>
-                      {riskLevel} ({averageScore.toFixed(1)}/5)
-                    </Badge>
-                  </div>
-                </div>
-                
-                <div>
-                  <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
-                  <p className="text-sm text-muted-foreground">{data.managementSummary.overall}</p>
-                </div>
-                <div>
-                  <h4 className="font-semibold mb-2">Riziká</h4>
-                  <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
-                </div>
-                {data.managementSummary.data_source && (
-                  <div>
-                    <h4 className="font-semibold mb-2">Zdroj dát</h4>
-                    <p className="text-sm text-muted-foreground">{data.managementSummary.data_source}</p>
-                  </div>
-                )}
-                
-                <div>
-                  <h4 className="font-semibold mb-3">Rizikový scoring (0–5)</h4>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b">
-                          <th className="text-left p-2">Oblasť</th>
-                          <th className="text-left p-2">Skóre</th>
-                          <th className="text-left p-2">Vysvetlenie</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {riskScores.map((score, index) => (
-                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                            <td className="p-2 font-medium">{score.area}</td>
-                            <td className="p-2">
-                              <Badge className={`text-white ${score.score <= 1 ? 'bg-green-600' : score.score <= 3 ? 'bg-orange-500' : 'bg-red-600'}`}>
-                                {score.score}/5
-                              </Badge>
-                            </td>
-                            <td className="p-2 text-muted-foreground text-xs">{score.note}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </>
-            );
-          })()}
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <h3 className="font-semibold mb-2">Verdikt</h3>
+              <Badge 
+                variant={data.managementSummary.verdict.toLowerCase() === 'compliant' ? 'secondary' : 'destructive'}
+                className="text-lg px-3 py-1"
+              >
+                {data.managementSummary.verdict.toUpperCase()}
+              </Badge>
+            </div>
+            <div>
+              <h3 className="font-semibold mb-2">Celkové hodnotenie</h3>
+              <p className="text-sm">{data.managementSummary.overall}</p>
+            </div>
+            <div className="md:col-span-2">
+              <h3 className="font-semibold mb-2">Identifikované riziká</h3>
+              <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
+            </div>
+            {data.managementSummary.data_source && (
+              <div className="md:col-span-2">
+                <h3 className="font-semibold mb-2">Zdroj dát</h3>
+                <p className="text-xs text-muted-foreground">{data.managementSummary.data_source}</p>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
-
-      {/* B) Detailed Analysis */}
-      <Card>
+      {/* B) Detailná analýza */}
+      <Card className="shadow-medium">
         <CardHeader>
           <CardTitle>B) Detailná analýza</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-8">
+        <CardContent className="space-y-6">
           {/* 1. HTTPS */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Lock className="h-5 w-5" />
+          <div>
+            <h3 className="font-semibold mb-2 flex items-center gap-2">
+              {getStatusIcon(data.detailedAnalysis.https.status)}
               1. HTTPS zabezpečenie
+            </h3>
+            <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+              <span>{data.detailedAnalysis.https.comment}</span>
+              {getStatusBadge(data.detailedAnalysis.https.status)}
             </div>
-            <Card className="border-l-4 border-l-transparent" style={{borderLeftColor: data.detailedAnalysis.https.status === 'ok' ? '#16a34a' : '#dc2626'}}>
-              <CardContent className="pt-4">
-                <div className="flex items-center gap-2">
-                  <div className={getStatusColor(data.detailedAnalysis.https.status)}>
-                    {getStatusIcon(data.detailedAnalysis.https.status)}
-                  </div>
-                  <Badge className={`text-white ${getStatusBgColor(data.detailedAnalysis.https.status)}`}>
-                    {data.detailedAnalysis.https.status === 'ok' ? 'OK' : 'PROBLÉM'}
-                  </Badge>
-                  <span className="text-sm text-muted-foreground">{data.detailedAnalysis.https.comment}</span>
-                </div>
-              </CardContent>
-            </Card>
           </div>
 
-          {/* 2. Third Parties */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Users className="h-5 w-5" />
-              2. Tretie strany
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="flex items-center gap-2">
-                    <Users className="h-4 w-4 text-primary" />
-                    <span className="text-sm font-medium">Celkovo</span>
-                  </div>
-                  <div className="text-2xl font-bold">{data.detailedAnalysis.thirdParties.total}</div>
-                </CardContent>
-              </Card>
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left p-2">Doména</th>
-                        <th className="text-left p-2">Počet požiadaviek</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.detailedAnalysis.thirdParties.list.map((party, index) => (
-                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                          <td className="p-2 font-mono text-xs">{party.domain}</td>
-                          <td className="p-2">{party.requests}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+          {/* 2. Tretie strany */}
+          <div>
+            <h3 className="font-semibold mb-2">2. Tretie strany ({data.detailedAnalysis.thirdParties.total})</h3>
+            <div className="space-y-2">
+              {data.detailedAnalysis.thirdParties.list.map((party, index) => (
+                <div key={index} className="flex items-center justify-between p-2 bg-muted/30 rounded">
+                  <span className="text-sm">{party.domain}</span>
+                  <Badge variant="outline">{party.requests} požiadaviek</Badge>
                 </div>
-              </CardContent>
-            </Card>
+              ))}
+            </div>
           </div>
 
-          {/* 3. Trackery a web-beacony */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Eye className="h-5 w-5" />
-              3. Trackery a web-beacony
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left p-2">Služba</th>
-                        <th className="text-left p-2">Host</th>
-                        <th className="text-left p-2">Dôkaz</th>
-                        <th className="text-left p-2">Pred súhlasom</th>
-                        <th className="text-left p-2">Stav</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.detailedAnalysis.trackers.map((tracker, index) => (
-                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                          <td className="p-2">{tracker.service}</td>
-                          <td className="p-2 font-mono text-xs">{tracker.host}</td>
-                          <td className="p-2 text-xs">{tracker.evidence}</td>
-                          <td className="p-2">
-                            <Badge className={`text-white text-xs ${tracker.spamsBeforeConsent ? 'bg-red-600' : 'bg-green-600'}`}>
-                              {tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}
-                            </Badge>
-                          </td>
-                          <td className="p-2">
-                            <Badge className={`text-white text-xs ${getStatusBgColor(tracker.status)}`}>
-                              {tracker.status.toUpperCase()}
-                            </Badge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
-            
-            {/* Critical Error: Pre-consent trackers */}
-            {(() => {
-              const preConsentTrackers = data.detailedAnalysis.trackers.filter(t => t.spamsBeforeConsent);
-              return preConsentTrackers.length > 0 && (
-                <div className="border border-red-600 bg-red-50 text-red-800 rounded p-4 flex gap-2 items-start">
-                  <XCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
-                  <div className="space-y-2">
-                    <div>
-                      <strong>Kritická chyba: Detegované pred‑súhlasové trackery ({preConsentTrackers.length})</strong>
-                    </div>
-                    <div className="text-sm">
-                      <div className="font-medium mb-1">Pred‑súhlasové trackery ({preConsentTrackers.length}):</div>
-                      <ul className="list-disc list-inside space-y-1">
-                        {preConsentTrackers.map((tracker, index) => (
-                          <li key={index}>
-                            <strong>{tracker.service}</strong> - {tracker.host}
-                            {tracker.evidence && (
-                              <div className="ml-4 text-xs font-mono bg-red-100 px-2 py-1 rounded mt-1">
-                                {tracker.evidence}
-                              </div>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
+          {/* 3. Trackery/Beacony */}
+          <div>
+            <h3 className="font-semibold mb-2">3. Trackery a web-beacony</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                   <tr className="border-b">
+                     <th className="text-left p-2">Služba</th>
+                     <th className="text-left p-2">Host</th>
+                     <th className="text-left p-2">Dôkaz (URL/parametre)</th>
+                     <th className="text-left p-2">Pred súhlasom</th>
+                     <th className="text-left p-2">Stav</th>
+                   </tr>
+                </thead>
+                <tbody>
+                   {data.detailedAnalysis.trackers.map((tracker, index) => (
+                     <tr key={index} className="border-b">
+                       <td className="p-2">{tracker.service}</td>
+                       <td className="p-2 text-xs text-muted-foreground">{tracker.host}</td>
+                       <td className="p-2 text-xs font-mono bg-muted/50 rounded px-1">{tracker.evidence}</td>
+                       <td className="p-2">
+                         <Badge variant={tracker.spamsBeforeConsent ? 'destructive' : 'secondary'} className="text-xs">
+                           {tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}
+                         </Badge>
+                       </td>
+                       <td className="p-2">{getStatusBadge(tracker.status)}</td>
+                     </tr>
+                   ))}
+                </tbody>
+               </table>
+             </div>
+             
+             {/* Show pre-consent trackers explicitly if they exist */}
+             {data._internal?.beacons?.filter(b => b.pre_consent).length > 0 && (
+               <div className="mt-4 p-4 bg-destructive/10 border border-destructive/30 rounded-lg">
+                 <h4 className="font-semibold text-destructive mb-2">
+                   ⚠️ Pred-súhlasové trackery ({data._internal.beacons.filter(b => b.pre_consent).length})
+                 </h4>
+                 <div className="space-y-2">
+                   {data._internal.beacons.filter(b => b.pre_consent).map((beacon, index) => (
+                     <div key={index} className="text-xs font-mono bg-muted/50 p-2 rounded">
+                       <strong>{beacon.service}:</strong> {beacon.sample_url}
+                     </div>
+                   ))}
+                 </div>
+                 <p className="text-xs text-destructive mt-2">
+                   Tieto trackery sa spúšťajú automaticky pri načítaní stránky bez súhlasu používateľa.
+                 </p>
+               </div>
+             )}
+           </div>
 
           {/* 4. Cookies */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Cookie className="h-5 w-5" />
+          <div>
+            <h3 className="font-semibold mb-2">
               4. Cookies ({data.detailedAnalysis.cookies.total})
+              <span className="text-sm font-normal text-muted-foreground ml-2">
+                First-party: {data.detailedAnalysis.cookies.firstParty} | Third-party: {data.detailedAnalysis.cookies.thirdParty}
+              </span>
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Názov</th>
+                    <th className="text-left p-2">Doména</th>
+                    <th className="text-left p-2">1P/3P</th>
+                    <th className="text-left p-2">Typ</th>
+                    <th className="text-left p-2">Expirácia</th>
+                    <th className="text-left p-2">Stav</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.detailedAnalysis.cookies.details.map((cookie, index) => (
+                    <tr key={index} className="border-b">
+                      <td className="p-2 font-mono text-xs">{cookie.name}</td>
+                      <td className="p-2 text-xs text-muted-foreground">{cookie.domain}</td>
+                      <td className="p-2">{cookie.type === 'first-party' ? '1P' : '3P'}</td>
+                      <td className="p-2">{cookie.category}</td>
+                      <td className="p-2">{cookie.expiration}</td>
+                      <td className="p-2">{getStatusBadge(cookie.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="flex items-center gap-2">
-                    <Cookie className="h-4 w-4 text-primary" />
-                    <span className="text-sm font-medium">Celkovo</span>
-                  </div>
-                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.total}</div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="flex items-center gap-2">
-                    <Cookie className="h-4 w-4 text-green-600" />
-                    <span className="text-sm font-medium">First-party</span>
-                  </div>
-                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.firstParty}</div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="flex items-center gap-2">
-                    <Cookie className="h-4 w-4 text-orange-600" />
-                    <span className="text-sm font-medium">Third-party</span>
-                  </div>
-                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.thirdParty}</div>
-                </CardContent>
-              </Card>
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left p-2">Názov</th>
-                        <th className="text-left p-2">Doména</th>
-                        <th className="text-left p-2">Typ</th>
-                        <th className="text-left p-2">Kategória</th>
-                        <th className="text-left p-2">Expirácia</th>
-                        <th className="text-left p-2">Stav</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.detailedAnalysis.cookies.details.map((cookie, index) => (
-                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                          <td className="p-2 font-mono text-xs">{cookie.name}</td>
-                          <td className="p-2 font-mono text-xs">{cookie.domain}</td>
-                          <td className="p-2">
-                            <Badge className={`text-xs ${cookie.type === 'first-party' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-orange-100 text-orange-800 border border-orange-200'}`}>
-                              {cookie.type === 'first-party' ? '1P' : '3P'}
-                            </Badge>
-                          </td>
-                          <td className="p-2">{cookie.category}</td>
-                          <td className="p-2 text-xs">{cookie.expiration}</td>
-                          <td className="p-2">
-                             <Badge className={`text-white text-xs ${getStatusBgColor(cookie.status)}`}>
-                               {cookie.status === 'error' ? 'PROBLÉM' : cookie.status.toUpperCase()}
-                             </Badge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
           </div>
 
-          {/* 5. Storage */}
-          {data.detailedAnalysis.storage && data.detailedAnalysis.storage.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-lg font-semibold">
-                <Database className="h-5 w-5" />
-                5. LocalStorage/SessionStorage
+          {/* 5. LocalStorage/SessionStorage */}
+          {data.detailedAnalysis.storage.length > 0 && (
+            <div>
+              <h3 className="font-semibold mb-2">5. LocalStorage/SessionStorage</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left p-2">Kľúč</th>
+                      <th className="text-left p-2">Vzor hodnôt</th>
+                      <th className="text-left p-2">Zdroj</th>
+                      <th className="text-left p-2">Vznik pred súhlasom</th>
+                      <th className="text-left p-2">Poznámka</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.detailedAnalysis.storage.map((storage, index) => (
+                      <tr key={index} className="border-b">
+                        <td className="p-2 font-mono text-xs">{storage.key}</td>
+                        <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
+                        <td className="p-2">{storage.source}</td>
+                        <td className="p-2">
+                          <Badge variant={storage.createdPreConsent ? 'destructive' : 'secondary'} className="text-xs">
+                            {storage.createdPreConsent ? 'ÁNO' : 'NIE'}
+                          </Badge>
+                        </td>
+                        <td className="p-2">{storage.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b">
-                          <th className="text-left p-2">Kľúč</th>
-                          <th className="text-left p-2">Typ</th>
-                          <th className="text-left p-2">Vzor hodnôt</th>
-                          <th className="text-left p-2">Zdroj</th>
-                          <th className="text-left p-2">Vznik pred súhlasom</th>
-                          <th className="text-left p-2">Poznámka</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.detailedAnalysis.storage.map((storage, index) => (
-                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                            <td className="p-2 font-mono text-xs">{storage.key}</td>
-                            <td className="p-2">{storage.type}</td>
-                            <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
-                            <td className="p-2">{storage.source}</td>
-                            <td className="p-2">
-                              <Badge className={`text-white text-xs ${storage.createdPreConsent ? 'bg-red-600' : 'bg-green-600'}`}>
-                                {storage.createdPreConsent ? 'ÁNO' : 'NIE'}
-                              </Badge>
-                            </td>
-                            <td className="p-2">{storage.note}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </CardContent>
-              </Card>
             </div>
           )}
 
-          {/* 6. Consent Management */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Shield className="h-5 w-5" />
-              6. Consent Management a časovanie
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span>Consent nástroj:</span>
-                    <Badge className={`text-white ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'bg-green-600' : 'bg-red-600'}`}>
-                      {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
-                    </Badge>
-                  </div>
-                  {data.detailedAnalysis.consentManagement.consentCookieName && (
-                    <div className="flex items-center justify-between">
-                      <span>Detegovaný consent cookie:</span>
-                      <span className="font-mono text-xs bg-muted rounded px-2 py-1">
-                        {data.detailedAnalysis.consentManagement.consentCookieName}
-                      </span>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between">
-                    <span>Trackery pred súhlasom:</span>
-                    <Badge className={`text-white ${data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'bg-red-600' : 'bg-green-600'}`}>
-                      {data.detailedAnalysis.consentManagement.trackersBeforeConsent}
-                    </Badge>
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-2">
-                    <strong>Dôkazy:</strong> {data.detailedAnalysis.consentManagement.evidence}
-                  </div>
+          {/* 6. CMP a časovanie */}
+          <div>
+            <h3 className="font-semibold mb-2">6. Consent Management a časovanie</h3>
+            <div className="p-4 bg-muted/50 rounded-lg space-y-2">
+              <div className="flex items-center justify-between">
+                <span>Consent nástroj:</span>
+                <Badge variant={data.detailedAnalysis.consentManagement.hasConsentTool ? 'secondary' : 'destructive'}>
+                  {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
+                </Badge>
+              </div>
+              {data.detailedAnalysis.consentManagement.consentCookieName && (
+                <div className="flex items-center justify-between">
+                  <span>Detegovaný consent cookie:</span>
+                  <span className="font-mono text-xs bg-muted rounded px-2 py-1">
+                    {data.detailedAnalysis.consentManagement.consentCookieName}
+                  </span>
                 </div>
-              </CardContent>
-            </Card>
+              )}
+              {data.detailedAnalysis.consentManagement.consentCookieValue && (
+                <div className="text-xs text-muted-foreground">
+                  <strong>Raw value:</strong> {data.detailedAnalysis.consentManagement.consentCookieValue}
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span>Trackery pred súhlasom:</span>
+                <Badge variant={data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'destructive' : 'secondary'}>
+                  {data.detailedAnalysis.consentManagement.trackersBeforeConsent}
+                </Badge>
+              </div>
+              <div className="text-xs text-muted-foreground mt-2">
+                <strong>Dôkazy:</strong> {data.detailedAnalysis.consentManagement.evidence}
+              </div>
+            </div>
           </div>
 
           {/* 7. Dáta odosielané tretím stranám */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Send className="h-5 w-5" />
-              7. Dáta odosielané tretím stranám
-            </div>
-            
-            {data.detailedAnalysis.dataTransfers && data.detailedAnalysis.dataTransfers.length > 0 ? (
-              <Card>
-                <CardContent className="pt-4">
+          <div>
+            <h3 className="font-semibold mb-2">7. Dáta odosielané tretím stranám</h3>
+            {(() => {
+              // Group parameters by service
+              const servicesData = new Map();
+              const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo', 'ev', 'en'];
+              
+              if (data._internal?.beacons) {
+                data._internal.beacons.forEach(beacon => {
+                  if (!servicesData.has(beacon.service)) {
+                    servicesData.set(beacon.service, { params: [], hasPreConsent: false });
+                  }
+                  
+                  if (beacon.pre_consent) {
+                    servicesData.get(beacon.service).hasPreConsent = true;
+                  }
+                  
+                  try {
+                    const url = new URL(beacon.sample_url);
+                    url.searchParams.forEach((value, key) => {
+                      if (piiKeywords.some(k => key.toLowerCase().includes(k))) {
+                        const serviceData = servicesData.get(beacon.service);
+                        const existingParam = serviceData.params.find(p => p.parameter === key);
+                        if (!existingParam) {
+                          serviceData.params.push({
+                            parameter: key,
+                            sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
+                            isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
+                            preConsent: beacon.pre_consent
+                          });
+                        }
+                      }
+                    });
+                  } catch (e) {
+                    // Skip invalid URLs
+                  }
+                });
+              }
+              
+              return servicesData.size > 0 ? (
+                <div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
@@ -617,181 +657,252 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                         </tr>
                       </thead>
                       <tbody>
-                        {data.detailedAnalysis.dataTransfers.map((transfer, index) => (
-                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                            <td className="p-2 font-medium">{transfer.service}</td>
-                            <td className="p-2 font-mono text-xs">{transfer.parameter}</td>
-                            <td className="p-2 font-mono text-xs">{transfer.sampleValue}</td>
+                        {Array.from(servicesData.entries()).flatMap(([serviceName, serviceData]) => {
+                          if (serviceData.params.length === 0) {
+                            return (
+                              <tr key={serviceName}>
+                                <td className="p-2">{serviceName}</td>
+                                <td className="p-2 text-muted-foreground">—</td>
+                                <td className="p-2 text-muted-foreground">žiadne identifikátory nezachytené</td>
+                                <td className="p-2 text-muted-foreground">—</td>
+                                <td className="p-2">
+                                  <Badge variant={serviceData.hasPreConsent ? 'destructive' : 'secondary'} className="text-xs">
+                                    {serviceData.hasPreConsent ? 'Áno' : 'Nie'}
+                                  </Badge>
+                                </td>
+                              </tr>
+                            );
+                          } else {
+                            return serviceData.params.map((param, idx) => (
+                              <tr key={`${serviceName}-${idx}`}>
+                                <td className="p-2">{serviceName}</td>
+                                <td className="p-2 font-mono text-xs">{param.parameter}</td>
+                                <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{param.sampleValue}</td>
+                                <td className="p-2">
+                                  <Badge variant={param.isPII ? 'destructive' : 'secondary'} className="text-xs">
+                                    {param.isPII ? 'Áno' : 'Nie'}
+                                  </Badge>
+                                </td>
+                                <td className="p-2">
+                                  <Badge variant={param.preConsent ? 'destructive' : 'secondary'} className="text-xs">
+                                    {param.preConsent ? 'Áno' : 'Nie'}
+                                  </Badge>
+                                </td>
+                              </tr>
+                            ));
+                          }
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-3">
+                    Zobrazené sú zachytené vzorové hodnoty z požiadaviek/beaconov odoslaných tretím stranám.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-muted-foreground">Neboli nájdené relevantné parametre odosielané tretím stranám.</p>
+              );
+            })()}
+          </div>
+
+          {/* 8. UX analýza cookie lišty */}
+          <div>
+            <h3 className="font-semibold mb-2">8. UX analýza cookie lišty</h3>
+            {(() => {
+              const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
+              const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0;
+              
+              // Determine UX characteristics
+              const isPresent = hasCMP;
+              const defaultBehavior = preConsentTrackers ? 'Opt-in (nevyžaduje súhlas)' : 'Opt-out (blokuje trackery)';
+              const balancedButtons = preConsentTrackers ? 'Nie (nevyvážená)' : 'Áno (pravdepodobné)';
+              const detailedSettings = data._internal?.cmp?.present ? 'Áno (detekovaný CMP nástroj)' : 'Neznáme';
+              
+              // Overall assessment
+              let assessment = 'Chýba';
+              if (hasCMP) {
+                assessment = preConsentTrackers ? 'Nevyvážená' : 'Transparentná';
+              }
+              
+              return (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="p-3 bg-muted/50 rounded-lg">
+                      <h4 className="font-semibold text-sm mb-1">Prítomnosť cookie lišty</h4>
+                      <Badge variant={isPresent ? 'secondary' : 'destructive'}>
+                        {isPresent ? 'Áno' : 'Nie'}
+                      </Badge>
+                    </div>
+                    <div className="p-3 bg-muted/50 rounded-lg">
+                      <h4 className="font-semibold text-sm mb-1">Predvolené správanie</h4>
+                      <span className="text-sm">{defaultBehavior}</span>
+                    </div>
+                    <div className="p-3 bg-muted/50 rounded-lg">
+                      <h4 className="font-semibold text-sm mb-1">Rovnocenné tlačidlá</h4>
+                      <span className="text-sm">{balancedButtons}</span>
+                    </div>
+                    <div className="p-3 bg-muted/50 rounded-lg">
+                      <h4 className="font-semibold text-sm mb-1">Detailné nastavenia</h4>
+                      <span className="text-sm">{detailedSettings}</span>
+                    </div>
+                  </div>
+                  <div className="p-4 bg-gradient-accent rounded-lg">
+                    <h4 className="font-semibold mb-2">Celkové hodnotenie UX</h4>
+                    <Badge variant={assessment === 'Transparentná' ? 'secondary' : 
+                                   assessment === 'Nevyvážená' ? 'outline' : 'destructive'} 
+                           className="mb-2">
+                      {assessment}
+                    </Badge>
+                    <p className="text-sm text-muted-foreground">
+                      {assessment === 'Chýba' && 'Cookie lišta nie je implementovaná.'}
+                      {assessment === 'Nevyvážená' && 'CMP nástroj je prítomný, ale neblokuje trackery pred súhlasom.'}
+                      {assessment === 'Transparentná' && 'CMP nástroj správne blokuje trackery až po súhlase používateľa.'}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* 9. Retenčné doby cookies */}
+          <div>
+            <h3 className="font-semibold mb-2">9. Retenčné doby cookies</h3>
+            {(() => {
+              const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
+                const internalCookie = data._internal?.cookies?.find(ic => 
+                  ic.name === cookie.name && ic.domain === cookie.domain
+                );
+                if (internalCookie?.expiry_days && internalCookie.expiry_days > 365) {
+                  return cookie.category.toLowerCase().includes('marketing') || cookie.category.toLowerCase().includes('analytics');
+                }
+                return false;
+              });
+              
+              return longRetentionCookies.length > 0 ? (
+                <div className="p-4 bg-warning/10 border border-warning/30 rounded-lg">
+                  <h4 className="font-semibold text-warning mb-2">
+                    ⚠️ Poznámka k retenčným dobám
+                  </h4>
+                  <p className="text-sm text-warning">
+                    {longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok, 
+                    čo môže byť nad rámec primeranosti podľa GDPR. Odporúčame skrátiť doby uchovávania na maximálne 12 mesiacov.
+                  </p>
+                  <div className="mt-2 space-y-1">
+                    {longRetentionCookies.map((cookie, index) => {
+                      const internalCookie = data._internal?.cookies?.find(ic => 
+                        ic.name === cookie.name && ic.domain === cookie.domain
+                      );
+                      return (
+                        <div key={index} className="text-xs font-mono bg-warning/20 p-2 rounded">
+                          {cookie.name} - {internalCookie?.expiry_days} dní ({cookie.category})
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 bg-secondary/10 border border-secondary/30 rounded-lg">
+                  <p className="text-sm text-secondary">
+                    ✓ Retenčné doby cookies sú v súlade s odporúčaniami GDPR (pod 1 rok pre marketing/analytické cookies).
+                  </p>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* 10. Právne zhrnutie + Legislatívne odkazy */}
+          <div>
+            <h3 className="font-semibold mb-2">10. Právne zhrnutie</h3>
+            <div className="p-4 bg-gradient-accent rounded-lg">
+              <p className="text-sm mb-4">{data.detailedAnalysis.legalSummary}</p>
+              
+              <h4 className="font-semibold mb-2">Relevantné právne ustanovenia:</h4>
+              <ul className="space-y-1 text-sm">
+                <li>• <strong>Článok 5(3) ePrivacy Directive:</strong> Ukladanie nenutných cookies bez súhlasu používateľa</li>
+                <li>• <strong>Článok 6 GDPR:</strong> Spracúvanie IP adries, user_id a online identifikátorov</li>
+                <li>• <strong>Články 12-14 GDPR:</strong> Povinnosť informovať používateľov a zabezpečiť transparentnosť</li>
+                <li>• <strong>Článok 5(1)(e) GDPR:</strong> Princíp minimalizácie údajov a primerané doby uchovávania</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* 11. Rizikový scoring */}
+          <div>
+            <h3 className="font-semibold mb-2">11. Rizikový scoring</h3>
+            {(() => {
+              // Calculate risk scores
+              const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
+                                data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
+              const cmpScore = !data.detailedAnalysis.consentManagement.hasConsentTool ? 5 :
+                              data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 1;
+              const cookiesScore = data.detailedAnalysis.cookies.details.some(c => 
+                c.category.toLowerCase().includes('marketing') || c.category.toLowerCase().includes('analytics')
+              ) && data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 2;
+              const storageScore = data._internal?.storage?.some(s => s.contains_personal_data && s.created_pre_consent) ? 5 : 1;
+              const preConsentBeacons = data._internal?.beacons?.filter(b => b.pre_consent)?.length || 0;
+              const trackersScore = preConsentBeacons === 0 ? 0 : preConsentBeacons <= 3 ? 3 : preConsentBeacons <= 7 ? 4 : 5;
+              const uxScore = !data.detailedAnalysis.consentManagement.hasConsentTool ? 5 :
+                             data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 1;
+              
+              const totalScore = (httpsScore + cmpScore + cookiesScore + storageScore + trackersScore + uxScore) / 6;
+              const overallRisk = totalScore <= 1.5 ? 'Nízke' : totalScore <= 3 ? 'Stredné' : 'Vysoké';
+              
+              const riskAreas = [
+                { area: 'HTTPS', score: httpsScore, note: httpsScore <= 1 ? 'Správne implementované' : 'Problémy so zabezpečením' },
+                { area: 'CMP', score: cmpScore, note: cmpScore === 5 ? 'Chýba nástroj' : cmpScore === 4 ? 'Neblokuje trackery' : 'Správne funguje' },
+                { area: 'Cookies', score: cookiesScore, note: cookiesScore >= 4 ? 'Marketing cookies pred súhlasom' : 'Akceptovateľné' },
+                { area: 'Storage', score: storageScore, note: storageScore === 5 ? 'Osobné údaje pred súhlasom' : 'V poriadku' },
+                { area: 'Trackery', score: trackersScore, note: preConsentBeacons + ' pred-súhlasových trackerov' },
+                { area: 'UX lišta', score: uxScore, note: uxScore === 5 ? 'Chýba' : uxScore === 4 ? 'Nevyvážená' : 'Transparentná' }
+              ];
+              
+              return (
+                <div className="space-y-4">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-2">Oblasť</th>
+                          <th className="text-left p-2">Skóre (0-5)</th>
+                          <th className="text-left p-2">Poznámka</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {riskAreas.map((area, index) => (
+                          <tr key={index} className="border-b">
+                            <td className="p-2 font-semibold">{area.area}</td>
                             <td className="p-2">
-                              <Badge className={`text-white text-xs ${transfer.containsPersonalData ? 'bg-red-500' : 'bg-green-600'}`}>
-                                {transfer.containsPersonalData ? 'ÁNO' : 'NIE'}
+                              <Badge variant={area.score <= 1 ? 'secondary' : area.score <= 3 ? 'outline' : 'destructive'}>
+                                {area.score}/5
                               </Badge>
                             </td>
-                            <td className="p-2">
-                              <Badge className={`text-white text-xs ${transfer.preConsent ? 'bg-red-500' : 'bg-green-600'}`}>
-                                {transfer.preConsent ? 'ÁNO' : 'NIE'}
-                              </Badge>
-                            </td>
+                            <td className="p-2 text-xs">{area.note}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                  
-                  {(() => {
-                    const preConsentTransfers = data.detailedAnalysis.dataTransfers.filter(t => t.preConsent);
-                    return preConsentTransfers.length > 0 && (
-                      <div className="mt-4 border border-red-600 bg-red-50 text-red-800 rounded p-4 flex gap-2 items-start">
-                        <XCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
-                        <div>
-                          <div className="font-medium mb-1">Kritická chyba: Dáta sa odosielajú pred súhlasom!</div>
-                          <div className="text-sm">
-                            {preConsentTransfers.length} service(s) odosielalo dáta pred udelením súhlasu, čo porušuje GDPR/ePrivacy.
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </CardContent>
-              </Card>
-            ) : (
-              <Card>
-                <CardContent className="pt-4">
-                  <p className="text-sm text-muted-foreground">—</p>
-                  <div className="mt-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5 flex-shrink-0" />
-                      <div className="text-sm text-yellow-800">
-                        <strong>Poznámka:</strong> Neboli detegované žiadne parametre v request URL alebo JSON postData. Môže ísť o POST requesty s dátami v tele alebo o chybu v zbere dát.
-                      </div>
+                  <div className="p-4 bg-gradient-accent rounded-lg">
+                    <h4 className="font-semibold mb-2">Celkové riziko</h4>
+                    <div className="flex items-center gap-2">
+                      <Badge variant={overallRisk === 'Nízke' ? 'secondary' : overallRisk === 'Stredné' ? 'outline' : 'destructive'} 
+                             className="text-lg px-3 py-1">
+                        {overallRisk.toUpperCase()}
+                      </Badge>
+                      <span className="text-sm text-muted-foreground">
+                        (Priemerné skóre: {totalScore.toFixed(1)}/5)
+                      </span>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-            )}
-          </div>
-
-          {/* 8. UX Analysis */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Monitor className="h-5 w-5" />
-              8. UX analýza cookie lišty
-            </div>
-            
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">
-                  UX analýza cookie lišty sa vykonáva iba ako technická kontrola súladu s GDPR/ePrivacy požiadavkami na základe detegovaných cookie a consent management riešení.
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* 9. Retention Periods */}
-          {(() => {
-            // Helper function to parse retention days
-            const parseDays = (expiration: string): number | null => {
-              if (!expiration) return null;
-              const lowerExp = expiration.toLowerCase();
-              if (lowerExp.includes('session') || lowerExp.includes('relacia')) return null;
-              
-              const match = expiration.match(/(\d+)\s*(dní|dni|day|days)/i);
-              if (match) return parseInt(match[1]);
-              
-              const yearMatch = expiration.match(/(\d+)\s*(rok|year|rokov|years)/i);
-              if (yearMatch) return parseInt(yearMatch[1]) * 365;
-              
-              const monthMatch = expiration.match(/(\d+)\s*(mesiac|month|mesiace|months)/i);
-              if (monthMatch) return parseInt(monthMatch[1]) * 30;
-              
-              return null;
-            };
-
-            const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
-              const isMarketingOrAnalytical = cookie.category === 'marketingové' || cookie.category === 'analytické';
-              const days = parseDays(cookie.expiration);
-              return isMarketingOrAnalytical && days !== null && days > 365;
-            });
-
-            return (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-lg font-semibold">
-                  <AlertTriangle className="h-5 w-5" />
-                  9. Retenčné doby cookies
                 </div>
-                
-                <Card>
-                  <CardContent className="pt-4">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b">
-                            <th className="text-left p-2">Názov</th>
-                            <th className="text-left p-2">Doména</th>
-                            <th className="text-left p-2">Kategória</th>
-                            <th className="text-left p-2">Retenčná doba</th>
-                            <th className="text-left p-2">Stav</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {data.detailedAnalysis.cookies.details.map((cookie, index) => {
-                            const days = parseDays(cookie.expiration);
-                            const isLongRetention = (cookie.category === 'marketingové' || cookie.category === 'analytické') && days !== null && days > 365;
-                            
-                            return (
-                              <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                                <td className="p-2 font-mono text-xs">{cookie.name}</td>
-                                <td className="p-2 font-mono text-xs">{cookie.domain}</td>
-                                <td className="p-2">{cookie.category}</td>
-                                <td className="p-2 text-xs">{cookie.expiration}</td>
-                                <td className="p-2">
-                                  <Badge className={`text-white text-xs ${isLongRetention ? 'bg-orange-500' : 'bg-green-600'}`}>
-                                    {isLongRetention ? 'DLHÁ RETENCIA' : 'OK'}
-                                  </Badge>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                    
-                    {longRetentionCookies.length > 0 && (
-                      <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-lg">
-                        <div className="flex items-start gap-2">
-                          <AlertTriangle className="h-4 w-4 text-orange-600 mt-0.5 flex-shrink-0" />
-                          <div className="text-sm text-orange-800">
-                            <strong>Poznámka:</strong> {longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok. Odporúčame skrátiť na max. 12 mesiacov podľa GDPR.
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-            );
-          })()}
-
-          {/* 10. Legal Summary */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Scale className="h-5 w-5" />
-              10. Právne zhrnutie
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">
-                  {data.detailedAnalysis.legalSummary}
-                </p>
-              </CardContent>
-            </Card>
+              );
+            })()}
           </div>
-
         </CardContent>
       </Card>
 
       {/* C) OK vs. Rizikové */}
-      <Card>
+      <Card className="shadow-medium">
         <CardHeader>
           <CardTitle>C) OK vs. Rizikové</CardTitle>
         </CardHeader>
@@ -807,19 +918,10 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               </thead>
               <tbody>
                 {data.riskTable.map((risk, index) => (
-                  <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                    <td className="p-2 font-medium">{risk.area}</td>
-                    <td className="p-2">
-                      <div className="flex items-center gap-2">
-                        <div className={getStatusColor(risk.status)}>
-                          {getStatusIcon(risk.status)}
-                        </div>
-                        <Badge className={`text-white ${getStatusBgColor(risk.status)}`}>
-                          {risk.status.toUpperCase()}
-                        </Badge>
-                      </div>
-                    </td>
-                    <td className="p-2 text-muted-foreground">{risk.comment}</td>
+                  <tr key={index} className="border-b">
+                    <td className="p-2">{risk.area}</td>
+                    <td className="p-2">{getStatusBadge(risk.status)}</td>
+                    <td className="p-2">{risk.comment}</td>
                   </tr>
                 ))}
               </tbody>
@@ -828,24 +930,38 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         </CardContent>
       </Card>
 
-      {/* D) Recommendations */}
-      <Card>
+      {/* D) Odporúčania */}
+      <Card className="shadow-medium">
         <CardHeader>
-          <CardTitle>D) Odporúčania</CardTitle>
+          <CardTitle>D) Checklist odporúčaní</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
             {data.recommendations.map((rec, index) => (
-              <Card key={index} className="border-l-4 border-l-primary">
-                <CardContent className="pt-4">
-                  <h4 className="font-semibold mb-2">{rec.title}</h4>
-                  <p className="text-sm text-muted-foreground">{rec.description}</p>
-                </CardContent>
-              </Card>
+              <div key={index} className="p-4 bg-muted/30 rounded-lg">
+                <h4 className="font-semibold mb-2">{rec.title}</h4>
+                <p className="text-sm text-muted-foreground">{rec.description}</p>
+              </div>
             ))}
           </div>
         </CardContent>
       </Card>
+
+      {/* E) Akcie */}
+      <div className="flex flex-wrap gap-4 justify-center pt-6">
+        <Button onClick={onGenerateEmail} className="flex items-center gap-2">
+          <Mail className="h-4 w-4" />
+          E) Vygenerovať email pre klienta
+        </Button>
+        <Button onClick={handleDownloadPDF} variant="outline" className="flex items-center gap-2">
+          <Download className="h-4 w-4" />
+          Stiahnuť PDF správu
+        </Button>
+        <Button onClick={handleDownloadJSON} variant="outline" className="flex items-center gap-2">
+          <Download className="h-4 w-4" />
+          Stiahnuť JSON export
+        </Button>
+      </div>
     </div>
   );
 };

@@ -1,15 +1,15 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
+import { getDomainProfile } from './domainProfiles';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
 }
 
-// Enhanced service mappings including CDN and subdomains
+// Known service mappings for deterministic detection
 const SERVICE_PATTERNS = {
   'facebook.com': 'Facebook Pixel',
   'connect.facebook.net': 'Facebook SDK',
   'static.xx.fbcdn.net': 'Facebook CDN',
-  'www.facebook.com': 'Facebook',
   'google-analytics.com': 'Google Analytics',
   'region1.google-analytics.com': 'Google Analytics 4',
   'googletagmanager.com': 'Google Tag Manager',
@@ -21,7 +21,6 @@ const SERVICE_PATTERNS = {
   'px.ads.linkedin.com': 'LinkedIn Ads',
   'snap.licdn.com': 'LinkedIn Insights',
   'platform.linkedin.com': 'LinkedIn Platform',
-  'static.licdn.com': 'LinkedIn CDN',
   'pinterest.com': 'Pinterest Tag',
   'ct.pinterest.com': 'Pinterest Conversion',
   's.pinimg.com': 'Pinterest CDN',
@@ -36,44 +35,32 @@ const SERVICE_PATTERNS = {
   'l.getsitecontrol.com': 'GetSiteControl Loader',
   's2.getsitecontrol.com': 'GetSiteControl Static',
   'collector.snowplow.io': 'Snowplow',
-  'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow CloudFront',
+  'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow',
   'etarget.sk': 'eTarget',
   'sk.search.etargetnet.com': 'eTarget Search',
   'matomo.org': 'Matomo',
   'gstatic.com': 'Google Static',
   'recaptcha.net': 'reCAPTCHA',
-  'google.com': 'reCAPTCHA',
-  'cookiebot.com': 'Cookiebot',
-  'consent.cookiebot.com': 'Cookiebot CMP',
-  'cookiescript.com': 'CookieScript',
-  'cdn.cookielaw.org': 'OneTrust CMP',
-  'optanon.blob.core.windows.net': 'OneTrust CDN',
-  'assets.website-files.com': 'Webflow CDN',
-  'fonts.googleapis.com': 'Google Fonts',
-  'fonts.gstatic.com': 'Google Fonts CDN'
+  'google.com': 'reCAPTCHA'
 };
 
-// Enhanced beacon patterns with more comprehensive tracking detection
+// Pre-consent beacon patterns (critical for GDPR compliance)
 const PRE_CONSENT_PATTERNS = [
-  { pattern: /facebook\.com\/tr/i, service: 'Facebook Pixel' },
-  { pattern: /connect\.facebook\.net.*\/fbevents\.js/i, service: 'Facebook SDK' },
-  { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect/i, service: 'Google Ads' },
-  { pattern: /region1\.google-analytics\.com\/g\/collect/i, service: 'Google Analytics 4' },
-  { pattern: /google-analytics\.com.*collect/i, service: 'Google Analytics' },
-  { pattern: /googletagmanager\.com.*gtm\.js/i, service: 'Google Tag Manager' },
-  { pattern: /ct\.pinterest\.com\/v3/i, service: 'Pinterest Conversion' },
-  { pattern: /ct\.pinterest\.com\/user/i, service: 'Pinterest User' },
-  { pattern: /s\.pinimg\.com.*pintrk/i, service: 'Pinterest Tag' },
-  { pattern: /t\.leady\.com\/L/i, service: 'Leady' },
-  { pattern: /events\.getsitectrl\.com\/api\/v1\/events/i, service: 'GetSiteControl' },
-  { pattern: /collector\.snowplow\.io.*\/i\?/i, service: 'Snowplow' },
-  { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?/i, service: 'Snowplow CloudFront' },
-  { pattern: /clarity\.ms.*collect/i, service: 'Microsoft Clarity' },
-  { pattern: /analytics\.tiktok\.com/i, service: 'TikTok Pixel' },
-  { pattern: /px\.ads\.linkedin\.com.*collect/i, service: 'LinkedIn Ads' },
-  { pattern: /snap\.licdn\.com.*li_fat_id/i, service: 'LinkedIn Insights' },
-  { pattern: /analytics\.twitter\.com/i, service: 'Twitter Analytics' },
-  { pattern: /platform\.twitter\.com.*widgets\.js/i, service: 'Twitter Widget' }
+  { pattern: /facebook\.com\/tr.*ev=PageView/, service: 'Facebook Pixel' },
+  { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect.*en=page_view/, service: 'Google Ads' },
+  { pattern: /region1\.google-analytics\.com\/g\/collect/, service: 'Google Analytics' },
+  { pattern: /google-analytics\.com.*collect/, service: 'Google Analytics' },
+  { pattern: /ct\.pinterest\.com\/v3.*event=init/, service: 'Pinterest' },
+  { pattern: /ct\.pinterest\.com\/user/, service: 'Pinterest' },
+  { pattern: /t\.leady\.com\/L\?/, service: 'Leady' },
+  { pattern: /events\.getsitectrl\.com\/api\/v1\/events/, service: 'GetSiteControl' },
+  { pattern: /collector\.snowplow\.io.*\/i\?.*e=pv/, service: 'Snowplow' },
+  { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?.*e=pv/, service: 'Snowplow' },
+  { pattern: /clarity\.ms.*collect/, service: 'Microsoft Clarity' },
+  { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' },
+  { pattern: /px\.ads\.linkedin\.com.*collect/, service: 'LinkedIn Ads' },
+  { pattern: /snap\.licdn\.com.*li_fat_id/, service: 'LinkedIn Insights' },
+  { pattern: /analytics\.twitter\.com.*track/, service: 'Twitter Analytics' }
 ];
 
 // Cookie classification patterns
@@ -107,23 +94,7 @@ export async function simulateAudit(
   input: string, 
   isHtml: boolean = false, 
   onProgress?: ProgressCallback,
-  minDurationMs: number = 3000,
-  renderData?: {
-    preConsentData?: {
-      html: string;
-      cookies: any[];
-      requests: any[];
-      responses: any[];
-      storage: any;
-    };
-    postConsentData?: {
-      html: string;
-      cookies: any[];
-      requests: any[];
-      responses: any[];
-      storage: any;
-    };
-  }
+  minDurationMs: number = 3000
 ): Promise<AuditData> {
   const startTime = Date.now();
   const totalSteps = 8;
@@ -141,13 +112,13 @@ export async function simulateAudit(
   await updateProgress(0);
   
   // Generate internal JSON structure with progress updates
-  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress, renderData);
+  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
   
   // Final step: Generate results
   await updateProgress(7);
   
   // Convert internal JSON to display format
-  const auditData = convertToDisplayFormat(internalJson, input, renderData);
+  const auditData = convertToDisplayFormat(internalJson, input);
   
   // Ensure minimum duration for credibility
   const elapsed = Date.now() - startTime;
@@ -158,61 +129,10 @@ export async function simulateAudit(
   return auditData;
 }
 
-function generateRiskScore(internalJson: InternalAuditJson): number {
-  let score = 0;
-  
-  // HTTPS issues: +20
-  if (!internalJson.https.supports) {
-    score += 20;
-  }
-  
-  // Pre-consent beacons: +25 each, max +50
-  const preConsentBeacons = internalJson.beacons.filter(b => b.pre_consent).length;
-  score += Math.min(preConsentBeacons * 25, 50);
-  
-  // Marketing cookies: +20 if present
-  const marketingCookies = internalJson.cookies.filter(c => c.type === 'marketing').length;
-  if (marketingCookies > 0) {
-    score += 20;
-  }
-  
-  // Too many third parties (>5): +10
-  if (internalJson.third_parties.length > 5) {
-    score += 10;
-  }
-  
-  // Storage with personal data created pre-consent: +20
-  const personalStoragePreConsent = internalJson.storage.filter(s => 
-    s.contains_personal_data && s.created_pre_consent
-  ).length;
-  if (personalStoragePreConsent > 0) {
-    score += 20;
-  }
-  
-  // Ensure score is bounded between 0-100
-  return Math.min(Math.max(score, 0), 100);
-}
-
 async function generateInternalAuditJson(
   input: string, 
-  isHtml: boolean,
-  updateProgress?: (stepIndex: number) => Promise<void>,
-  renderData?: {
-    preConsentData?: {
-      html: string;
-      cookies: any[];
-      requests: any[];
-      responses: any[];
-      storage: any;
-    };
-    postConsentData?: {
-      html: string;
-      cookies: any[];
-      requests: any[];
-      responses: any[];
-      storage: any;
-    };
-  }
+  isHtml: boolean, 
+  updateProgress?: (stepIndex: number) => Promise<void>
 ): Promise<InternalAuditJson> {
   let htmlContent = input;
   let finalUrl = input;
@@ -222,7 +142,25 @@ async function generateInternalAuditJson(
     finalUrl = normalizeUrl(input);
     const domain = getDomain(finalUrl);
     
-    // Generate basic simulation HTML for the domain
+    // Check if we have a domain profile for realistic data
+    const domainProfile = getDomainProfile(domain);
+    if (domainProfile) {
+      // Use domain-specific profile for accurate simulation
+      await updateProgress?.(1);
+      await updateProgress?.(2);
+      await updateProgress?.(3);
+      await updateProgress?.(4);
+      await updateProgress?.(5);
+      await updateProgress?.(6);
+      
+      return {
+        final_url: finalUrl,
+        https: { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true },
+        ...domainProfile
+      } as InternalAuditJson;
+    }
+    
+    // Fallback to basic simulation
     htmlContent = generateSimulatedHtml(domain);
   } else {
     // Extract final URL from HTML if possible
@@ -240,67 +178,22 @@ async function generateInternalAuditJson(
   const https = { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true };
   
   await updateProgress?.(2); // Third parties
-  let thirdParties = extractThirdParties(htmlContent, finalUrl);
-  
-  // Enhanced third party extraction from render data
-  if (renderData?.postConsentData?.requests) {
-    const renderThirdParties = extractThirdPartiesFromRequests(renderData.postConsentData.requests, getDomain(finalUrl));
-    thirdParties = mergeThirdParties(thirdParties, renderThirdParties);
-  }
+  const thirdParties = extractThirdParties(htmlContent, finalUrl);
   
   await updateProgress?.(3); // Trackers
-  let beacons = extractBeacons(htmlContent);
-  
-  // Enhanced beacon extraction from render data
-  if (renderData?.postConsentData?.requests) {
-    const renderBeacons = extractBeaconsFromRequests(renderData.postConsentData.requests, renderData.preConsentData?.requests);
-    beacons = mergeBeacons(beacons, renderBeacons);
-  }
+  const beacons = extractBeacons(htmlContent);
   
   await updateProgress?.(4); // Cookies
-  let cookies = generateCookiesFromServices(thirdParties, beacons, !isHtml, getDomain(finalUrl));
-  
-  // Enhanced cookie processing from render data
-  if (renderData?.postConsentData?.cookies) {
-    const allCookies = mergePrePostCookies(
-      renderData.preConsentData?.cookies || [],
-      renderData.postConsentData.cookies,
-      getDomain(finalUrl)
-    );
-    
-    // Validate cookie counts and detect inconsistencies
-    const { validatedCookies, hasInconsistencies } = validateCookieData(allCookies);
-    cookies = validatedCookies;
-    
-    if (hasInconsistencies) {
-      // Mark as incomplete if cookie data is inconsistent
-      console.warn('Cookie data inconsistencies detected');
-    }
-  }
+  const cookies = generateCookiesFromServices(thirdParties, beacons, !isHtml);
   
   await updateProgress?.(5); // Storage
-  let storage = extractStorage(htmlContent);
-  
-  // Enhanced storage analysis from render data
-  if (renderData?.postConsentData?.storage) {
-    storage = extractStorageFromRenderData(
-      renderData.preConsentData?.storage || {},
-      renderData.postConsentData.storage
-    );
-  }
+  const storage = extractStorage(htmlContent);
   
   await updateProgress?.(6); // Consent
-  const cmp = analyzeCMP(htmlContent, beacons, cookies, renderData?.postConsentData?.cookies || []);
+  const cmp = analyzeCMP(htmlContent, beacons, cookies);
   
   // Determine verdict with validation safeguards
-  let { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
-  
-  // Add INCOMPLETE checks
-  const incompleteChecks = performIncompleteChecks(thirdParties, beacons, cookies, storage, [], renderData);
-  if (incompleteChecks.hasInconsistencies) {
-    verdict = 'INCOMPLETE';
-    reasons = [...reasons, ...incompleteChecks.reasons];
-  }
+  const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
 
   return {
     final_url: finalUrl,
@@ -440,34 +333,12 @@ function extractBeacons(html: string): Array<{ host: string; sample_url: string;
   return beacons;
 }
 
-function categorizeCookieFromName(cookieName: string): 'technical' | 'analytics' | 'marketing' {
-  const lowerName = cookieName.toLowerCase();
-  
-  // Marketing cookies
-  if (lowerName.includes('fbp') || lowerName.includes('fbc') || lowerName.includes('_gcl') || 
-      lowerName.includes('gclid') || lowerName.includes('_ga') || lowerName.includes('_gid') ||
-      lowerName.includes('_gat') || lowerName.includes('utm_') || lowerName.includes('_fbp') ||
-      lowerName.includes('_fbc') || lowerName.includes('gads') || lowerName.includes('doubleclick')) {
-    return 'marketing';
-  }
-  
-  // Analytics cookies
-  if (lowerName.includes('analytics') || lowerName.includes('_ga') || lowerName.includes('_gid') ||
-      lowerName.includes('_gat') || lowerName.includes('_gtm') || lowerName.includes('hotjar') ||
-      lowerName.includes('_hjid') || lowerName.includes('_hjSession')) {
-    return 'analytics';
-  }
-  
-  // Default to technical
-  return 'technical';
-}
-
-function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false, actualDomain?: string): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
   const cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
   
   // Helper function to map cookies to their domain source
   const getDomainForCookie = (cookieName: string, party: '1P' | '3P'): string => {
-    if (party === '1P') return actualDomain || 'unknown';
+    if (party === '1P') return 'futbaltour.sk';
     
     // Map 3P cookies to their domains
     const thirdPartyMappings: Record<string, string> = {
@@ -483,8 +354,8 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
     return thirdPartyMappings[cookieName] || 'unknown.com';
   };
   
-  // Only add default cookies if there's evidence and we have a valid domain
-  if (!isSimulation && actualDomain && actualDomain !== 'unknown') {
+  // Only add default cookies if there's evidence (not for basic simulations)
+  if (!isSimulation) {
     // Add basic technical cookies only if we detect PHP or other evidence
     cookies.push(
       { name: 'PHPSESSID', domain: getDomainForCookie('PHPSESSID', '1P'), party: '1P', type: 'technical', expiry_days: null }
@@ -495,18 +366,14 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   const services = new Set([...thirdParties.map(tp => tp.service), ...beacons.map(b => b.service)]);
   
   if (services.has('Facebook Pixel')) {
-    if (actualDomain && actualDomain !== 'unknown') {
-      cookies.push(
-        { name: '_fbp', domain: getDomainForCookie('_fbp', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
-        { name: '_fbc', domain: getDomainForCookie('_fbc', '1P'), party: '1P', type: 'marketing', expiry_days: 90 }
-      );
-    }
     cookies.push(
+      { name: '_fbp', domain: getDomainForCookie('_fbp', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: '_fbc', domain: getDomainForCookie('_fbc', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
       { name: 'fr', domain: getDomainForCookie('fr', '3P'), party: '3P', type: 'marketing', expiry_days: 90 }
     );
   }
   
-  if (services.has('Google Analytics') && actualDomain && actualDomain !== 'unknown') {
+  if (services.has('Google Analytics')) {
     cookies.push(
       { name: '_ga', domain: getDomainForCookie('_ga', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
       { name: '_gid', domain: getDomainForCookie('_gid', '1P'), party: '1P', type: 'analytics', expiry_days: 1 },
@@ -515,17 +382,13 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   }
   
   if (services.has('Google Ads')) {
-    if (actualDomain && actualDomain !== 'unknown') {
-      cookies.push(
-        { name: '_gcl_au', domain: getDomainForCookie('_gcl_au', '1P'), party: '1P', type: 'marketing', expiry_days: 90 }
-      );
-    }
     cookies.push(
+      { name: '_gcl_au', domain: getDomainForCookie('_gcl_au', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
       { name: 'IDE', domain: getDomainForCookie('IDE', '3P'), party: '3P', type: 'marketing', expiry_days: 390 }
     );
   }
   
-  if (services.has('Pinterest') && actualDomain && actualDomain !== 'unknown') {
+  if (services.has('Pinterest')) {
     cookies.push(
       { name: '_pin_unauth', domain: getDomainForCookie('_pin_unauth', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
@@ -538,14 +401,14 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
     );
   }
   
-  if (services.has('Leady') && actualDomain && actualDomain !== 'unknown') {
+  if (services.has('Leady')) {
     cookies.push(
       { name: 'leady_session_id', domain: getDomainForCookie('leady_session_id', '1P'), party: '1P', type: 'marketing', expiry_days: 30 },
       { name: 'leady_track_id', domain: getDomainForCookie('leady_track_id', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
   }
   
-  if (services.has('Snowplow') && actualDomain && actualDomain !== 'unknown') {
+  if (services.has('Snowplow')) {
     cookies.push(
       { name: '_sp_id.xxxx', domain: getDomainForCookie('_sp_id.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
       { name: '_sp_ses.xxxx', domain: getDomainForCookie('_sp_ses.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: null }
@@ -606,7 +469,7 @@ function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: 
   return storage;
 }
 
-function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [], renderCookies: any[] = []): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
+function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = []): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
   const cmpPatterns = [
     'CookieScriptConsent', 'OptanonConsent', 'CookieConsent', 'cookieyes-consent',
     'Cookiebot', 'OneTrust', 'CookieYes'
@@ -626,31 +489,18 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
     }
   }
   
-  // Enhanced CMP cookie detection in both parsed and render cookies
+  // Also check for CMP consent cookies in the cookie list
   if (!cmpPresent) {
-    const consentCookies = [
-      'CookieScriptConsent', 'cookiebot', 'OptanonConsent', 'euconsent-v2', 
-      'cookielawinfo-consent', 'CookieConsent', 'tarteaucitron', 'cookieyes-consent',
-      'CookieYes-consent', 'cc_cookie_accept', 'cookie_notice_accepted'
-    ];
-    
-    // Check in parsed cookies
-    const foundCookie = cookies.find(cookie => 
+    const consentCookies = ['CookieScriptConsent', 'cookiebot', 'OptanonConsent', 'euconsent-v2', 'cookielawinfo-consent', 'CookieConsent'];
+    const hasCMPCookie = cookies.some(cookie => 
       consentCookies.some(consentCookie => 
         cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
       )
     );
     
-    // Check in render cookies if not found in parsed
-    const foundRenderCookie = renderCookies.find(cookie => 
-      consentCookies.some(consentCookie => 
-        cookie.name && cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
-      )
-    );
-    
-    if (foundCookie || foundRenderCookie) {
+    if (hasCMPCookie) {
       cmpPresent = true;
-      cookieName = foundCookie?.name || foundRenderCookie?.name || 'CookieScriptConsent';
+      cookieName = 'CookieScriptConsent';
     }
   }
   
@@ -748,7 +598,7 @@ function determineVerdict(
   return { verdict: 'COMPLIANT', reasons: [] };
 }
 
-function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string, renderData?: any): AuditData {
+function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string): AuditData {
   const timestamp = new Date().toISOString();
   const finalUrl = internalJson.final_url;
   
@@ -766,7 +616,6 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
     verdict,
     overall: generateOverallSummary(internalJson),
     risks: generateRiskSummary(internalJson),
-    riskScore: generateRiskScore(internalJson),
     data_source: originalInput.startsWith('http') && !internalJson.third_parties.length ? 'Simulácia (obmedzené dáta)' : 'Analýza obsahu'
   };
 
@@ -819,11 +668,7 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
       trackersBeforeConsent: internalJson.beacons.filter(b => b.pre_consent).length,
       evidence: internalJson.cmp.pre_consent_fires ? 'Trackery sa spúšťajú pred súhlasom' : 'CMP správne blokuje'
     },
-    legalSummary: generateLegalSummary(internalJson),
-    dataTransfers: renderData ? extractDataTransfersFromRequests([
-      ...(renderData.preConsentData?.requests || renderData.requests_pre || []),
-      ...(renderData.postConsentData?.requests || renderData.requests_post || [])
-    ]) : undefined
+    legalSummary: generateLegalSummary(internalJson)
   };
 
   // Generate risk table
@@ -831,26 +676,6 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
 
   // Generate recommendations
   const recommendations = generateRecommendations(internalJson);
-
-  // Perform comprehensive validation checks
-  const { hasInconsistencies, reasons } = performIncompleteChecks(
-    internalJson.third_parties,
-    internalJson.beacons,
-    internalJson.cookies,
-    internalJson.storage,
-    detailedAnalysis.dataTransfers || [],
-    renderData
-  );
-
-  // If major inconsistencies detected, mark as INCOMPLETE
-  if (hasInconsistencies && internalJson.verdict !== 'INCOMPLETE') {
-    internalJson.verdict = 'INCOMPLETE';
-    internalJson.reasons.push(...reasons);
-    
-    // Update management summary
-    managementSummary.verdict = 'neúplné dáta' as const;
-    managementSummary.overall = generateOverallSummary(internalJson);
-  }
 
   return {
     url: originalInput,
@@ -900,6 +725,14 @@ function getDomain(url: string): string {
   }
 }
 
+function getServiceForHost(host: string): string {
+  for (const [pattern, service] of Object.entries(SERVICE_PATTERNS)) {
+    if (host.includes(pattern)) {
+      return service;
+    }
+  }
+  return 'Unknown Service';
+}
 
 function extractUrlParams(url: string): string[] {
   try {
@@ -1079,338 +912,6 @@ function generateRecommendations(internalJson: InternalAuditJson): Array<{ title
   });
 
   return recommendations;
-}
-
-// Enhanced data collection functions for render data
-function getServiceForHost(host: string): string {
-  for (const [pattern, service] of Object.entries(SERVICE_PATTERNS)) {
-    if (host.includes(pattern)) {
-      return service;
-    }
-  }
-  return 'Unknown Service';
-}
-
-function extractThirdPartiesFromRequests(requests: any[], baseDomain: string): Array<{ host: string; service: string }> {
-  const hosts = new Set<string>();
-  
-  requests.forEach(request => {
-    try {
-      const url = new URL(request.url);
-      const host = url.hostname;
-      if (host !== baseDomain && !host.includes('localhost')) {
-        hosts.add(host);
-      }
-    } catch (e) {
-      // Invalid URL, skip
-    }
-  });
-  
-  return Array.from(hosts).map(host => ({
-    host,
-    service: getServiceForHost(host)
-  }));
-}
-
-function mergeThirdParties(htmlParties: Array<{ host: string; service: string }>, renderParties: Array<{ host: string; service: string }>): Array<{ host: string; service: string }> {
-  const merged = new Map<string, { host: string; service: string }>();
-  
-  htmlParties.forEach(party => merged.set(party.host, party));
-  renderParties.forEach(party => merged.set(party.host, party));
-  
-  return Array.from(merged.values());
-}
-
-function extractBeaconsFromRequests(postRequests: any[], preRequests: any[] = []): Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> {
-  const beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> = [];
-  
-  [...preRequests, ...postRequests].forEach(request => {
-    const isPreConsent = request.isPreConsent || preRequests.includes(request);
-    
-    // Check against beacon patterns
-    PRE_CONSENT_PATTERNS.forEach(pattern => {
-      if (pattern.pattern.test(request.url)) {
-        const host = getDomain(request.url);
-        const params = Object.keys(request.queryParams || {});
-        
-        beacons.push({
-          host,
-          sample_url: request.url.length > 100 ? request.url.substring(0, 100) + '...' : request.url,
-          params,
-          service: pattern.service,
-          pre_consent: isPreConsent
-        });
-      }
-    });
-  });
-  
-  return beacons;
-}
-
-function mergeBeacons(htmlBeacons: any[], renderBeacons: any[]): any[] {
-  const merged = new Map<string, any>();
-  
-  htmlBeacons.forEach(beacon => merged.set(`${beacon.host}-${beacon.service}`, beacon));
-  renderBeacons.forEach(beacon => merged.set(`${beacon.host}-${beacon.service}`, beacon));
-  
-  return Array.from(merged.values());
-}
-
-function getETLDPlusOne(domain: string): string {
-  if (!domain) return '';
-  
-  // Remove protocol and port
-  const cleanDomain = domain.replace(/^https?:\/\//, '').split(':')[0];
-  
-  // For Slovak domains and common TLDs
-  const parts = cleanDomain.split('.');
-  if (parts.length <= 1) return cleanDomain;
-  
-  // Handle common Slovak second-level domains
-  if (parts.length >= 3 && parts[parts.length - 2] === 'co' && parts[parts.length - 1] === 'sk') {
-    return parts.slice(-3).join('.');
-  }
-  
-  // Handle other multi-part TLDs
-  if (parts.length >= 2) {
-    return parts.slice(-2).join('.');
-  }
-  
-  return cleanDomain;
-}
-
-function mergePrePostCookies(preCookies: any[], postCookies: any[], baseDomain: string): any[] {
-  const cookieMap = new Map<string, any>();
-  const baseETLD = getETLDPlusOne(baseDomain);
-  
-  // Process all cookies and merge by unique key
-  [...preCookies, ...postCookies].forEach(cookie => {
-    const cookieDomain = cookie.domain || baseDomain;
-    const cookieETLD = getETLDPlusOne(cookieDomain);
-    
-    const key = `${cookie.name}|${cookieDomain}|${cookie.path || '/'}`;
-    if (!cookieMap.has(key)) {
-      const processed = {
-        name: cookie.name,
-        domain: cookieDomain,
-        party: (cookieETLD === baseETLD || cookieDomain === baseDomain || !cookie.domain) ? '1P' as const : '3P' as const,
-        type: categorizeCookieFromName(cookie.name),
-        expiry_days: cookie.expires ? Math.round((new Date(cookie.expires * 1000).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null
-      };
-      cookieMap.set(key, processed);
-    }
-  });
-  
-  return Array.from(cookieMap.values());
-}
-
-function validateCookieData(cookies: any[]): { validatedCookies: any[]; hasInconsistencies: boolean } {
-  const firstParty = cookies.filter(c => c.party === '1P');
-  const thirdParty = cookies.filter(c => c.party === '3P');
-  const total = cookies.length;
-  
-  // Check for consistency
-  const expectedTotal = firstParty.length + thirdParty.length;
-  const hasInconsistencies = total !== expectedTotal || total === 0;
-  
-  if (hasInconsistencies) {
-    console.warn(`Cookie validation failed: total=${total}, 1P=${firstParty.length}, 3P=${thirdParty.length}`);
-  }
-  
-  return {
-    validatedCookies: cookies,
-    hasInconsistencies
-  };
-}
-
-function extractStorageFromRenderData(preStorage: any, postStorage: any): Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> {
-  const storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> = [];
-  
-  // Process localStorage
-  const allLocalStorage = { ...preStorage.localStorage, ...postStorage.localStorage };
-  Object.entries(allLocalStorage).forEach(([key, data]: [string, any]) => {
-    const value = typeof data === 'object' ? data.value : data;
-    const origin = typeof data === 'object' ? data.origin : 'main';
-    const scope = typeof data === 'object' ? data.scope : 'main';
-    
-    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => 
-      pattern.test(key) || pattern.test(String(value))
-    );
-    
-    const createdPreConsent = Boolean(preStorage.localStorage[key]);
-    
-    storage.push({
-      scope: 'local',
-      key,
-      sample_value: String(value).length > 50 ? String(value).substring(0, 50) + '...' : String(value),
-      contains_personal_data: containsPersonalData,
-      source_party: scope === 'iframe' ? '3P' : '1P',
-      created_pre_consent: createdPreConsent
-    });
-  });
-  
-  // Process sessionStorage
-  const allSessionStorage = { ...preStorage.sessionStorage, ...postStorage.sessionStorage };
-  Object.entries(allSessionStorage).forEach(([key, data]: [string, any]) => {
-    const value = typeof data === 'object' ? data.value : data;
-    const origin = typeof data === 'object' ? data.origin : 'main';
-    const scope = typeof data === 'object' ? data.scope : 'main';
-    
-    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => 
-      pattern.test(key) || pattern.test(String(value))
-    );
-    
-    const createdPreConsent = Boolean(preStorage.sessionStorage[key]);
-    
-    storage.push({
-      scope: 'session',
-      key,
-      sample_value: String(value).length > 50 ? String(value).substring(0, 50) + '...' : String(value),
-      contains_personal_data: containsPersonalData,
-      source_party: scope === 'iframe' ? '3P' : '1P',
-      created_pre_consent: createdPreConsent
-    });
-  });
-  
-  return storage;
-}
-
-function extractDataTransfersFromRequests(requests: any[]): Array<{ service: string; parameter: string; sampleValue: string; containsPersonalData: boolean; preConsent: boolean }> {
-  const transfers: Array<{ service: string; parameter: string; sampleValue: string; containsPersonalData: boolean; preConsent: boolean }> = [];
-  const seen = new Set<string>();
-  
-  // Significant parameters to extract (ignore technical noise)
-  const significantParams = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k', '_fbp', '_fbc', 'client_id', 'visitor_id', 'session_id'];
-  
-  requests.forEach(request => {
-    const host = getDomain(request.url);
-    const service = getServiceForHost(host);
-    const isPreConsent = request.isPreConsent || false;
-    
-    // Extract query parameters
-    if (request.queryParams && Object.keys(request.queryParams).length > 0) {
-      Object.entries(request.queryParams).forEach(([param, value]: [string, any]) => {
-        // Only include significant parameters or those with personal data patterns
-        const isSignificant = significantParams.some(sp => param.toLowerCase().includes(sp.toLowerCase()));
-        const containsPersonalData = /id|uid|cid|sid|fbp|fbc|email|ip|geo|user|visitor|client|session/i.test(param) || 
-                                   /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|GA[0-9]|FB\.|[0-9]{10,}/i.test(String(value));
-        
-        if (isSignificant || containsPersonalData) {
-          const key = `${service}|${param}|${String(value).substring(0, 12)}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            transfers.push({
-              service,
-              parameter: param,
-              sampleValue: String(value).length > 12 ? String(value).substring(0, 12) + '…' : String(value),
-              containsPersonalData,
-              preConsent: isPreConsent
-            });
-          }
-        }
-      });
-    }
-    
-    // Extract POST data parameters
-    if (request.postDataParsed && typeof request.postDataParsed === 'object') {
-      Object.entries(request.postDataParsed).forEach(([param, value]: [string, any]) => {
-        const isSignificant = significantParams.some(sp => param.toLowerCase().includes(sp.toLowerCase()));
-        const containsPersonalData = /id|uid|cid|sid|fbp|fbc|email|ip|geo|user|visitor|client|session/i.test(param) || 
-                                   /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|GA[0-9]|FB\.|[0-9]{10,}/i.test(String(value));
-        
-        if (isSignificant || containsPersonalData) {
-          const key = `${service}|${param}|${String(value).substring(0, 12)}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            transfers.push({
-              service,
-              parameter: param,
-              sampleValue: String(value).length > 12 ? String(value).substring(0, 12) + '…' : String(value),
-              containsPersonalData,
-              preConsent: isPreConsent
-            });
-          }
-        }
-      });
-    }
-  });
-  
-  return transfers;
-}
-
-function performIncompleteChecks(thirdParties: any[], beacons: any[], cookies: any[], storage: any[], dataTransfers: any[] = [], renderData?: any): { hasInconsistencies: boolean; reasons: string[] } {
-  const reasons: string[] = [];
-  let hasInconsistencies = false;
-  
-  // Cookie count validation
-  const firstParty = cookies.filter(c => c.party === '1P');
-  const thirdPartyCookies = cookies.filter(c => c.party === '3P');
-  const totalCookies = cookies.length;
-  
-  if (totalCookies !== firstParty.length + thirdPartyCookies.length && totalCookies > 0) {
-    hasInconsistencies = true;
-    reasons.push(`Cookie enumeration mismatch: total=${totalCookies}, 1P=${firstParty.length}, 3P=${thirdPartyCookies.length}`);
-  }
-  
-  // Third party host validation
-  const uniqueHosts = new Set(thirdParties.map(tp => tp.host)).size;
-  if (uniqueHosts !== thirdParties.length && thirdParties.length > 0) {
-    hasInconsistencies = true;
-    reasons.push(`Host enumeration mismatch: ${thirdParties.length} entries vs ${uniqueHosts} unique hosts`);
-  }
-  
-  // Storage validation - expected data but empty extraction
-  if (renderData?.storage_post) {
-    const hasLocalStorage = Object.keys(renderData.storage_post.localStorage || {}).length > 0;
-    const hasSessionStorage = Object.keys(renderData.storage_post.sessionStorage || {}).length > 0;
-    if ((hasLocalStorage || hasSessionStorage) && storage.length === 0) {
-      hasInconsistencies = true;
-      reasons.push('Storage data exists but extraction failed');
-    }
-  }
-  
-  // Beacon vs requests validation
-  if (renderData?.requests_post?.length > 0) {
-    const trackingRequests = renderData.requests_post.filter((req: any) => 
-      /facebook|google|linkedin|pinterest|analytics|tracking|collect|beacon|pixel/i.test(req.url)
-    );
-    if (trackingRequests.length > 0 && beacons.length === 0) {
-      hasInconsistencies = true;
-      reasons.push(`Tracking requests found (${trackingRequests.length}) but no beacons extracted`);
-    }
-  }
-  
-  // Data transfer section validation
-  if (beacons.length > 0 && dataTransfers.length === 0) {
-    // Check if any beacon URLs have query parameters or if there are POST requests
-    const hasQueryParams = renderData?.requests_post?.some((req: any) => 
-      req.queryParams && Object.keys(req.queryParams).length > 0
-    ) || false;
-    const hasPostData = renderData?.requests_post?.some((req: any) => 
-      req.postDataRaw || req.postDataParsed
-    ) || false;
-    
-    if (hasQueryParams || hasPostData) {
-      hasInconsistencies = true;
-      reasons.push('Beacons detected with parameters but Section 7 is empty - query/POST parsing failed');
-    } else if (beacons.length > 0) {
-      reasons.push('Žiadne extrahovateľné parametre (pravdepodobne POST telo binárne alebo šifrované)');
-    }
-  }
-  
-  // Cookie absence check (very unusual for modern websites)
-  if (renderData?.cookies_post?.length === 0 && renderData?.cookies_pre?.length === 0) {
-    hasInconsistencies = true;
-    reasons.push('No cookies detected - collection may have failed');
-  }
-  
-  // Minimum data threshold check
-  if (cookies.length < 3 && thirdParties.length < 3 && storage.length === 0) {
-    hasInconsistencies = true;
-    reasons.push('Unusually low data collection - potential CDP/extraction failure');
-  }
-  
-  return { hasInconsistencies, reasons };
 }
 
 export function generateEmailDraft(auditData: AuditData, clientEmail: string): string {

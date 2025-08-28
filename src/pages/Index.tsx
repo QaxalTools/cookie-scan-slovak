@@ -6,7 +6,6 @@ import { AnalysisProgress, DEFAULT_AUDIT_STEPS } from '@/components/AnalysisProg
 import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
 
 const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
@@ -24,136 +23,33 @@ const Index = () => {
     setClientEmail(email);
     
     try {
-      let auditInput = input;
-      let isLiveMode = false;
-      let finalUrl = input;
-
-      // For URL inputs, try to render and inspect with two-phase capture
-      if (!isHtml) {
-        try {
-          const { data, error } = await supabase.functions.invoke('render-and-inspect', {
-            body: { url: input },
-          });
-
-          if (error) {
-            throw error;
-          }
-
-          if (data?.success && data?.renderedHTML_post) {
-            // Inject base tag to ensure correct domain identification
-            const baseTag = `<base href="${data.finalUrl || input}">`;
-            auditInput = data.renderedHTML_post.replace('<head>', `<head>${baseTag}`);
-            isHtml = true;
-            isLiveMode = true;
-            finalUrl = data.finalUrl || input;
-            
-            // Store render data for audit
-            (window as any).renderData = {
-              preConsentData: {
-                html: data.renderedHTML_pre?.replace('<head>', `<head>${baseTag}`) || '',
-                cookies: data.cookies_pre || [],
-                requests: data.requests_pre || [],
-                responses: data.responses_pre || [],
-                storage: data.storage_pre || {}
-              },
-              postConsentData: {
-                html: data.renderedHTML_post?.replace('<head>', `<head>${baseTag}`) || '',
-                cookies: data.cookies_post || [],
-                requests: data.requests_post || [],
-                responses: data.responses_post || [],
-                storage: data.storage_post || {}
-              }
-            };
-            
-            toast({
-              title: "Live analýza spustená",
-              description: "Načítavame reálne dáta z webstránky...",
-            });
-          } else {
-            throw new Error(data?.error || 'Failed to render and inspect');
-          }
-        } catch (fetchError) {
-          console.log('Live render failed, trying HTML fetch fallback:', fetchError);
-          
-          // Try HTML fetch as fallback
-          try {
-            const { data: htmlData, error: htmlError } = await supabase.functions.invoke('fetch-html', {
-              body: { url: input },
-            });
-
-            if (htmlError) {
-              throw htmlError;
-            }
-
-            if (htmlData?.success && htmlData?.html) {
-              const baseTag = `<base href="${htmlData.finalUrl || input}">`;
-              auditInput = htmlData.html.replace('<head>', `<head>${baseTag}`);
-              isHtml = true;
-              finalUrl = htmlData.finalUrl || input;
-              
-              toast({
-                title: "HTML analýza spustená",
-                description: "Získavame základné HTML dáta zo stránky...",
-              });
-            } else {
-              throw new Error(htmlData?.error || 'Failed to fetch HTML');
-            }
-          } catch (htmlError) {
-            console.log('HTML fetch also failed, falling back to simulation:', htmlError);
-            toast({
-              title: "Prechod na simuláciu",
-              description: "Nebolo možné načítať reálne dáta. Používame simuláciu.",
-              variant: "default",
-            });
-          }
-        }
-      }
-
-      const minDuration = isHtml ? 2000 : 4000;
+      const minDuration = isHtml ? 2000 : 4000; // Shorter for HTML, longer for URL
       
-      // Run main audit simulation with render data if available
       const data = await simulateAudit(
-        auditInput, 
+        input, 
         isHtml, 
         (stepIndex) => setCurrentStep(stepIndex),
-        minDuration,
-        (window as any).renderData
+        minDuration
       );
       
-      // Update audit data with live mode information
-      if (isLiveMode) {
-        data.url = input; // Original URL
-        data.finalUrl = finalUrl;
-        data.hasRedirect = finalUrl !== input;
-        data.managementSummary.data_source = "Live analýza (server fetch)";
-      }
+      setAuditData(data);
+      setShowProgress(false);
       
-      
-      // Skip to verdict step
-      const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
-      setCurrentStep(verdictStepIndex);
-      
-      setTimeout(() => {
-        setAuditData(data);
-        setShowProgress(false);
-        toast({
-          title: "Audit dokončený",
-          description: isLiveMode ? "Live analýza dokončená." : "Simulácia dokončená.",
-        });
-        setIsLoading(false);
-      }, 1000);
-      
+      toast({
+        title: "Audit dokončený",
+        description: "Analýza webovej stránky bola úspešne dokončená",
+      });
     } catch (error) {
       setShowProgress(false);
-      setIsLoading(false);
       toast({
         title: "Chyba",
         description: "Nepodarilo sa vykonať audit webovej stránky",
         variant: "destructive",
       });
+    } finally {
+      setIsLoading(false);
     }
   };
-
 
   const handleGenerateEmail = () => {
     if (auditData) {
@@ -200,7 +96,6 @@ const Index = () => {
           currentStepIndex={currentStep}
           isVisible={showProgress}
         />
-
       </div>
     </div>
   );
