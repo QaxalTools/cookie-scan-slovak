@@ -59,6 +59,12 @@ export interface InternalAuditJson {
     party: '1P' | '3P';
     type: 'technical' | 'analytics' | 'marketing';
     expiry_days: number | null;
+    sources?: {
+      jar: boolean;
+      setCookie: boolean;
+      document: boolean;
+    };
+    persisted?: boolean;
   }>;
   storage: Array<{
     scope: 'local' | 'session';
