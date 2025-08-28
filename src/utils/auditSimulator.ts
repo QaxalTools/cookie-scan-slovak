@@ -1,6 +1,7 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
 import { supabase } from '@/integrations/supabase/client';
 import { addQualityChecks } from './qualityChecks';
+import { performSelfCheck } from './selfCheck';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -1010,6 +1011,17 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
   // Generate recommendations
   const recommendations = generateRecommendations(internalJson);
 
+  // Perform self-check (placeholder render data - would be passed from caller in real implementation)
+  const mockRenderData = {
+    requests_pre: [],
+    requests_post_accept: [],
+    requests_post_reject: [],
+    cookies_pre: [],
+    cookies_post_accept: [],
+    cookies_post_reject: []
+  };
+  const selfCheck = performSelfCheck(mockRenderData, internalJson);
+
   return {
     url: originalInput,
     finalUrl: finalUrl,
@@ -1042,7 +1054,9 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
       domain: tp.host,
       requests: Math.floor(Math.random() * 10) + 1
     })),
-    _internal: internalJson
+    _internal: internalJson,
+    self_check: selfCheck,
+    quality_gates: selfCheck.gates
   };
 }
 

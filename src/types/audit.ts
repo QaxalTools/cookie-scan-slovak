@@ -1,3 +1,36 @@
+// Self-check quality gate structure
+export interface AuditQualityGate {
+  id: string;
+  level: "error" | "warn" | "info";
+  passed: boolean;
+  message: string;
+  details?: any;
+}
+
+// Self-check summary structure
+export interface AuditSelfCheck {
+  summary: {
+    requests_pre_cdp: number;
+    requests_pre_fallback: number;
+    requests_post_accept?: number;
+    requests_post_reject?: number;
+    cookies_total: number;
+    cookies_1p: number;
+    cookies_3p: number;
+    third_parties_unique: number;
+  };
+  gates: AuditQualityGate[];
+  stats: {
+    cookies_expiry_days: {
+      overall: { min?: number; p50?: number; p95?: number; max?: number };
+      technical?: { min?: number; p50?: number; p95?: number; max?: number };
+      analytics?: { min?: number; p50?: number; p95?: number; max?: number };
+      marketing?: { min?: number; p50?: number; p95?: number; max?: number };
+    };
+    trackers_with_params: number;
+  };
+}
+
 // Core internal JSON structure for deterministic audit results
 export interface InternalAuditJson {
   final_url: string;
@@ -145,4 +178,8 @@ export interface AuditData {
 
   // Internal JSON for consistency
   _internal: InternalAuditJson;
+
+  // Self-check results
+  self_check: AuditSelfCheck;
+  quality_gates: AuditQualityGate[];
 }

@@ -12,7 +12,10 @@ import {
   Mail,
   Download
 } from 'lucide-react';
-import { AuditData } from '@/types/audit';
+import { AuditData, AuditQualityGate } from '@/types/audit';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ChevronDown } from 'lucide-react';
+import { useState } from 'react';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -20,6 +23,8 @@ interface AuditResultsProps {
 }
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  const [selfCheckExpanded, setSelfCheckExpanded] = useState(false);
+  
   // Check if we're in fallback mode
   const isFallbackMode = data.managementSummary.data_source?.includes('Záložný režim');
   // Consistency checks
@@ -48,6 +53,27 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
   };
 
   const consistencyIssues = performConsistencyChecks();
+
+  // Self-check banner logic
+  const getSelfCheckBanner = () => {
+    if (!data.self_check?.gates) return null;
+
+    const errorGates = data.self_check.gates.filter(g => g.level === 'error' && !g.passed);
+    const warnGates = data.self_check.gates.filter(g => g.level === 'warn' && !g.passed);
+    const hasErrors = errorGates.length > 0;
+    const hasWarnings = warnGates.length > 0;
+
+    if (!hasErrors && !hasWarnings) return null;
+
+    const bannerType = hasErrors ? 'error' : 'warning';
+    const bannerText = hasErrors 
+      ? 'Self-check failed – data may be incomplete'
+      : 'Self-check warnings – please review';
+
+    return { bannerType, bannerText, errorGates, warnGates };
+  };
+
+  const selfCheckBanner = getSelfCheckBanner();
 
   const handleDownloadJSON = () => {
     const jsonData = JSON.stringify(data._internal, null, 2);
@@ -266,7 +292,32 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 <li><strong>Článok 5(1)(e) GDPR:</strong> Princíp minimalizácie údajov a primerané doby uchovávania</li>
               </ul>
               
-              <h3>11. Rizikový scoring</h3>
+              <h3>11. Kontrolné mechanizmy (Self-check)</h3>
+              ${(() => {
+                if (!data.self_check?.gates) return '<p>Kontrolné mechanizmy nie sú dostupné.</p>';
+                
+                const passedGates = data.self_check.gates.filter(g => g.passed);
+                const failedGates = data.self_check.gates.filter(g => !g.passed);
+                
+                let content = '<table><tr><th>Kontrola</th><th>Výsledok</th><th>Popis</th></tr>';
+                
+                data.self_check.gates.forEach(gate => {
+                  const status = gate.passed ? 'Prešla' : 'Neprešla';
+                  const statusClass = gate.passed ? 'status-ok' : (gate.level === 'error' ? 'status-error' : 'status-warning');
+                  content += `<tr><td>${gate.id}</td><td class="${statusClass}">${status}</td><td>${gate.message}</td></tr>`;
+                });
+                
+                content += '</table>';
+                content += `<p><strong>Sumár:</strong> ${passedGates.length}/${data.self_check.gates.length} kontrol prešlo úspešne.</p>`;
+                
+                if (failedGates.length > 0) {
+                  content += '<p class="status-warning"><strong>Poznámka:</strong> Neúspešné kontroly môžu indikovať neúplné alebo nekonzistentné dáta auditu.</p>';
+                }
+                
+                return content;
+              })()}
+              
+              <h3>12. Rizikový scoring</h3>
               ${(() => {
                 const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
                                   data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
@@ -391,6 +442,66 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             Môžu chýbať niektoré dáta alebo môže byť narušená presnosť analýzy.
           </p>
         </div>
+      )}
+
+      {/* Self-check summary banner */}
+      {selfCheckBanner && (
+        <Card className={`border-2 ${selfCheckBanner.bannerType === 'error' 
+          ? 'border-red-300 bg-red-50' 
+          : 'border-yellow-300 bg-yellow-50'}`}>
+          <CardContent className="pt-6">
+            <Collapsible open={selfCheckExpanded} onOpenChange={setSelfCheckExpanded}>
+              <CollapsibleTrigger asChild>
+                <Button 
+                  variant="ghost" 
+                  className={`w-full justify-between p-0 h-auto ${selfCheckBanner.bannerType === 'error' 
+                    ? 'text-red-700 hover:text-red-800' 
+                    : 'text-yellow-700 hover:text-yellow-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    {selfCheckBanner.bannerType === 'error' ? (
+                      <XCircle className="h-5 w-5" />
+                    ) : (
+                      <AlertTriangle className="h-5 w-5" />
+                    )}
+                    <span className="font-medium">{selfCheckBanner.bannerText}</span>
+                  </div>
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-4">
+                <div className="space-y-2">
+                  {selfCheckBanner.errorGates.map((gate: AuditQualityGate) => (
+                    <div key={gate.id} className="flex items-start gap-2 text-sm text-red-700">
+                      <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <span className="font-medium">{gate.id}:</span> {gate.message}
+                        {gate.details && (
+                          <div className="text-xs text-red-600 mt-1">
+                            {JSON.stringify(gate.details, null, 2)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {selfCheckBanner.warnGates.map((gate: AuditQualityGate) => (
+                    <div key={gate.id} className="flex items-start gap-2 text-sm text-yellow-700">
+                      <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <span className="font-medium">{gate.id}:</span> {gate.message}
+                        {gate.details && (
+                          <div className="text-xs text-yellow-600 mt-1">
+                            {JSON.stringify(gate.details, null, 2)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          </CardContent>
+        </Card>
       )}
 
       {/* A) Manažérsky sumár */}
