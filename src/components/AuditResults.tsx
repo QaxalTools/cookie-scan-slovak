@@ -139,16 +139,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   return `<tr><td>${cookie.name}</td><td>${cookie.type === 'first-party' ? '1P' : '3P'}</td><td>${cookie.category}</td><td>${retentionDays}</td><td class="status-${cookie.status}">${cookie.status.toUpperCase()}</td></tr>`;
                 }).join('')}
               </table>
-              ${(() => {
-                const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
-                  const internalCookie = data._internal?.cookies?.find(ic => ic.name === cookie.name && ic.domain === cookie.domain);
-                  if (internalCookie?.expiry_days && internalCookie.expiry_days > 365) {
-                    return cookie.category.toLowerCase().includes('marketing') || cookie.category.toLowerCase().includes('analytics');
-                  }
-                  return false;
-                });
-                return longRetentionCookies.length > 0 ? `<p class="status-warning"><strong>⚠️ Poznámka:</strong> ${longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok, čo môže byť nad rámec primeranosti podľa GDPR.</p>` : '';
-              })()}
               
               <h3>5. LocalStorage/SessionStorage</h3>
               ${data._internal?.storage && data._internal.storage.length > 0 ? `
@@ -171,48 +161,62 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               <p><strong>Detekovaná consent cookie:</strong> ${data._internal.cmp.cookie_name} (${data._internal.cmp.raw_value.substring(0, 30)}...)</p>
               ` : ''}
               
-              <h3>7. Právne zhrnutie</h3>
-              <p>${data.detailedAnalysis.legalSummary}</p>
-            </div>
-
-            <!-- NEW SECTIONS -->
-            <div class="section">
-              <h2>B+. Dáta odosielané tretím stranám</h2>
+              <h3>7. Dáta odosielané tretím stranám</h3>
               ${(() => {
-                const extractedParams = [];
-                const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo'];
+                const servicesData = new Map();
+                const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo', 'ev', 'en'];
+                
                 if (data._internal?.beacons) {
                   data._internal.beacons.forEach(beacon => {
+                    if (!servicesData.has(beacon.service)) {
+                      servicesData.set(beacon.service, { params: [], hasPreConsent: false });
+                    }
+                    
+                    if (beacon.pre_consent) {
+                      servicesData.get(beacon.service).hasPreConsent = true;
+                    }
+                    
                     try {
                       const url = new URL(beacon.sample_url);
                       url.searchParams.forEach((value, key) => {
                         if (piiKeywords.some(k => key.toLowerCase().includes(k))) {
-                          extractedParams.push({
-                            service: beacon.service,
-                            parameter: key,
-                            sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
-                            isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
-                            preConsent: beacon.pre_consent
-                          });
+                          const serviceData = servicesData.get(beacon.service);
+                          const existingParam = serviceData.params.find(p => p.parameter === key);
+                          if (!existingParam) {
+                            serviceData.params.push({
+                              parameter: key,
+                              sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
+                              isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
+                              preConsent: beacon.pre_consent
+                            });
+                          }
                         }
                       });
                     } catch (e) {}
                   });
                 }
-                return extractedParams.length > 0 ? `
+                
+                let tableContent = '';
+                servicesData.forEach((serviceData, serviceName) => {
+                  if (serviceData.params.length === 0) {
+                    tableContent += `<tr><td>${serviceName}</td><td>—</td><td>žiadne identifikátory nezachytené</td><td>—</td><td class="status-${serviceData.hasPreConsent ? 'error' : 'ok'}">${serviceData.hasPreConsent ? 'ÁNO' : 'NIE'}</td></tr>`;
+                  } else {
+                    serviceData.params.forEach(param => {
+                      tableContent += `<tr><td>${serviceName}</td><td style="font-family: monospace;">${param.parameter}</td><td style="font-family: monospace;">${param.sampleValue}</td><td class="status-${param.isPII ? 'error' : 'ok'}">${param.isPII ? 'ÁNO' : 'NIE'}</td><td class="status-${param.preConsent ? 'error' : 'ok'}">${param.preConsent ? 'ÁNO' : 'NIE'}</td></tr>`;
+                    });
+                  }
+                });
+                
+                return servicesData.size > 0 ? `
                 <table>
                   <tr><th>Služba</th><th>Parameter</th><th>Vzor hodnoty</th><th>Osobné údaje?</th><th>Pred súhlasom?</th></tr>
-                  ${extractedParams.map(param => 
-                    `<tr><td>${param.service}</td><td style="font-family: monospace;">${param.parameter}</td><td style="font-family: monospace;">${param.sampleValue}</td><td class="status-${param.isPII ? 'error' : 'ok'}">${param.isPII ? 'Áno' : 'Nie'}</td><td class="status-${param.preConsent ? 'error' : 'ok'}">${param.preConsent ? 'Áno' : 'Nie'}</td></tr>`
-                  ).join('')}
+                  ${tableContent}
                 </table>
                 <p style="font-size: 12px; color: #666;">Zobrazené sú zachytené vzorové hodnoty z požiadaviek/beaconov odoslaných tretím stranám.</p>
                 ` : '<p>Neboli nájdené relevantné parametre odosielané tretím stranám.</p>';
               })()}
-            </div>
-
-            <div class="section">
-              <h2>B++. UX analýza cookie lišty</h2>
+              
+              <h3>8. UX analýza cookie lišty</h3>
               ${(() => {
                 const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
                 const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0;
@@ -235,20 +239,31 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 <p><strong>Celkové hodnotenie UX:</strong> <span class="status-${assessment === 'Transparentná' ? 'ok' : assessment === 'Nevyvážená' ? 'warning' : 'error'}">${assessment.toUpperCase()}</span></p>
                 `;
               })()}
-            </div>
-
-            <div class="section">
-              <h2>B+++. Legislatívne odkazy</h2>
+              
+              <h3>9. Retenčné doby cookies</h3>
+              ${(() => {
+                const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
+                  const internalCookie = data._internal?.cookies?.find(ic => ic.name === cookie.name && ic.domain === cookie.domain);
+                  if (internalCookie?.expiry_days && internalCookie.expiry_days > 365) {
+                    return cookie.category.toLowerCase().includes('marketing') || cookie.category.toLowerCase().includes('analytics');
+                  }
+                  return false;
+                });
+                return longRetentionCookies.length > 0 ? `<p class="status-warning"><strong>⚠️ Poznámka k retenčným dobám:</strong> ${longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok, čo môže byť nad rámec primeranosti podľa GDPR. Odporúčame skrátiť doby uchovávania na maximálne 12 mesiacov.</p>` : '<p class="status-ok">Retenčné doby cookies sú v súlade s odporúčaniami GDPR (pod 1 rok pre marketing/analytické cookies).</p>';
+              })()}
+              
+              <h3>10. Právne zhrnutie</h3>
+              <p>${data.detailedAnalysis.legalSummary}</p>
+              
+              <h4>Relevantné právne ustanovenia:</h4>
               <ul>
                 <li><strong>Článok 5(3) ePrivacy Directive:</strong> Ukladanie nenutných cookies bez súhlasu používateľa</li>
                 <li><strong>Článok 6 GDPR:</strong> Spracúvanie IP adries, user_id a online identifikátorov</li>
                 <li><strong>Články 12-14 GDPR:</strong> Povinnosť informovať používateľov a zabezpečiť transparentnosť</li>
                 <li><strong>Článok 5(1)(e) GDPR:</strong> Princíp minimalizácie údajov a primerané doby uchovávania</li>
               </ul>
-            </div>
-
-            <div class="section">
-              <h2>B++++. Rizikový scoring</h2>
+              
+              <h3>11. Rizikový scoring</h3>
               ${(() => {
                 const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
                                   data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
@@ -263,7 +278,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 const uxScore = !data.detailedAnalysis.consentManagement.hasConsentTool ? 5 :
                                data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 4 : 1;
                 const totalScore = (httpsScore + cmpScore + cookiesScore + storageScore + trackersScore + uxScore) / 6;
-                const overallRisk = totalScore <= 1.5 ? 'Low' : totalScore <= 3 ? 'Medium' : 'High';
+                const overallRisk = totalScore <= 1.5 ? 'Nízke' : totalScore <= 3 ? 'Stredné' : 'Vysoké';
                 
                 const riskAreas = [
                   { area: 'HTTPS', score: httpsScore, note: httpsScore <= 1 ? 'Správne implementované' : 'Problémy so zabezpečením' },
@@ -281,7 +296,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     `<tr><td><strong>${area.area}</strong></td><td class="status-${area.score <= 1 ? 'ok' : area.score <= 3 ? 'warning' : 'error'}">${area.score}/5</td><td style="font-size: 12px;">${area.note}</td></tr>`
                   ).join('')}
                 </table>
-                <p><strong>Celkové riziko:</strong> <span class="status-${overallRisk === 'Low' ? 'ok' : overallRisk === 'Medium' ? 'warning' : 'error'}">${overallRisk.toUpperCase()}</span> (Priemerné skóre: ${totalScore.toFixed(1)}/5)</p>
+                <p><strong>Celkové riziko:</strong> <span class="status-${overallRisk === 'Nízke' ? 'ok' : overallRisk === 'Stredné' ? 'warning' : 'error'}">${overallRisk.toUpperCase()}</span> (Priemerné skóre: ${totalScore.toFixed(1)}/5)</p>
                 `;
               })()}
             </div>
@@ -575,81 +590,95 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </div>
           </div>
 
-          {/* 7. Právne zhrnutie */}
+          {/* 7. Dáta odosielané tretím stranám */}
           <div>
-            <h3 className="font-semibold mb-2">7. Právne zhrnutie</h3>
-            <div className="p-4 bg-gradient-accent rounded-lg">
-              <p className="text-sm">{data.detailedAnalysis.legalSummary}</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* NEW SECTIONS - Between B and C */}
-      
-      {/* B+. Dáta odosielané tretím stranám */}
-      <Card className="shadow-medium">
-        <CardHeader>
-          <CardTitle>B+. Dáta odosielané tretím stranám</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {(() => {
-            // Extract parameters from beacons
-            const extractedParams = [];
-            const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo'];
-            
-            if (data._internal?.beacons) {
-              data._internal.beacons.forEach(beacon => {
-                try {
-                  const url = new URL(beacon.sample_url);
-                  url.searchParams.forEach((value, key) => {
-                    if (piiKeywords.some(k => key.toLowerCase().includes(k))) {
-                      extractedParams.push({
-                        service: beacon.service,
-                        parameter: key,
-                        sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
-                        isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
-                        preConsent: beacon.pre_consent
-                      });
-                    }
-                  });
-                } catch (e) {
-                  // Skip invalid URLs
-                }
-              });
-            }
-            
-            return extractedParams.length > 0 ? (
-              <div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left p-2">Služba</th>
-                        <th className="text-left p-2">Parameter</th>
-                        <th className="text-left p-2">Vzor hodnoty</th>
-                        <th className="text-left p-2">Osobné údaje?</th>
-                        <th className="text-left p-2">Pred súhlasom?</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {extractedParams.map((param, index) => (
-                        <tr key={index} className="border-b">
-                          <td className="p-2">{param.service}</td>
-                          <td className="p-2 font-mono text-xs">{param.parameter}</td>
-                          <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{param.sampleValue}</td>
-                          <td className="p-2">
-                            <Badge variant={param.isPII ? 'destructive' : 'secondary'} className="text-xs">
-                              {param.isPII ? 'Áno' : 'Nie'}
-                            </Badge>
-                          </td>
-                          <td className="p-2">
-                            <Badge variant={param.preConsent ? 'destructive' : 'secondary'} className="text-xs">
-                              {param.preConsent ? 'Áno' : 'Nie'}
-                            </Badge>
-                          </td>
+            <h3 className="font-semibold mb-2">7. Dáta odosielané tretím stranám</h3>
+            {(() => {
+              // Group parameters by service
+              const servicesData = new Map();
+              const piiKeywords = ['fbp', 'fbc', 'tid', 'cid', 'sid', 'uid', 'user_id', 'ip', 'geo', 'ev', 'en'];
+              
+              if (data._internal?.beacons) {
+                data._internal.beacons.forEach(beacon => {
+                  if (!servicesData.has(beacon.service)) {
+                    servicesData.set(beacon.service, { params: [], hasPreConsent: false });
+                  }
+                  
+                  if (beacon.pre_consent) {
+                    servicesData.get(beacon.service).hasPreConsent = true;
+                  }
+                  
+                  try {
+                    const url = new URL(beacon.sample_url);
+                    url.searchParams.forEach((value, key) => {
+                      if (piiKeywords.some(k => key.toLowerCase().includes(k))) {
+                        const serviceData = servicesData.get(beacon.service);
+                        const existingParam = serviceData.params.find(p => p.parameter === key);
+                        if (!existingParam) {
+                          serviceData.params.push({
+                            parameter: key,
+                            sampleValue: value.length > 20 ? value.substring(0, 20) + '...' : value,
+                            isPII: ['ip', 'geo', 'uid', 'user_id', 'fbp', 'fbc', 'cid', 'sid'].some(k => key.toLowerCase().includes(k)),
+                            preConsent: beacon.pre_consent
+                          });
+                        }
+                      }
+                    });
+                  } catch (e) {
+                    // Skip invalid URLs
+                  }
+                });
+              }
+              
+              return servicesData.size > 0 ? (
+                <div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-2">Služba</th>
+                          <th className="text-left p-2">Parameter</th>
+                          <th className="text-left p-2">Vzor hodnoty</th>
+                          <th className="text-left p-2">Osobné údaje?</th>
+                          <th className="text-left p-2">Pred súhlasom?</th>
                         </tr>
-                      ))}
+                      </thead>
+                      <tbody>
+                       {Array.from(servicesData.entries()).flatMap(([serviceName, serviceData]) => {
+                         if (serviceData.params.length === 0) {
+                           return (
+                             <tr key={serviceName}>
+                               <td className="p-2">{serviceName}</td>
+                               <td className="p-2 text-muted-foreground">—</td>
+                               <td className="p-2 text-muted-foreground">žiadne identifikátory nezachytené</td>
+                               <td className="p-2 text-muted-foreground">—</td>
+                               <td className="p-2">
+                                 <Badge variant={serviceData.hasPreConsent ? 'destructive' : 'secondary'} className="text-xs">
+                                   {serviceData.hasPreConsent ? 'Áno' : 'Nie'}
+                                 </Badge>
+                               </td>
+                             </tr>
+                           );
+                         } else {
+                           return serviceData.params.map((param, idx) => (
+                             <tr key={`${serviceName}-${idx}`}>
+                               <td className="p-2">{serviceName}</td>
+                               <td className="p-2 font-mono text-xs">{param.parameter}</td>
+                               <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{param.sampleValue}</td>
+                               <td className="p-2">
+                                 <Badge variant={param.isPII ? 'destructive' : 'secondary'} className="text-xs">
+                                   {param.isPII ? 'Áno' : 'Nie'}
+                                 </Badge>
+                               </td>
+                               <td className="p-2">
+                                 <Badge variant={param.preConsent ? 'destructive' : 'secondary'} className="text-xs">
+                                   {param.preConsent ? 'Áno' : 'Nie'}
+                                 </Badge>
+                               </td>
+                             </tr>
+                           ));
+                         }
+                       })}
                     </tbody>
                   </table>
                 </div>
@@ -659,16 +688,15 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               </div>
             ) : (
               <p className="text-muted-foreground">Neboli nájdené relevantné parametre odosielané tretím stranám.</p>
-            );
-          })()}
+             );
+           })()}
+          </div>
         </CardContent>
       </Card>
 
-      {/* B++. UX analýza cookie lišty */}
-      <Card className="shadow-medium">
-        <CardHeader>
-          <CardTitle>B++. UX analýza cookie lišty</CardTitle>
-        </CardHeader>
+          {/* 8. UX analýza cookie lišty */}
+          <div>
+            <h3 className="font-semibold mb-2">8. UX analýza cookie lišty</h3>
         <CardContent>
           {(() => {
             const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
@@ -721,18 +749,14 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     {assessment === 'Transparentná' && 'CMP nástroj správne blokuje trackery až po súhlase používateľa.'}
                   </p>
                 </div>
-              </div>
-            );
-          })()}
-        </CardContent>
-      </Card>
+               </div>
+             );
+           })()}
+          </div>
 
-      {/* B+++. Retenčné doby cookies */}
-      <Card className="shadow-medium">
-        <CardHeader>
-          <CardTitle>B+++. Retenčné doby cookies</CardTitle>
-        </CardHeader>
-        <CardContent>
+          {/* 9. Retenčné doby cookies */}
+          <div>
+            <h3 className="font-semibold mb-2">9. Retenčné doby cookies</h3>
           {(() => {
             // Calculate retention periods and check for long-retention cookies
             const cookiesWithRetention = data.detailedAnalysis.cookies.details.map(cookie => {
@@ -804,17 +828,29 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   </div>
                 )}
               </div>
-            );
-          })()}
-        </CardContent>
-      </Card>
+             );
+           })()}
+          </div>
 
-      {/* B++++. Legislatívne odkazy */}
-      <Card className="shadow-medium">
-        <CardHeader>
-          <CardTitle>B++++. Legislatívne odkazy</CardTitle>
-        </CardHeader>
-        <CardContent>
+          {/* 10. Právne zhrnutie + Legislatívne odkazy */}
+          <div>
+            <h3 className="font-semibold mb-2">10. Právne zhrnutie</h3>
+            <div className="p-4 bg-gradient-accent rounded-lg">
+              <p className="text-sm mb-4">{data.detailedAnalysis.legalSummary}</p>
+              
+              <h4 className="font-semibold mb-2">Relevantné právne ustanovenia:</h4>
+              <ul className="space-y-1 text-sm">
+                <li>• <strong>Článok 5(3) ePrivacy Directive:</strong> Ukladanie nenutných cookies bez súhlasu používateľa</li>
+                <li>• <strong>Článok 6 GDPR:</strong> Spracúvanie IP adries, user_id a online identifikátorov</li>
+                <li>• <strong>Články 12-14 GDPR:</strong> Povinnosť informovať používateľov a zabezpečiť transparentnosť</li>
+                <li>• <strong>Článok 5(1)(e) GDPR:</strong> Princíp minimalizácie údajov a primerané doby uchovávania</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* 11. Rizikový scoring */}
+          <div>
+            <h3 className="font-semibold mb-2">11. Rizikový scoring</h3>
           <div className="space-y-3">
             <div className="p-3 bg-muted/30 rounded-lg">
               <h4 className="font-semibold text-sm mb-1">📋 Relevantná legislatíva</h4>
