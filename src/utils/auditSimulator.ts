@@ -115,7 +115,8 @@ export async function performLiveAudit(
       await updateProgress(0);
       const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
       await updateProgress(7);
-      return convertToDisplayFormat(internalJson, input);
+      const syntheticRenderData = buildSyntheticRenderData(internalJson);
+      return convertToDisplayFormat(internalJson, input, syntheticRenderData);
     }
 
     // For URL input, use Edge Function for real analysis
@@ -166,7 +167,8 @@ export async function performLiveAudit(
       // Fall back to basic analysis
       const internalJson = await generateInternalAuditJson(input, false, updateProgress);
       await updateProgress(7);
-      const fallbackData = convertToDisplayFormat(internalJson, input);
+      const syntheticRenderData = buildSyntheticRenderData(internalJson);
+      const fallbackData = convertToDisplayFormat(internalJson, input, syntheticRenderData);
       fallbackData.managementSummary.data_source = `Záložný režim (Edge function error: ${data?.error || 'Unknown error'})`;
       return fallbackData;
     }
@@ -209,8 +211,8 @@ export async function performLiveAudit(
     
     await updateProgress(7);
     
-  // Convert to display format
-  const auditData = convertToDisplayFormat(internalJson, input);
+  // Convert to display format with real renderData
+  const auditData = convertToDisplayFormat(internalJson, input, renderData);
   
   // Add quality checks and INCOMPLETE banners
   auditData.managementSummary = addQualityChecks(auditData.managementSummary, renderData, internalJson);
@@ -232,7 +234,8 @@ export async function performLiveAudit(
     await updateProgress(7);
     
     // Add error info to audit data
-    const auditData = convertToDisplayFormat(internalJson, input);
+    const syntheticRenderData = buildSyntheticRenderData(internalJson);
+    const auditData = convertToDisplayFormat(internalJson, input, syntheticRenderData);
     auditData.managementSummary.data_source = `Záložný režim (Live analýza zlyhala: ${error.message})`;
     
     console.log('🔄 performLiveAudit: Fallback analysis completed, verdict:', auditData.managementSummary.verdict);
@@ -932,7 +935,7 @@ function determineVerdict(
   return { verdict: 'COMPLIANT', reasons: [] };
 }
 
-function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string): AuditData {
+function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string, renderData?: any): AuditData {
   const timestamp = new Date().toISOString();
   const finalUrl = internalJson.final_url;
   
@@ -1011,16 +1014,10 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
   // Generate recommendations
   const recommendations = generateRecommendations(internalJson);
 
-  // Perform self-check (placeholder render data - would be passed from caller in real implementation)
-  const mockRenderData = {
-    requests_pre: [],
-    requests_post_accept: [],
-    requests_post_reject: [],
-    cookies_pre: [],
-    cookies_post_accept: [],
-    cookies_post_reject: []
-  };
-  const selfCheck = performSelfCheck(mockRenderData, internalJson);
+  // Perform self-check with provided renderData or synthetic data
+  const dataForSelfCheck = renderData || buildSyntheticRenderData(internalJson);
+  console.log(`🔍 Self-check using ${renderData ? 'live' : 'synthetic'} data`);
+  const selfCheck = performSelfCheck(dataForSelfCheck, internalJson);
 
   return {
     url: originalInput,
@@ -1260,6 +1257,62 @@ function generateRecommendations(internalJson: InternalAuditJson): Array<{ title
   });
 
   return recommendations;
+}
+
+/**
+ * Build synthetic renderData from internalJson for fallback/HTML mode
+ */
+function buildSyntheticRenderData(internalJson: InternalAuditJson): any {
+  console.log('🔧 Building synthetic renderData for self-check (using fallback/HTML mode)');
+  
+  // Create synthetic requests based on beacons and third parties
+  const syntheticRequests = internalJson.beacons.map((beacon, index) => ({
+    url: beacon.sample_url,
+    method: 'GET',
+    query: beacon.params.reduce((acc, param) => ({ ...acc, [param]: `value${index}` }), {}),
+    phase: beacon.pre_consent ? 'pre' : 'post'
+  }));
+
+  // Add requests for third parties
+  internalJson.third_parties.forEach((tp, index) => {
+    syntheticRequests.push({
+      url: `https://${tp.host}/script.js`,
+      method: 'GET',
+      query: {},
+      phase: 'pre'
+    });
+  });
+
+  // Create synthetic cookies based on internal data
+  const syntheticCookies = internalJson.cookies.map(cookie => ({
+    name: cookie.name,
+    domain: cookie.domain,
+    path: '/',
+    expires: cookie.expiry_days ? Date.now() / 1000 + (cookie.expiry_days * 86400) : null,
+    value: 'synthetic_value'
+  }));
+
+  return {
+    requests_pre: syntheticRequests.filter(r => r.phase === 'pre'),
+    requests_post_accept: syntheticRequests.filter(r => r.phase === 'post'),
+    requests_post_reject: [],
+    requests_fallback: syntheticRequests, // Use all for fallback
+    cookies_pre: syntheticCookies.filter(c => 
+      internalJson.cookies.find(ic => ic.name === c.name)?.type !== 'marketing'
+    ),
+    cookies_post_accept: syntheticCookies,
+    cookies_post_reject: syntheticCookies.filter(c => 
+      internalJson.cookies.find(ic => ic.name === c.name)?.type === 'technical'
+    ),
+    storage_pre: internalJson.storage.reduce((acc, item) => {
+      if (!acc[item.scope === 'local' ? 'localStorage' : 'sessionStorage']) {
+        acc[item.scope === 'local' ? 'localStorage' : 'sessionStorage'] = {};
+      }
+      acc[item.scope === 'local' ? 'localStorage' : 'sessionStorage'][item.key] = item.sample_value;
+      return acc;
+    }, {} as any),
+    finalUrl: internalJson.final_url
+  };
 }
 
 export function generateEmailDraft(auditData: AuditData, clientEmail: string): string {
