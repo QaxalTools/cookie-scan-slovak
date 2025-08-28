@@ -1,3 +1,43 @@
+// Core internal JSON structure for deterministic audit results
+export interface InternalAuditJson {
+  final_url: string;
+  https: {
+    supports: boolean;
+    redirects_http_to_https: boolean;
+  };
+  third_parties: Array<{
+    host: string;
+    service: string;
+  }>;
+  beacons: Array<{
+    host: string;
+    sample_url: string;
+    params: string[];
+    service: string;
+    pre_consent: boolean;
+  }>;
+  cookies: Array<{
+    name: string;
+    party: '1P' | '3P';
+    type: 'technical' | 'analytics' | 'marketing';
+    expiry_days: number | null;
+  }>;
+  storage: Array<{
+    scope: 'local' | 'session';
+    key: string;
+    sample_value: string;
+    contains_personal_data: boolean;
+  }>;
+  cmp: {
+    present: boolean;
+    cookie_name: string;
+    raw_value: string;
+    pre_consent_fires: boolean;
+  };
+  verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE';
+  reasons: string[];
+}
+
 export interface AuditData {
   url: string;
   finalUrl: string;
@@ -91,4 +131,7 @@ export interface AuditData {
     domain: string;
     requests: number;
   }>;
+
+  // Internal JSON for consistency
+  _internal: InternalAuditJson;
 }

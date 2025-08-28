@@ -13,12 +13,12 @@ const Index = () => {
   const [clientEmail, setClientEmail] = useState('');
   const { toast } = useToast();
 
-  const handleAuditSubmit = async (url: string, email: string) => {
+  const handleAuditSubmit = async (input: string, email: string, isHtml: boolean) => {
     setIsLoading(true);
     setClientEmail(email);
     
     try {
-      const data = await simulateAudit(url);
+      const data = await simulateAudit(input, isHtml);
       setAuditData(data);
       toast({
         title: "Audit dokončený",

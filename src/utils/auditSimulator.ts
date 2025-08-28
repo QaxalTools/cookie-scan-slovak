@@ -1,776 +1,768 @@
-import { AuditData } from '@/types/audit';
+import { AuditData, InternalAuditJson } from '@/types/audit';
 
-export const simulateAudit = async (url: string): Promise<AuditData> => {
-  // Deterministická analýza podľa nového algoritmu
-  await new Promise(resolve => setTimeout(resolve, 3000));
+// Known service mappings for deterministic detection
+const SERVICE_PATTERNS = {
+  'facebook.com': 'Facebook Pixel',
+  'connect.facebook.net': 'Facebook SDK',
+  'google-analytics.com': 'Google Analytics',
+  'googletagmanager.com': 'Google Tag Manager',
+  'googlesyndication.com': 'Google Ads',
+  'googleadservices.com': 'Google Ads',
+  'doubleclick.net': 'Google DoubleClick',
+  'linkedin.com': 'LinkedIn Insights',
+  'platform.linkedin.com': 'LinkedIn Platform',
+  'pinterest.com': 'Pinterest Tag',
+  'ct.pinterest.com': 'Pinterest Conversion',
+  'analytics.tiktok.com': 'TikTok Pixel',
+  'clarity.ms': 'Microsoft Clarity',
+  'bing.com': 'Bing Ads',
+  't.leady.com': 'Leady',
+  'events.getsitectrl.com': 'GetSiteControl',
+  'collector.snowplow.io': 'Snowplow',
+  'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow',
+  'etarget.sk': 'eTarget',
+  'matomo.org': 'Matomo',
+  'gstatic.com': 'Google Static',
+  'recaptcha.net': 'reCAPTCHA',
+  'google.com/recaptcha': 'reCAPTCHA'
+};
 
-  const originalUrl = url;
-  const domain = new URL(url).hostname;
-  const isHttps = url.startsWith('https://');
-  
-  // 1. Načítanie stránky a presmerovania (cold start)
-  const finalUrl = isHttps ? url : url.replace('http://', 'https://');
-  const hasRedirect = originalUrl !== finalUrl;
-  
-  // 2. Rozšírená detekcia služieb (deterministická pre konzistentné testovanie)
-  const domainHash = domain.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const hasGA = (domainHash % 10) > 2;
-  const hasFacebookPixel = (domainHash % 10) > 3;
-  const hasGTM = (domainHash % 10) > 4;
-  const hasTikTokPixel = (domainHash % 10) > 6;
-  const hasLinkedInInsight = (domainHash % 10) > 7;
-  const hasPinterestTag = (domainHash % 10) > 7;
-  const hasLeady = (domainHash % 10) > 6;
-  const hasGetSiteControl = (domainHash % 10) > 7;
-  const hasSnowplow = (domainHash % 10) > 8;
-  const hasEtarget = (domainHash % 10) > 8;
-  const hasMatomo = (domainHash % 10) > 9;
-  const hasBing = (domainHash % 10) > 5;
-  const hasRecaptcha = (domainHash % 10) > 4;
-  const hasConsentTool = (domainHash % 10) > 6;
-  
-  // 3. Rozšírené tretie strany (kompletná detekcia)
-  const thirdParties = [];
-  if (hasGA) thirdParties.push({ domain: 'region1.google-analytics.com', requests: 4 });
-  if (hasGA) thirdParties.push({ domain: 'google-analytics.com', requests: 3 });
-  if (hasFacebookPixel) thirdParties.push({ domain: 'facebook.com', requests: 2 });
-  if (hasFacebookPixel) thirdParties.push({ domain: 'connect.facebook.net', requests: 1 });
-  if (hasGTM) thirdParties.push({ domain: 'googletagmanager.com', requests: 3 });
-  if (hasGTM) thirdParties.push({ domain: 'pagead2.googlesyndication.com', requests: 2 });
-  if (hasTikTokPixel) thirdParties.push({ domain: 'analytics.tiktok.com', requests: 2 });
-  if (hasLinkedInInsight) thirdParties.push({ domain: 'snap.licdn.com', requests: 2 });
-  if (hasLinkedInInsight) thirdParties.push({ domain: 'linkedin.com', requests: 1 });
-  if (hasPinterestTag) thirdParties.push({ domain: 'ct.pinterest.com', requests: 3 });
-  if (hasPinterestTag) thirdParties.push({ domain: 's.pinimg.com', requests: 2 });
-  if (hasLeady) thirdParties.push({ domain: 't.leady.com', requests: 2 });
-  if (hasGetSiteControl) thirdParties.push({ domain: 'events.getsitectrl.com', requests: 2 });
-  if (hasSnowplow) thirdParties.push({ domain: 'd2dpiwfhf3tz0r.cloudfront.net', requests: 1 });
-  if (hasEtarget) thirdParties.push({ domain: 'track.etarget.sk', requests: 1 });
-  if (hasMatomo) thirdParties.push({ domain: 'matomo.example.com', requests: 2 });
-  if (hasBing) thirdParties.push({ domain: 'bat.bing.com', requests: 1 });
-  if (hasRecaptcha) thirdParties.push({ domain: 'google.com', requests: 3 });
-  if (hasRecaptcha) thirdParties.push({ domain: 'gstatic.com', requests: 2 });
+// Pre-consent beacon patterns (critical for GDPR compliance)
+const PRE_CONSENT_PATTERNS = [
+  { pattern: /facebook\.com\/tr.*ev=PageView/, service: 'Facebook Pixel' },
+  { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect.*en=page_view/, service: 'Google Ads' },
+  { pattern: /region1\.google-analytics\.com\/g\/collect/, service: 'Google Analytics' },
+  { pattern: /ct\.pinterest\.com\/v3.*event=init/, service: 'Pinterest' },
+  { pattern: /ct\.pinterest\.com\/user/, service: 'Pinterest' },
+  { pattern: /t\.leady\.com\/L\?/, service: 'Leady' },
+  { pattern: /events\.getsitectrl\.com\/api\/v1\/events/, service: 'GetSiteControl' },
+  { pattern: /collector\.snowplow\.io.*\/i\?.*e=pv/, service: 'Snowplow' },
+  { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?.*e=pv/, service: 'Snowplow' },
+  { pattern: /clarity\.ms.*collect/, service: 'Microsoft Clarity' },
+  { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' }
+];
 
-  // 4. Detailná detekcia trackerov/beaconov (podľa nového algoritmu)
-  const trackers = [];
+// Cookie classification patterns
+const COOKIE_PATTERNS = {
+  technical: [
+    'PHPSESSID', 'laravel_session', 'XSRF-TOKEN', 'csrftoken', 'sessionid',
+    'CookieScriptConsent', 'CookieConsent', 'OptanonConsent', 'cookieyes-consent',
+    '_GRECAPTCHA', '__cf_bm', 'cf_clearance'
+  ],
+  analytics: [
+    '_ga', '_gid', '_gat', '__utma', '__utmb', '__utmc', '__utmt', '__utmz',
+    '_sp_id', '_sp_ses', '_pk_id', '_pk_ses', 'vuid', '_hjid', '_hjSessionUser'
+  ],
+  marketing: [
+    '_fbp', '_fbc', 'fr', '_gcl_au', '_gcl_aw', '_gcl_dc', '_gcl_gf', '_gcl_ha',
+    '_uetsid', '_uetvid', '_tt_enable_cookie', '_ttp', '_pin_unauth',
+    'li_sugr', 'li_oatml', 'bcookie', 'lidc', 'IDE', 'test_cookie', 'MR',
+    'leady_session_id', 'leady_track_id', '_sp_user_id'
+  ]
+};
+
+// LocalStorage patterns that indicate personal data
+const PERSONAL_DATA_PATTERNS = [
+  /user_?id/i, /client_?id/i, /visitor_?id/i, /session_?id/i,
+  /ip_?address/i, /location/i, /geo/i, /latitude/i, /longitude/i,
+  /email/i, /phone/i, /identifier/i, /tracking/i
+];
+
+export async function simulateAudit(input: string, isHtml: boolean = false): Promise<AuditData> {
+  // Generate internal JSON structure for consistency
+  const internalJson = await generateInternalAuditJson(input, isHtml);
   
-  // Google Analytics - pre-consent violations
-  if (hasGA) {
-    trackers.push({
-      service: 'Google Analytics',
-      host: 'region1.google-analytics.com',
-      evidence: '/g/collect?v=2&tid=G-XXXXXXXXXX&cid=1234567890.1234567890&t=pageview&dl=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Facebook Pixel - kritický pre-consent beacon
-  if (hasFacebookPixel) {
-    trackers.push({
-      service: 'Facebook Pixel',
-      host: 'facebook.com',
-      evidence: '/tr?id=123456789012345&ev=PageView&dl=' + encodeURIComponent(url) + '&rl=' + encodeURIComponent(document?.referrer || ''),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Google Ads Conversion - pred-súhlasový beacon
-  if (hasGTM) {
-    trackers.push({
-      service: 'Google Ads Conversion',
-      host: 'pagead2.googlesyndication.com',
-      evidence: '/ccm/collect?en=page_view&cid=CLIENT_ID&tid=AW-123456789&dl=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'warning' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Pinterest Tag
-  if (hasPinterestTag) {
-    trackers.push({
-      service: 'Pinterest Tag',
-      host: 'ct.pinterest.com',
-      evidence: '/v3/?event=init&tid=123456789&dl=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // LinkedIn Insight Tag
-  if (hasLinkedInInsight) {
-    trackers.push({
-      service: 'LinkedIn Insight Tag',
-      host: 'snap.licdn.com',
-      evidence: '/li.lms-analytics/insight.min.js',
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // TikTok Pixel
-  if (hasTikTokPixel) {
-    trackers.push({
-      service: 'TikTok Pixel',
-      host: 'analytics.tiktok.com',
-      evidence: '/api/v2/pixel/track/?event=PageView&pixel_code=ABCDEFGHIJ&url=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Leady - slovenský tracker
-  if (hasLeady) {
-    trackers.push({
-      service: 'Leady',
-      host: 't.leady.com',
-      evidence: '/L?account_id=12345&event=pageview&url=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // GetSiteControl
-  if (hasGetSiteControl) {
-    trackers.push({
-      service: 'GetSiteControl',
-      host: 'events.getsitectrl.com',
-      evidence: '/api/v1/events?website_id=12345&event=page_view&url=' + encodeURIComponent(url),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Snowplow Analytics
-  if (hasSnowplow) {
-    trackers.push({
-      service: 'Snowplow Analytics',
-      host: 'd2dpiwfhf3tz0r.cloudfront.net',
-      evidence: '/i?e=pv&url=' + encodeURIComponent(url) + '&page=Homepage&tna=mytracker',
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Microsoft Bing Ads
-  if (hasBing) {
-    trackers.push({
-      service: 'Microsoft Bing Ads',
-      host: 'bat.bing.com',
-      evidence: '/action/12345?evt=pageLoad&rn=' + Math.random(),
-      status: hasConsentTool ? 'ok' : 'error' as const,
-      spamsBeforeConsent: !hasConsentTool
-    });
-  }
-  
-  // Google reCAPTCHA (technické, bez pre-consent problému)
-  if (hasRecaptcha) {
-    trackers.push({
-      service: 'Google reCAPTCHA',
-      host: 'google.com',
-      evidence: '/recaptcha/api.js?render=6Lc-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-      status: 'ok' as const,
-      spamsBeforeConsent: false
-    });
+  // Convert internal JSON to display format
+  return convertToDisplayFormat(internalJson, input);
+}
+
+async function generateInternalAuditJson(input: string, isHtml: boolean): Promise<InternalAuditJson> {
+  let htmlContent = input;
+  let finalUrl = input;
+
+  if (!isHtml) {
+    // For URL input, we can only do limited analysis due to CORS
+    finalUrl = normalizeUrl(input);
+    // In a real implementation, this would fetch the page
+    // For simulation, we'll use deterministic patterns based on domain
+    htmlContent = generateSimulatedHtml(getDomain(finalUrl));
+  } else {
+    // Extract final URL from HTML if possible
+    const urlMatch = htmlContent.match(/<base\s+href=["']([^"']+)["']/i) ||
+                    htmlContent.match(/window\.location\s*=\s*["']([^"']+)["']/);
+    if (urlMatch) {
+      finalUrl = urlMatch[1];
+    } else {
+      finalUrl = 'unknown';
+    }
   }
 
-  // 5. Rozšírená cookies analýza (realistické množstvo)
-  const technicalCookies = 4 + Math.floor(domainHash % 3); // 4-6 technických
-  let analyticalCookies = 0;
-  let marketingCookies = 0;
+  // Analyze third parties from HTML
+  const thirdParties = extractThirdParties(htmlContent, finalUrl);
   
-  // Určenie počtu cookies podľa služieb
-  if (hasGA) analyticalCookies += 4; // _ga, _gid, _ga_XXXXX, _gat
-  if (hasMatomo) analyticalCookies += 3; // _pk_id, _pk_ses, _pk_ref
-  if (hasFacebookPixel) marketingCookies += 3; // _fbp, _fbc, fr
-  if (hasTikTokPixel) marketingCookies += 2; // _ttp, _tt_enable_cookie
-  if (hasLinkedInInsight) marketingCookies += 4; // bcookie, lidc, UserMatchHistory, AnalyticsSyncHistory
-  if (hasPinterestTag) marketingCookies += 2; // _pin_unauth, _pinterest_sess
-  if (hasLeady) marketingCookies += 2; // leady_session_id, leady_visitor_id
-  if (hasSnowplow) analyticalCookies += 3; // _sp_id, _sp_ses, _sp_ogn
-  if (hasGetSiteControl) marketingCookies += 1; // gsc_ab_12345
-
-  const cookieDetails = [];
+  // Analyze beacons/trackers
+  const beacons = extractBeacons(htmlContent);
   
-  // Technické cookies (first-party)
-  const techCookieNames = ['PHPSESSID', 'laravel_session', 'XSRF-TOKEN', '_csrf_token', 'wordpress_test_cookie'];
-  for (let i = 0; i < technicalCookies; i++) {
-    cookieDetails.push({
-      name: techCookieNames[i] || `tech_cookie_${i}`,
-      type: 'first-party' as const,
-      category: 'technické' as const,
-      expiration: i === 0 ? 'session' : `${1 + Math.floor(Math.random() * 29)} dní`,
-      status: 'ok' as const
-    });
-  }
+  // Analyze cookies (simulated based on detected services)
+  const cookies = generateCookiesFromServices(thirdParties, beacons);
   
-  // Analytické cookies
-  if (hasGA) {
-    cookieDetails.push(
-      {
-        name: '_ga',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '2 roky',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: '_gid',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '24 hodín',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: '_ga_XXXXXXXXXX',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '2 roky',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: '_gat_gtag_UA_XXXXXXX_X',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '1 minúta',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
+  // Analyze storage
+  const storage = extractStorage(htmlContent);
   
-  if (hasSnowplow) {
-    cookieDetails.push(
-      {
-        name: '_sp_id.xxxx',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '2 roky',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: '_sp_ses.xxxx',
-        type: 'third-party' as const,
-        category: 'analytické' as const,
-        expiration: '30 minút',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
+  // Analyze CMP
+  const cmp = analyzeCMP(htmlContent, beacons);
   
-  // Marketingové cookies
-  if (hasFacebookPixel) {
-    cookieDetails.push(
-      {
-        name: '_fbp',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '3 mesiace',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: '_fbc',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '7 dní',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
-  
-  if (hasLinkedInInsight) {
-    cookieDetails.push(
-      {
-        name: 'bcookie',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '2 roky',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      },
-      {
-        name: 'lidc',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '24 hodín',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
-  
-  if (hasPinterestTag) {
-    cookieDetails.push(
-      {
-        name: '_pin_unauth',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '1 rok',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
-  
-  if (hasLeady) {
-    cookieDetails.push(
-      {
-        name: 'leady_session_id',
-        type: 'third-party' as const,
-        category: 'marketingové' as const,
-        expiration: '30 dní',
-        status: hasConsentTool ? 'ok' : 'error' as const
-      }
-    );
-  }
-
-  // 6. LocalStorage/SessionStorage (včetne osobných údajov)
-  const storageData = [];
-  
-  if (hasGA) {
-    storageData.push({
-      key: 'ga:clientId',
-      type: 'localStorage' as const,
-      valuePattern: 'GA1.2.1234567890.1234567890',
-      note: 'Google Analytics - identifikátor klienta (osobné údaje)'
-    });
-  }
-  
-  if (hasConsentTool) {
-    storageData.push({
-      key: 'CookieScriptConsent',
-      type: 'localStorage' as const,
-      valuePattern: '{"action":"accept","categories":["performance","targeting"],"save":true}',
-      note: 'Uložené preferencie súhlasu'
-    });
-  }
-  
-  // Kritické: osobné údaje v localStorage bez súhlasu
-  if (hasLeady || hasGetSiteControl) {
-    storageData.push({
-      key: 'gscs',
-      type: 'localStorage' as const,
-      valuePattern: '{"ip":"192.168.1.1","geo":"SK","user_id":"usr_abc123","session":"ses_def456"}',
-      note: 'IP adresa, geolokácia, user ID - osobné údaje bez súhlasu!'
-    });
-  }
-  
-  if (hasSnowplow) {
-    storageData.push({
-      key: 'snowplow_duid',
-      type: 'localStorage' as const,
-      valuePattern: '12345678-1234-1234-1234-123456789012',
-      note: 'Snowplow - doméno-unikátny identifikátor (osobné údaje)'
-    });
-  }
-
-  // 7. Validačné poistky a právne vyhodnotenie
-  const riskCount = trackers.filter(t => t.status === 'error').length;
-  const warningCount = trackers.filter(t => t.status === 'warning').length;
-  const trackersBeforeConsent = trackers.filter(t => t.spamsBeforeConsent).length;
-  
-  // Poistka A - konzistencia počtov
-  const expectedThirdPartyCount = thirdParties.length;
-  const expectedCookieCount = technicalCookies + analyticalCookies + marketingCookies;
-  const actualCookieCount = cookieDetails.length;
-  
-  // Poistka B - pred-súhlasové volania (kritické)
-  const hasPreConsentViolations = trackersBeforeConsent > 0;
-  
-  // Poistka C - LocalStorage PII
-  const hasPersonalDataInStorage = storageData.some(s => 
-    s.note.includes('osobné údaje') || 
-    s.note.includes('identifikátor') || 
-    s.note.includes('IP') || 
-    s.note.includes('geo') || 
-    s.note.includes('user_id')
-  );
-  
-  // Poistka D - minimálna senzitivita (detekuje nekompletný zber)
-  const hasKnownEmbeds = hasGA || hasFacebookPixel || hasGTM || hasPinterestTag;
-  const isDataIncomplete = (expectedThirdPartyCount < 3 && hasKnownEmbeds) || 
-                          (actualCookieCount !== expectedCookieCount);
-  
-  // Finálny verdikt podľa nových pravidiel
-  let finalVerdict: 'súlad' | 'čiastočný súlad' | 'nesúlad' | 'neúplné dáta' = 'súlad';
-  const violationReasons: string[] = [];
-  
-  if (isDataIncomplete) {
-    finalVerdict = 'neúplné dáta';
-    violationReasons.push('Nekompletný zber dát - počty nesedia so zoznamami');
-  } else if (hasPreConsentViolations) {
-    finalVerdict = 'nesúlad';
-    violationReasons.push(`${trackersBeforeConsent} trackerov sa spúšťa pred súhlasom`);
-  } else if (hasPersonalDataInStorage && !hasConsentTool) {
-    finalVerdict = 'nesúlad';
-    violationReasons.push('Osobné údaje v localStorage bez súhlasu');
-  } else if ((analyticalCookies > 0 || marketingCookies > 0) && !hasConsentTool) {
-    finalVerdict = 'nesúlad';
-    violationReasons.push('Analytické/marketingové cookies bez consent managementu');
-  } else if (!isHttps) {
-    finalVerdict = 'nesúlad';
-    violationReasons.push('Chýba HTTPS zabezpečenie');
-  } else if (riskCount > 0) {
-    finalVerdict = 'nesúlad';
-    violationReasons.push('Iné kritické problémy identifikované');
-  } else if (warningCount > 0) {
-    finalVerdict = 'čiastočný súlad';
-    violationReasons.push('Menšie problémy vyžadujú pozornosť');
-  }
+  // Determine verdict with validation safeguards
+  const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp);
 
   return {
-    url: originalUrl,
-    finalUrl,
-    hasRedirect,
-    timestamp: new Date().toISOString(),
-    
-    // A) Manažérsky sumár (používa nový deterministický verdikt)
-    managementSummary: {
-      verdict: finalVerdict,
-      overall: finalVerdict === 'neúplné dáta'
-        ? `Audit stránky ${domain} nie je kompletný - zber dát vykazuje nezrovnalosti.`
-        : finalVerdict === 'nesúlad'
-        ? `Stránka ${domain} nie je v súlade s GDPR a ePrivacy direktívou.`
-        : finalVerdict === 'čiastočný súlad'
-        ? `Stránka ${domain} je prevažne v súlade, ale vyžaduje zlepšenia.`
-        : `Stránka ${domain} vykazuje dobrý súlad s GDPR a ePrivacy.`,
-      risks: finalVerdict === 'neúplné dáta'
-        ? `Problémy so zberom dát: ${violationReasons.join(', ')}. Audit treba opakovať s dôkladnejšou analýzou.`
-        : finalVerdict === 'nesúlad'
-        ? `Kritické problémy: ${violationReasons.join(', ')}. Riziko pokút až 4% ročného obratu.`
-        : finalVerdict === 'čiastočný súlad'
-        ? `Menšie problémy: ${violationReasons.join(', ')}. Odporúčame optimalizáciu.`
-        : `Pozitíva: ${hasConsentTool ? 'implementovaný consent management, ' : ''}${isHttps ? 'HTTPS zabezpečenie, ' : ''}prevažne technické cookies.`
-    },
-
-    // B) Detailná analýza
-    detailedAnalysis: {
-      // 1. HTTPS
-      https: {
-        status: isHttps ? 'ok' : 'error',
-        comment: isHttps 
-          ? 'HTTPS správne nakonfigurované' 
-          : 'Chýba SSL certifikát - riziko pre bezpečnosť údajov'
-      },
-      
-      // 2. Tretie strany
-      thirdParties: {
-        total: thirdParties.length,
-        list: thirdParties
-      },
-      
-      // 3. Trackery/Beacony
-      trackers,
-      
-      // 4. Cookies
-      cookies: {
-        total: technicalCookies + analyticalCookies + marketingCookies,
-        details: cookieDetails
-      },
-      
-      // 5. LocalStorage/SessionStorage
-      storage: storageData,
-      
-      // 6. CMP a časovanie
-      consentManagement: {
-        hasConsentTool,
-        trackersBeforeConsent,
-        evidence: trackersBeforeConsent > 0 
-          ? trackers.filter(t => t.spamsBeforeConsent).map(t => `${t.service}: ${t.evidence}`).join('; ')
-          : 'Žiadne trackery sa nespúšťajú pred súhlasom'
-      },
-      
-      // 7. Právne zhrnutie
-      legalSummary: riskCount > 0
-        ? `ePrivacy: Porušenie článku 5(3) - ukladanie cookies bez súhlasu. GDPR: Spracovanie osobných údajov bez právneho základu (čl. 6).`
-        : `ePrivacy a GDPR: Technické cookies povolené, ostatné s consent managementom v súlade s právnymi požiadavkami.`
-    },
-
-    // C) OK vs. Rizikové
-    riskTable: [
-      {
-        area: 'HTTPS zabezpečenie',
-        status: isHttps ? 'ok' : 'error',
-        comment: isHttps ? 'Správne nakonfigurované' : 'Chýba SSL certifikát'
-      },
-      {
-        area: 'Cookies bez súhlasu',
-        status: (analyticalCookies > 0 || marketingCookies > 0) && !hasConsentTool ? 'error' : 'ok',
-        comment: hasConsentTool ? 'Implementovaný consent management' : 'Cookies sa ukladajú bez súhlasu'
-      },
-      {
-        area: 'Trackery pred súhlasom',
-        status: trackersBeforeConsent > 0 ? 'error' : 'ok',
-        comment: trackersBeforeConsent > 0 
-          ? `${trackersBeforeConsent} trackerov sa spúšťa pred súhlasom`
-          : 'Trackery rešpektujú nastavenia súhlasu'
-      },
-      {
-        area: 'Sociálne siete',
-        status: hasFacebookPixel && !hasConsentTool ? 'warning' : 'ok',
-        comment: hasFacebookPixel 
-          ? hasConsentTool ? 'FB Pixel správne blokovaný' : 'FB Pixel sa spúšťa automaticky'
-          : 'Žiadne sociálne pluginy'
-      },
-      {
-        area: 'LocalStorage osobné údaje',
-        status: storageData.some(s => s.note.includes('identifikátor')) && !hasConsentTool ? 'warning' : 'ok',
-        comment: storageData.some(s => s.note.includes('identifikátor')) && !hasConsentTool
-          ? 'Identifikátory v localStorage bez súhlasu'
-          : 'LocalStorage v súlade'
-      }
-    ],
-
-    // D) Odporúčania - budú generované cez funkciu
-    recommendations: generateRecommendations({
-      hasGA, hasFacebookPixel, hasGTM, hasConsentTool, isHttps, 
-      hasTikTokPixel, hasMatomo, hasLinkedInInsight, hasPinterestTag, 
-      hasLeady, hasGetSiteControl, hasSnowplow, hasEtarget, hasBing,
-      hasPersonalDataInStorage, hasPreConsentViolations, finalVerdict
-    }),
-
-    // Backward compatibility properties
-    summary: {
-      overall: finalVerdict === 'neúplné dáta'
-        ? `Audit stránky ${domain} nie je kompletný - zber dát vykazuje nezrovnalosti.`
-        : finalVerdict === 'nesúlad'
-        ? `Stránka ${domain} nie je v súlade s GDPR a ePrivacy direktívou.`
-        : finalVerdict === 'čiastočný súlad'
-        ? `Stránka ${domain} je prevažne v súlade, ale vyžaduje zlepšenia.`
-        : `Stránka ${domain} vykazuje dobrý súlad s GDPR a ePrivacy.`,
-      risks: finalVerdict === 'neúplné dáta'
-        ? `Problémy so zberom dát: ${violationReasons.join(', ')}. Audit treba opakovať s dôkladnejšou analýzou.`
-        : finalVerdict === 'nesúlad'
-        ? `Kritické problémy: ${violationReasons.join(', ')}. Riziko pokút až 4% ročného obratu.`
-        : finalVerdict === 'čiastočný súlad'
-        ? `Menšie problémy: ${violationReasons.join(', ')}. Odporúčame optimalizáciu.`
-        : `Pozitíva: ${hasConsentTool ? 'implementovaný consent management, ' : ''}${isHttps ? 'HTTPS zabezpečenie, ' : ''}prevažne technické cookies.`
-    },
+    final_url: finalUrl,
     https: {
-      status: isHttps ? 'ok' : 'error',
-      description: isHttps 
-        ? 'HTTPS správne nakonfigurované' 
-        : 'Chýba SSL certifikát - riziko pre bezpečnosť údajov'
+      supports: finalUrl.startsWith('https://'),
+      redirects_http_to_https: true // Assume modern sites redirect
     },
-    cookies: {
-      total: actualCookieCount,
-      technical: technicalCookies,
-      analytical: analyticalCookies,
-      marketing: marketingCookies
-    },
-    trackers: trackers.map(t => ({
-      name: t.service,
-      status: t.status
-    })),
-    thirdParties
+    third_parties: thirdParties,
+    beacons: beacons,
+    cookies: cookies,
+    storage: storage,
+    cmp: cmp,
+    verdict: verdict,
+    reasons: reasons
   };
-};
-
-interface RecommendationParams {
-  hasGA: boolean;
-  hasFacebookPixel: boolean;
-  hasGTM: boolean;
-  hasConsentTool: boolean;
-  isHttps: boolean;
-  hasTikTokPixel: boolean;
-  hasMatomo: boolean;
-  hasLinkedInInsight: boolean;
-  hasPinterestTag: boolean;
-  hasLeady: boolean;
-  hasGetSiteControl: boolean;
-  hasSnowplow: boolean;
-  hasEtarget: boolean;
-  hasBing: boolean;
-  hasPersonalDataInStorage: boolean;
-  hasPreConsentViolations: boolean;
-  finalVerdict: string;
 }
 
-const generateRecommendations = (params: RecommendationParams) => {
-  const {
-    hasGA, hasFacebookPixel, hasGTM, hasConsentTool, isHttps, 
-    hasTikTokPixel, hasMatomo, hasLinkedInInsight, hasPinterestTag, 
-    hasLeady, hasGetSiteControl, hasSnowplow, hasEtarget, hasBing,
-    hasPersonalDataInStorage, hasPreConsentViolations, finalVerdict
-  } = params;
+function extractThirdParties(html: string, finalUrl: string): Array<{ host: string; service: string }> {
+  const baseDomain = getDomain(finalUrl);
+  const hosts = new Set<string>();
   
-  const recommendations = [];
-
-  // Kritické problémy najprv
-  if (!isHttps) {
-    recommendations.push({
-      title: 'Implementovať HTTPS',
-      description: 'Zakúpiť a nakonfigurovať SSL certifikát pre bezpečné šifrovanie dát'
-    });
+  // Extract from script src attributes
+  const scriptMatches = html.matchAll(/<script[^>]*src=["']([^"']+)["']/gi);
+  for (const match of scriptMatches) {
+    const url = match[1];
+    if (url.startsWith('http')) {
+      hosts.add(getDomain(url));
+    }
+  }
+  
+  // Extract from iframe src attributes
+  const iframeMatches = html.matchAll(/<iframe[^>]*src=["']([^"']+)["']/gi);
+  for (const match of iframeMatches) {
+    const url = match[1];
+    if (url.startsWith('http')) {
+      hosts.add(getDomain(url));
+    }
+  }
+  
+  // Extract from img src (tracking pixels)
+  const imgMatches = html.matchAll(/<img[^>]*src=["']([^"']+)["']/gi);
+  for (const match of imgMatches) {
+    const url = match[1];
+    if (url.startsWith('http')) {
+      hosts.add(getDomain(url));
+    }
+  }
+  
+  // Extract from link href
+  const linkMatches = html.matchAll(/<link[^>]*href=["']([^"']+)["']/gi);
+  for (const match of linkMatches) {
+    const url = match[1];
+    if (url.startsWith('http')) {
+      hosts.add(getDomain(url));
+    }
   }
 
-  if (!hasConsentTool && (hasGA || hasFacebookPixel || hasTikTokPixel || hasLinkedInInsight || hasPinterestTag)) {
-    recommendations.push({
-      title: 'Implementovať Consent Management Platform',
-      description: 'Nainštalovať Cookiebot, OneTrust alebo Cookie Script pre správu súhlasov s marketing/analytics cookies'
-    });
+  // Filter out first-party and map to services
+  const thirdParties: Array<{ host: string; service: string }> = [];
+  for (const host of hosts) {
+    if (host !== baseDomain && host !== 'unknown') {
+      const service = getServiceForHost(host);
+      thirdParties.push({ host, service });
+    }
   }
 
-  // Google services
-  if (hasGTM && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Nakonfigurovať GTM Consent Mode v2',
-      description: 'Nastaviť ad_storage, analytics_storage, ad_user_data, ad_personalization na "denied" by default, triggery až po "grant"'
-    });
-  }
+  return thirdParties;
+}
 
-  if (hasGA && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať Google Analytics pred súhlasom',
-      description: 'Zabezpečiť spúšťanie GA až po súhlase alebo prejsť na anonymizovanú analýzu bez cookies'
-    });
-  }
-
-  // Social networks - high priority  
-  if (hasFacebookPixel && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať Facebook Pixel pred súhlasom',
-      description: 'FB Pixel je marketingový nástroj a musí byť blokovaný do udelenia explicitného súhlasu'
-    });
-  }
-
-  if (hasTikTokPixel && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať TikTok Pixel pred súhlasom',
-      description: 'TikTok tracking vyžaduje súhlas pre marketingové cookies a behavioral targeting'
-    });
-  }
-
-  if (hasLinkedInInsight && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať LinkedIn Insight Tag pred súhlasom',
-      description: 'LinkedIn tracking musí byť pozastavený do získania súhlasu pre B2B marketing cookies'
-    });
-  }
-
-  if (hasPinterestTag && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať Pinterest Tag pred súhlasom',
-      description: 'Pinterest conversion tracking vyžaduje súhlas pre marketingové cookies'
-    });
-  }
-
-  // Slovak/local trackers
-  if (hasLeady && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať Leady tracking pred súhlasom',
-      description: 'Leady identifikácia návštevníkov musí byť blokovaná do súhlasu s behavioral trackingom'
-    });
-  }
-
-  if (hasGetSiteControl && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať GetSiteControl pred súhlasom',
-      description: 'Widget analytics musia rešpektovať súhlas pre behavioral tracking'
-    });
-  }
-
-  if (hasSnowplow && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Nakonfigurovať Snowplow anonymizáciu',
-      description: 'Anonymizovať IP adresy a user ID, používať cookieless tracking bez súhlasu'
-    });
-  }
-
-  // Microsoft
-  if (hasBing && hasPreConsentViolations) {
-    recommendations.push({
-      title: 'Blokovať Microsoft Bing Ads pred súhlasom',
-      description: 'UET tag musí byť pozastavený do súhlasu s ads/conversion tracking'
-    });
-  }
-
-  // LocalStorage issues
-  if (hasPersonalDataInStorage) {
-    recommendations.push({
-      title: 'Vyčistiť LocalStorage od osobných údajov',
-      description: 'Neukladať IP, geo, user_id pred súhlasom; pri "deny" vymazať existujúce identifikátory'
-    });
-  }
-
-  // Analytics alternatives
-  if (hasMatomo && !hasConsentTool) {
-    recommendations.push({
-      title: 'Nakonfigurovať Matomo pre súlad',
-      description: 'Aktivovať IP anonymizáciu, cookieless tracking alebo implementovať opt-out mechanizmus'
-    });
-  }
-
-  // Always include these
-  recommendations.push({
-    title: 'Aktualizovať Cookie Policy',
-    description: 'Zosúladiť zásady s reálnym stavom - uviesť všetky tretie strany, účely, retenčné časy'
+function extractBeacons(html: string): Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> {
+  const beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> = [];
+  
+  // Look for tracking calls in inline scripts
+  const scriptContent = html.replace(/<script[^>]*>(.*?)<\/script>/gis, (match, content) => {
+    // Check for Facebook Pixel
+    if (content.includes('fbq(') || content.includes("facebook.com/tr")) {
+      const fbId = content.match(/fbq\(['"]init['"],\s*['"](\d+)['"]/) || content.match(/id=(\d+)/);
+      beacons.push({
+        host: 'facebook.com',
+        sample_url: `facebook.com/tr?id=${fbId?.[1] || 'XXXXXXXXX'}&ev=PageView&noscript=1`,
+        params: ['id', 'ev', 'noscript'],
+        service: 'Facebook Pixel',
+        pre_consent: true
+      });
+    }
+    
+    // Check for Google Analytics/GTM
+    if (content.includes('gtag(') || content.includes('ga(')) {
+      const gaId = content.match(/GA_MEASUREMENT_ID.*?['"]([^'"]+)['"]/) || content.match(/gtag\(['"]config['"],\s*['"]([^'"]+)['"]/) || ['', 'GA_MEASUREMENT_ID'];
+      beacons.push({
+        host: 'google-analytics.com',
+        sample_url: `region1.google-analytics.com/g/collect?tid=${gaId[1]}&t=pageview`,
+        params: ['tid', 't', 'cid'],
+        service: 'Google Analytics',
+        pre_consent: true
+      });
+    }
+    
+    // Check for Google Ads
+    if (content.includes('googletag') || content.includes('googlesyndication')) {
+      beacons.push({
+        host: 'googlesyndication.com',
+        sample_url: 'pagead2.googlesyndication.com/ccm/collect?en=page_view&gct=UA-XXXXXXXX-X',
+        params: ['en', 'gct'],
+        service: 'Google Ads',
+        pre_consent: true
+      });
+    }
+    
+    // Check for Pinterest
+    if (content.includes('pintrk(') || content.includes('pinterest.com')) {
+      beacons.push({
+        host: 'ct.pinterest.com',
+        sample_url: 'ct.pinterest.com/v3/?event=init&tid=XXXXXXXXX',
+        params: ['event', 'tid'],
+        service: 'Pinterest',
+        pre_consent: true
+      });
+    }
+    
+    return match;
   });
 
-  recommendations.push({
-    title: 'Implementovať logovanie súhlasov',
-    description: 'Uchovávať timestamp, verziu CMP, preferencie (dôkaz pre kontroly úradov)'
-  });
-
-  if (finalVerdict === 'neúplné dáta') {
-    recommendations.unshift({
-      title: 'Opraviť zber dát pre kompletný audit',
-      description: 'Zistiť príčinu nedostatočnej detekcie a opakovať audit s komplexnejším nástrojom'
+  // Check for tracking pixels in img tags
+  const pixelMatches = html.matchAll(/<img[^>]*src=["']([^"']*(?:facebook\.com\/tr|analytics|collect|track)[^"']*)["']/gi);
+  for (const match of pixelMatches) {
+    const url = match[1];
+    const host = getDomain(url);
+    const service = getServiceForHost(host);
+    
+    beacons.push({
+      host: host,
+      sample_url: url,
+      params: extractUrlParams(url),
+      service: service,
+      pre_consent: true
     });
   }
+
+  return beacons;
+}
+
+function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>): Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+  const cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
+  
+  // Add standard technical cookies
+  cookies.push(
+    { name: 'PHPSESSID', party: '1P', type: 'technical', expiry_days: null },
+    { name: 'CookieScriptConsent', party: '1P', type: 'technical', expiry_days: 365 }
+  );
+
+  // Generate cookies based on detected services
+  const services = new Set([...thirdParties.map(tp => tp.service), ...beacons.map(b => b.service)]);
+  
+  if (services.has('Facebook Pixel')) {
+    cookies.push(
+      { name: '_fbp', party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: '_fbc', party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: 'fr', party: '3P', type: 'marketing', expiry_days: 90 }
+    );
+  }
+  
+  if (services.has('Google Analytics')) {
+    cookies.push(
+      { name: '_ga', party: '1P', type: 'analytics', expiry_days: 730 },
+      { name: '_gid', party: '1P', type: 'analytics', expiry_days: 1 },
+      { name: '_gat_gtag_UA_XXXXXXXX_X', party: '1P', type: 'analytics', expiry_days: 1 }
+    );
+  }
+  
+  if (services.has('Google Ads')) {
+    cookies.push(
+      { name: '_gcl_au', party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: 'IDE', party: '3P', type: 'marketing', expiry_days: 390 }
+    );
+  }
+  
+  if (services.has('Pinterest')) {
+    cookies.push(
+      { name: '_pin_unauth', party: '1P', type: 'marketing', expiry_days: 365 }
+    );
+  }
+  
+  if (services.has('LinkedIn Insights')) {
+    cookies.push(
+      { name: 'li_sugr', party: '3P', type: 'marketing', expiry_days: 90 },
+      { name: 'bcookie', party: '3P', type: 'marketing', expiry_days: 730 }
+    );
+  }
+  
+  if (services.has('Leady')) {
+    cookies.push(
+      { name: 'leady_session_id', party: '1P', type: 'marketing', expiry_days: 30 },
+      { name: 'leady_track_id', party: '1P', type: 'marketing', expiry_days: 365 }
+    );
+  }
+  
+  if (services.has('Snowplow')) {
+    cookies.push(
+      { name: '_sp_id.xxxx', party: '1P', type: 'analytics', expiry_days: 730 },
+      { name: '_sp_ses.xxxx', party: '1P', type: 'analytics', expiry_days: null }
+    );
+  }
+
+  return cookies;
+}
+
+function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }> {
+  const storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }> = [];
+  
+  // Look for localStorage/sessionStorage usage in scripts
+  const localStorageMatches = html.matchAll(/localStorage\.setItem\(['"]([^'"]+)['"],\s*['"]?([^'"]*?)['"]?\)/g);
+  for (const match of localStorageMatches) {
+    const key = match[1];
+    const value = match[2] || 'unknown';
+    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => pattern.test(key) || pattern.test(value));
+    
+    storage.push({
+      scope: 'local',
+      key: key,
+      sample_value: value.length > 50 ? value.substring(0, 50) + '...' : value,
+      contains_personal_data: containsPersonalData
+    });
+  }
+  
+  const sessionStorageMatches = html.matchAll(/sessionStorage\.setItem\(['"]([^'"]+)['"],\s*['"]?([^'"]*?)['"]?\)/g);
+  for (const match of sessionStorageMatches) {
+    const key = match[1];
+    const value = match[2] || 'unknown';
+    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => pattern.test(key) || pattern.test(value));
+    
+    storage.push({
+      scope: 'session',
+      key: key,
+      sample_value: value.length > 50 ? value.substring(0, 50) + '...' : value,
+      contains_personal_data: containsPersonalData
+    });
+  }
+  
+  // Add common problematic storage items based on detected services
+  if (html.includes('gscs') || html.includes('GetSiteControl')) {
+    storage.push({
+      scope: 'local',
+      key: 'gscs',
+      sample_value: '{"ip":"1.2.3.4","geo":"SK","user_id":"abc123"}',
+      contains_personal_data: true
+    });
+  }
+
+  return storage;
+}
+
+function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
+  const cmpPatterns = [
+    'CookieScriptConsent', 'OptanonConsent', 'CookieConsent', 'cookieyes-consent',
+    'Cookiebot', 'OneTrust', 'CookieYes'
+  ];
+  
+  let cmpPresent = false;
+  let cookieName = '';
+  
+  for (const pattern of cmpPatterns) {
+    if (html.toLowerCase().includes(pattern.toLowerCase())) {
+      cmpPresent = true;
+      cookieName = pattern;
+      break;
+    }
+  }
+  
+  // Check if marketing/analytics beacons fire before consent
+  const preConsentFires = beacons.some(beacon => 
+    beacon.pre_consent && 
+    (beacon.service.includes('Facebook') || 
+     beacon.service.includes('Google') || 
+     beacon.service.includes('Pinterest') ||
+     beacon.service.includes('Leady'))
+  );
+
+  return {
+    present: cmpPresent,
+    cookie_name: cookieName,
+    raw_value: cmpPresent ? 'accept:false,analytics:false,marketing:false' : '',
+    pre_consent_fires: preConsentFires
+  };
+}
+
+function determineVerdict(
+  thirdParties: Array<{ host: string; service: string }>,
+  beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>,
+  cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }>,
+  storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }>,
+  cmp: { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean }
+): { verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE'; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // Validation safeguards (Poistky A-D)
+  
+  // Poistka A - Data consistency
+  const marketingCookies = cookies.filter(c => c.type === 'marketing').length;
+  const analyticsCookies = cookies.filter(c => c.type === 'analytics').length;
+  if (thirdParties.length === 0 && beacons.length > 0) {
+    reasons.push('Nekonzistentné dáta: Zistené trackery bez tretích strán');
+    return { verdict: 'INCOMPLETE', reasons };
+  }
+
+  // Poistka B - Pre-consent violations
+  const preConsentBeacons = beacons.filter(b => b.pre_consent);
+  if (preConsentBeacons.length > 0) {
+    reasons.push(`Pred-súhlasové volania: ${preConsentBeacons.map(b => b.service).join(', ')}`);
+  }
+
+  // Poistka C - LocalStorage PII
+  const personalDataInStorage = storage.filter(s => s.contains_personal_data);
+  if (personalDataInStorage.length > 0) {
+    reasons.push(`Osobné údaje v storage: ${personalDataInStorage.map(s => s.key).join(', ')}`);
+  }
+
+  // Poistka D - CMP ineffectiveness
+  if (cmp.present && cmp.pre_consent_fires) {
+    reasons.push('CMP neblokuje trackery pred súhlasom');
+  }
+
+  // Determine final verdict
+  if (reasons.length === 0) {
+    // Additional checks for compliance
+    if (marketingCookies === 0 && analyticsCookies === 0 && preConsentBeacons.length === 0) {
+      return { verdict: 'COMPLIANT', reasons: ['Žiadne porušenia GDPR/ePrivacy'] };
+    }
+  }
+
+  return { verdict: 'NON_COMPLIANT', reasons };
+}
+
+function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string): AuditData {
+  const timestamp = new Date().toISOString();
+  const finalUrl = internalJson.final_url;
+  
+  // Map verdict
+  const verdictMap = {
+    'COMPLIANT': 'súlad' as const,
+    'NON_COMPLIANT': 'nesúlad' as const,
+    'INCOMPLETE': 'neúplné dáta' as const
+  };
+
+  const verdict = verdictMap[internalJson.verdict];
+
+  // Generate management summary
+  const managementSummary = {
+    verdict,
+    overall: generateOverallSummary(internalJson),
+    risks: generateRiskSummary(internalJson)
+  };
+
+  // Convert detailed analysis
+  const detailedAnalysis = {
+    https: {
+      status: internalJson.https.supports ? 'ok' as const : 'warning' as const,
+      description: internalJson.https.supports ? 'HTTPS je správne nakonfigurované' : 'HTTPS nie je nakonfigurované'
+    },
+    thirdParties: {
+      total: internalJson.third_parties.length,
+      list: internalJson.third_parties.map(tp => ({
+        domain: tp.host,
+        requests: Math.floor(Math.random() * 10) + 1 // Simulated
+      }))
+    },
+    trackers: internalJson.beacons.map(beacon => ({
+      service: beacon.service,
+      host: beacon.host,
+      evidence: beacon.sample_url,
+      status: beacon.pre_consent ? 'error' as const : 'ok' as const,
+      spamsBeforeConsent: beacon.pre_consent
+    })),
+    cookies: {
+      total: internalJson.cookies.length,
+      details: internalJson.cookies.map(cookie => ({
+        name: cookie.name,
+        type: cookie.party === '1P' ? 'first-party' as const : 'third-party' as const,
+        category: cookie.type === 'technical' ? 'technické' as const : 
+                 cookie.type === 'analytics' ? 'analytické' as const : 'marketingové' as const,
+        expiration: cookie.expiry_days ? `${cookie.expiry_days} dní` : 'session',
+        status: cookie.type === 'marketing' ? 'error' as const : 'ok' as const
+      }))
+    },
+    storage: internalJson.storage.map(item => ({
+      key: item.key,
+      type: item.scope === 'local' ? 'localStorage' as const : 'sessionStorage' as const,
+      valuePattern: item.sample_value,
+      note: item.contains_personal_data ? 'Obsahuje osobné údaje' : 'Technické údaje'
+    })),
+    consentManagement: {
+      hasConsentTool: internalJson.cmp.present,
+      trackersBeforeConsent: internalJson.beacons.filter(b => b.pre_consent).length,
+      evidence: internalJson.cmp.pre_consent_fires ? 'Trackery sa spúšťajú pred súhlasom' : 'CMP správne blokuje'
+    },
+    legalSummary: generateLegalSummary(internalJson)
+  };
+
+  // Generate risk table
+  const riskTable = generateRiskTable(internalJson);
+
+  // Generate recommendations
+  const recommendations = generateRecommendations(internalJson);
+
+  return {
+    url: originalInput,
+    finalUrl: finalUrl,
+    hasRedirect: !originalInput.startsWith('https://'),
+    timestamp,
+    managementSummary,
+    detailedAnalysis,
+    riskTable,
+    recommendations,
+    // Backward compatibility
+    summary: {
+      overall: managementSummary.overall,
+      risks: managementSummary.risks
+    },
+    https: detailedAnalysis.https,
+    cookies: {
+      total: internalJson.cookies.length,
+      technical: internalJson.cookies.filter(c => c.type === 'technical').length,
+      analytical: internalJson.cookies.filter(c => c.type === 'analytics').length,
+      marketing: internalJson.cookies.filter(c => c.type === 'marketing').length
+    },
+    trackers: internalJson.beacons.map(b => ({
+      name: b.service,
+      status: b.pre_consent ? 'error' as const : 'ok' as const
+    })),
+    thirdParties: internalJson.third_parties.map(tp => ({
+      domain: tp.host,
+      requests: Math.floor(Math.random() * 10) + 1
+    })),
+    _internal: internalJson
+  };
+}
+
+// Helper functions
+function getDomain(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    if (url.includes('.')) {
+      return url.split('/')[0];
+    }
+    return 'unknown';
+  }
+}
+
+function getServiceForHost(host: string): string {
+  for (const [pattern, service] of Object.entries(SERVICE_PATTERNS)) {
+    if (host.includes(pattern)) {
+      return service;
+    }
+  }
+  return 'Unknown Service';
+}
+
+function extractUrlParams(url: string): string[] {
+  try {
+    const urlObj = new URL(url);
+    return Array.from(urlObj.searchParams.keys());
+  } catch {
+    const params = url.split('?')[1];
+    if (params) {
+      return params.split('&').map(p => p.split('=')[0]);
+    }
+    return [];
+  }
+}
+
+function normalizeUrl(url: string): string {
+  if (!url.startsWith('http')) {
+    url = 'https://' + url;
+  }
+  return url;
+}
+
+function generateSimulatedHtml(domain: string): string {
+  // Generate realistic HTML based on domain for demo purposes
+  return `<html><head><title>Demo</title></head><body><script src="https://www.googletagmanager.com/gtag/js"></script></body></html>`;
+}
+
+function generateOverallSummary(internalJson: InternalAuditJson): string {
+  if (internalJson.verdict === 'COMPLIANT') {
+    return 'Webová stránka je v súlade s GDPR a ePrivacy direktívou. Boli implementované potrebné opatrenia na ochranu osobných údajov.';
+  } else if (internalJson.verdict === 'INCOMPLETE') {
+    return 'Audit nemohol byť dokončený z dôvodu neúplných dát. Pre presné vyhodnotenie je potrebná hlbšia analýza.';
+  } else {
+    const violations = internalJson.reasons.length;
+    return `Webová stránka nie je v súlade s GDPR a ePrivacy direktívou. Identifikované boli ${violations} porušenia, ktoré vyžadujú okamžité riešenie.`;
+  }
+}
+
+function generateRiskSummary(internalJson: InternalAuditJson): string {
+  const risks: string[] = [];
+  
+  if (internalJson.beacons.some(b => b.pre_consent)) {
+    risks.push('Pred-súhlasové spúšťanie trackerov');
+  }
+  
+  if (internalJson.storage.some(s => s.contains_personal_data)) {
+    risks.push('Ukladanie osobných údajov bez súhlasu');
+  }
+  
+  if (internalJson.cmp.pre_consent_fires) {
+    risks.push('Neefektívny consent management');
+  }
+  
+  if (risks.length === 0) {
+    return 'Neboli identifikované žiadne významné riziká súvisiace s ochranou osobných údajov.';
+  }
+  
+  return `Hlavné riziká: ${risks.join(', ')}.`;
+}
+
+function generateLegalSummary(internalJson: InternalAuditJson): string {
+  const violations: string[] = [];
+  
+  if (internalJson.beacons.some(b => b.pre_consent && b.service.includes('Facebook'))) {
+    violations.push('Facebook Pixel sa spúšťa pred súhlasom (porušenie ePrivacy)');
+  }
+  
+  if (internalJson.beacons.some(b => b.pre_consent && b.service.includes('Google'))) {
+    violations.push('Google Analytics/Ads sa spúšťa pred súhlasom (porušenie ePrivacy)');
+  }
+  
+  if (internalJson.storage.some(s => s.contains_personal_data)) {
+    violations.push('Osobné údaje v LocalStorage bez právneho základu (porušenie GDPR)');
+  }
+  
+  if (violations.length === 0) {
+    return 'Zo základnej analýzy nevyplývajú zjavné porušenia GDPR alebo ePrivacy direktívy.';
+  }
+  
+  return `Právne riziká: ${violations.join('; ')}.`;
+}
+
+function generateRiskTable(internalJson: InternalAuditJson): Array<{ area: string; status: 'ok' | 'warning' | 'error'; comment: string }> {
+  return [
+    {
+      area: 'HTTPS',
+      status: internalJson.https.supports ? 'ok' : 'warning',
+      comment: internalJson.https.supports ? 'Podporované' : 'Chýba HTTPS'
+    },
+    {
+      area: 'CMP',
+      status: internalJson.cmp.present ? (internalJson.cmp.pre_consent_fires ? 'warning' : 'ok') : 'error',
+      comment: internalJson.cmp.present ? 
+        (internalJson.cmp.pre_consent_fires ? 'Prítomné, ale neblokuje' : 'Správne nakonfigurované') : 
+        'Chýba consent management'
+    },
+    {
+      area: 'Tretie strany',
+      status: internalJson.third_parties.length > 0 ? 'warning' : 'ok',
+      comment: `${internalJson.third_parties.length} tretích strán`
+    },
+    {
+      area: 'Beacony',
+      status: internalJson.beacons.some(b => b.pre_consent) ? 'error' : 'ok',
+      comment: internalJson.beacons.some(b => b.pre_consent) ? 'Pred-súhlasové volania' : 'V súlade'
+    },
+    {
+      area: 'Cookies',
+      status: internalJson.cookies.some(c => c.type === 'marketing') ? 'warning' : 'ok',
+      comment: `${internalJson.cookies.length} cookies celkom`
+    },
+    {
+      area: 'Storage',
+      status: internalJson.storage.some(s => s.contains_personal_data) ? 'error' : 'ok',
+      comment: internalJson.storage.some(s => s.contains_personal_data) ? 'Obsahuje osobné údaje' : 'Bez osobných údajov'
+    }
+  ];
+}
+
+function generateRecommendations(internalJson: InternalAuditJson): Array<{ title: string; description: string }> {
+  const recommendations: Array<{ title: string; description: string }> = [];
+  
+  if (internalJson.beacons.some(b => b.pre_consent && b.service.includes('Google'))) {
+    recommendations.push({
+      title: 'Google Tag Manager - Consent Mode v2',
+      description: 'Implementujte Consent Mode v2 s default denied pre ad_storage, analytics_storage, ad_user_data a ad_personalization. Triggery spúšťajte až po udelení súhlasu.'
+    });
+  }
+  
+  if (internalJson.cmp.present && internalJson.cmp.pre_consent_fires) {
+    recommendations.push({
+      title: 'Vylepšenie Consent Management Platform',
+      description: 'Nakonfigurujte CMP tak, aby blokovala všetky marketing a analytics skripty do udelenia súhlasu. Otestujte, že sa cookies _fbp, _gcl_*, _pin_* neukladajú pred súhlasom.'
+    });
+  }
+  
+  if (!internalJson.cmp.present) {
+    recommendations.push({
+      title: 'Implementácia Consent Management',
+      description: 'Nainštalujte CMP riešenie (Cookiebot, OneTrust, CookieYes) pre správu súhlasov. Mapujte kategórie cookies a blokujte ich podľa preferencií používateľa.'
+    });
+  }
+  
+  if (internalJson.beacons.some(b => b.pre_consent && b.service.includes('Facebook'))) {
+    recommendations.push({
+      title: 'Facebook Pixel - Blokovaná pred súhlasom',
+      description: 'Presuňte Facebook Pixel pod správu GTM alebo CMP. Zabezpečte, aby sa volania facebook.com/tr nevykonávali pred udelením súhlasu pre marketing cookies.'
+    });
+  }
+  
+  if (internalJson.storage.some(s => s.contains_personal_data)) {
+    recommendations.push({
+      title: 'LocalStorage - Ochrana osobných údajov',
+      description: 'Neukladajte identifikátory používateľov, IP adresy alebo geo údaje do LocalStorage pred súhlasom. Pri "deny" súhlase existujúce údaje vymažte.'
+    });
+  }
+  
+  recommendations.push({
+    title: 'Cookie Policy - Aktualizácia',
+    description: 'Zosúlaďte Cookie Policy s reálnym stavom. Uveďte presné názvy cookies, ich účely, doby uchovávania a tretie strany, ktoré ich používajú.'
+  });
+  
+  recommendations.push({
+    title: 'Logovanie súhlasov',
+    description: 'Implementujte záznamy o súhlasoch s timestamp, verziou CMP a preferenciami používateľa. Tieto záznamy slúžia ako dôkaz pri kontrolách.'
+  });
 
   return recommendations;
-};
-
-export const generateEmailDraft = (auditData: AuditData, clientEmail: string): string => {
-  const domain = new URL(auditData.url).hostname;
-  const riskCount = auditData.riskTable.filter(risk => risk.status === 'error').length;
-  const verdict = auditData.managementSummary.verdict;
-  
-  // E) Návrh e-mailu klientovi
-  return `Predmet: GDPR audit cookies a trackingu - ${domain}
-
-Dobrý deň,
-
-vykonali sme komplexný audit súladu s GDPR a ePrivacy direktívou pre Vašu webovú stránku ${auditData.url}.
-
-KONTEXT A DÔVOD AUDITU:
-Európsky dohľad nad dodržiavaním GDPR sa výrazne sprísňuje. Dozorné orgány udeľujú pokuty za porušenie ePrivacy až do výšky 4% ročného obratu. Najčastejšie chyby súvisia s:
-• Ukladaním cookies bez predchádzajúceho súhlasu používateľov
-• Spúšťaním trackerov (GA, Facebook Pixel, TikTok) pred udelením súhlasu  
-• Nesprávnou implementáciou consent management platformy
-• Chýbajúcou dokumentáciou a logovaním súhlasov
-
-VERDIKT AUDITU: ${verdict.toUpperCase()}
-${auditData.managementSummary.overall}
-
-HLAVNÉ ZISTENIA:
-${riskCount > 0 ? '🔴 KRITICKÉ PROBLÉMY:' : '✅ POZITÍVNE ZISTENIA:'}
-• ${auditData.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný consent management' : 'Chýba consent management platform'}
-• ${auditData.detailedAnalysis.consentManagement.trackersBeforeConsent === 0 ? 'Trackery rešpektujú súhlas' : `${auditData.detailedAnalysis.consentManagement.trackersBeforeConsent} trackerov sa spúšťa pred súhlasom`}
-• ${auditData.detailedAnalysis.https.status === 'ok' ? 'HTTPS správne nakonfigurované' : 'Chýba HTTPS zabezpečenie'}
-• Celkom ${auditData.detailedAnalysis.cookies.total} cookies (${auditData.detailedAnalysis.cookies.details.filter(c => c.category === 'marketingové' || c.category === 'analytické').length} vyžaduje súhlas)
-• ${auditData.detailedAnalysis.thirdParties.total} tretích strán komunikuje s webom
-
-DÔKAZY IDENTIFIKOVANÝCH PROBLÉMOV:
-${auditData.detailedAnalysis.consentManagement.evidence !== 'Žiadne trackery sa nespúšťajú pred súhlasom' ? `• ${auditData.detailedAnalysis.consentManagement.evidence}` : '• Žiadne porušenia nezistené'}
-
-AKČNÝ PLÁN (podľa priority):
-${auditData.recommendations.slice(0, 6).map((rec, index) => `${index + 1}. ${rec.title} → ${rec.description}`).join('\n')}
-
-PRÁVNE VYHODNOTENIE:
-${auditData.detailedAnalysis.legalSummary}
-
-ODPORÚČANÝ ČASOVÝ RÁMEC:
-${riskCount > 0 
-  ? `Kritické problémy riešiť do 14 dní, ostatné úpravy do 30 dní. Môžeme zabezpečiť technickú implementáciu a právny súlad.`
-  : `Odporúčame pravidelnú kontrolu každých 6 mesiacov a aktualizáciu cookie policy pri zmenách.`
 }
 
-Pre otázky alebo implementačnú podporu nás neváhajte kontaktovať.
+export function generateEmailDraft(auditData: AuditData, clientEmail: string): string {
+  return `Vážený/á ${clientEmail},
+
+vykonali sme audit súladu vašej webovej stránky ${auditData.finalUrl} s GDPR a ePrivacy direktívou.
+
+**VÝSLEDKY AUDITU:**
+
+• **Celkové hodnotenie:** ${auditData.managementSummary.verdict.toUpperCase()}
+• **Tretie strany:** ${auditData.detailedAnalysis.thirdParties.total} externých služieb
+• **Cookies:** ${auditData.detailedAnalysis.cookies.total} celkom (${auditData.cookies.marketing} marketing)
+• **Pred-súhlasové trackery:** ${auditData.detailedAnalysis.consentManagement.trackersBeforeConsent}
+
+**HLAVNÉ ZISTENIA:**
+${auditData._internal.reasons.map(reason => `• ${reason}`).join('\n')}
+
+**AKČNÝ PLÁN:**
+${auditData.recommendations.slice(0, 6).map((rec, i) => `${i + 1}. ${rec.title}: ${rec.description}`).join('\n\n')}
+
+**PRÁVNE RIZIKÁ:**
+${auditData.detailedAnalysis.legalSummary}
+
+Pre detailnú analýzu a implementačný plán ma kontaktujte.
 
 S pozdravom,
-[Vaše meno a kontakt]
-
----
-Audit vykonaný: ${new Date(auditData.timestamp).toLocaleDateString('sk-SK')}
-Auditovaná URL: ${auditData.url}
-${auditData.hasRedirect ? `Finálna URL: ${auditData.finalUrl}` : ''}`;
-};
+GDPR Audit Team`;
+}
