@@ -503,96 +503,13 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               7. UX analýza cookie lišty
             </div>
             
-            {data.consentUx ? (
-              <Card>
-                <CardContent className="pt-4">
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-2 mb-3">
-                      <Camera className="h-4 w-4 text-primary" />
-                      <span className="text-sm font-medium">Screenshot a analýza</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {data.consentUx.used === 'edge' ? 'Bezpečný režim' : 'Klientsky režim'}
-                      </Badge>
-                    </div>
-                    
-                    {data.consentUx.screenshot && (
-                      <div className="mb-4">
-                        <img 
-                          src={data.consentUx.screenshot} 
-                          alt="Cookie banner screenshot" 
-                          className="max-w-full h-auto border rounded-lg shadow-sm"
-                        />
-                      </div>
-                    )}
-                    
-                    {data.consentUx.ocr && (
-                      <div className="space-y-3">
-                        <h4 className="font-semibold">Technické indikátory OCR analýzy:</h4>
-                        
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                          <div>
-                            <span className="text-sm font-medium">Accept tlačidlá:</span>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.accept.length > 0 
-                                ? data.consentUx.ocr.buttons.accept.join(', ')
-                                : 'Nenájdené'
-                              }
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-sm font-medium">Reject tlačidlá:</span>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.reject.length > 0 
-                                ? data.consentUx.ocr.buttons.reject.join(', ')
-                                : 'Nenájdené'
-                              }
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-sm font-medium">Settings tlačidlá:</span>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.settings.length > 0 
-                                ? data.consentUx.ocr.buttons.settings.join(', ')
-                                : 'Nenájdené'
-                              }
-                            </div>
-                          </div>
-                        </div>
-                        
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div className="flex items-center justify-between">
-                            <span>Vyvážené tlačidlá:</span>
-                            <Badge className={`text-white ${data.consentUx.ocr.evaluation.hasBalancedButtons ? 'bg-green-600' : 'bg-red-600'}`}>
-                              {data.consentUx.ocr.evaluation.hasBalancedButtons ? 'ÁNO' : 'NIE'}
-                            </Badge>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span>Detailné nastavenia:</span>
-                            <Badge className={`text-white ${data.consentUx.ocr.evaluation.hasDetailedSettings ? 'bg-green-600' : 'bg-red-600'}`}>
-                              {data.consentUx.ocr.evaluation.hasDetailedSettings ? 'ÁNO' : 'NIE'}
-                            </Badge>
-                          </div>
-                        </div>
-                        
-                        {data.consentUx.confidence && (
-                          <div className="text-xs text-muted-foreground">
-                            Spoľahlivosť OCR: {Math.round(data.consentUx.confidence * 100)}%
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              <Card>
-                <CardContent className="pt-4">
-                  <p className="text-sm text-muted-foreground">
-                    UX analýza cookie lišty bola vynechaná počas auditu.
-                  </p>
-                </CardContent>
-              </Card>
-            )}
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-sm text-muted-foreground">
+                  UX analýza cookie lišty sa vykonáva iba ako technická kontrola súladu s GDPR/ePrivacy požiadavkami na základe detegovaných cookie a consent management riešení.
+                </p>
+              </CardContent>
+            </Card>
           </div>
 
           {/* 8. Retention Periods */}
@@ -699,10 +616,10 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               const trackersScore = trackerCount === 0 ? 0 : (trackerCount <= 2 ? 3 : 5);
               scores.push({ area: 'Trackery', score: trackersScore, note: `${trackerCount} detegovaných` });
               
-              // UX Banner
-              const hasBalanced = data.consentUx?.ocr?.evaluation?.hasBalancedButtons;
-              const uxScore = hasBalanced === false ? 4 : (data.consentUx ? 1 : 2);
-              scores.push({ area: 'UX lišta', score: uxScore, note: data.consentUx ? (hasBalanced ? 'Vyvážené' : 'Nevyvážené') : 'Nedostupné' });
+              // UX Banner (technical assessment only)
+              const hasCmp = data.detailedAnalysis.consentManagement.hasConsentTool;
+              const uxScore = hasCmp ? 1 : 3;
+              scores.push({ area: 'UX lišta', score: uxScore, note: hasCmp ? 'Technická kontrola' : 'Chýba CMP' });
               
               return scores;
             };
