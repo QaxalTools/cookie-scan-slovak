@@ -66,8 +66,6 @@ serve(async (req) => {
 
     // Browserless script for two-phase capture
     const browserlessScript = `
-      const puppeteer = require('puppeteer');
-      
       module.exports = async ({ page, context }) => {
         const results = {
           renderedHTML_pre: '',
