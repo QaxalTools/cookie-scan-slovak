@@ -20,6 +20,10 @@ interface RenderResponse {
   cookies_post?: any[];
   requests_pre?: any[];
   requests_post?: any[];
+  responses_pre?: any[];
+  responses_post?: any[];
+  storage_pre?: any;
+  storage_post?: any;
   finalUrl?: string;
   mode?: 'live' | 'html' | 'simulation';
   error?: string;
@@ -66,7 +70,7 @@ serve(async (req) => {
 
     // Browserless script for two-phase capture
     const browserlessScript = `
-      module.exports = async ({ page, context }) => {
+      async ({ page, context }) => {
         const results = {
           renderedHTML_pre: '',
           renderedHTML_post: '',
@@ -74,12 +78,21 @@ serve(async (req) => {
           cookies_post: [],
           requests_pre: [],
           requests_post: [],
+          responses_pre: [],
+          responses_post: [],
+          storage_pre: {},
+          storage_post: {},
           finalUrl: ''
         };
 
         const requests_pre = [];
         const requests_post = [];
+        const responses_pre = [];
+        const responses_post = [];
 
+        // Bypass CSP and configure page
+        await page.setBypassCSP(true);
+        
         // Set viewport from context
         await page.setViewport({
           width: context?.viewport?.width || 1920,
@@ -93,7 +106,40 @@ serve(async (req) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.emulateTimezone('Europe/Bratislava');
 
-        // Set up request interception for pre-consent
+        // Enhanced cookie capture function
+        async function getAllCookies() {
+          const cookies = [];
+          
+          // Method 1: Standard Puppeteer cookies
+          try {
+            const pageCookies = await page.cookies();
+            cookies.push(...pageCookies);
+          } catch (e) {
+            console.log('Error getting page cookies:', e.message);
+          }
+          
+          // Method 2: CDP Network.getAllCookies (includes all domains)
+          try {
+            const client = await page.target().createCDPSession();
+            const { cookies: cdpCookies } = await client.send('Network.getAllCookies');
+            cookies.push(...cdpCookies);
+          } catch (e) {
+            console.log('Error getting CDP cookies:', e.message);
+          }
+          
+          // Deduplicate by name+domain+path
+          const uniqueCookies = cookies.reduce((acc, cookie) => {
+            const key = \`\${cookie.name}|\${cookie.domain}|\${cookie.path || '/'}\`;
+            if (!acc.has(key)) {
+              acc.set(key, cookie);
+            }
+            return acc;
+          }, new Map());
+          
+          return Array.from(uniqueCookies.values());
+        }
+
+        // Set up request and response interception for pre-consent
         await page.setRequestInterception(true);
         page.on('request', (request) => {
           requests_pre.push({
@@ -105,19 +151,68 @@ serve(async (req) => {
           request.continue();
         });
 
+        page.on('response', (response) => {
+          const setCookieHeaders = response.headers()['set-cookie'];
+          responses_pre.push({
+            url: response.url(),
+            status: response.status(),
+            headers: response.headers(),
+            setCookies: setCookieHeaders ? (Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders]) : []
+          });
+        });
+
         // Navigate to the page with increased timeout using context URL
         console.log('Navigating to:', context.url);
-        await page.goto(context.url, { waitUntil: 'networkidle2', timeout: 45000 });
+        await page.goto(context.url, { waitUntil: 'networkidle2', timeout: 60000 });
         
         // Wait for initial load with extended time
-        await page.waitForTimeout(5000);
+        await page.waitForTimeout(8000);
+
+        // Capture storage data
+        async function captureStorage() {
+          try {
+            return await page.evaluate(() => {
+              const localStorage = {};
+              const sessionStorage = {};
+              
+              try {
+                for (let i = 0; i < window.localStorage.length; i++) {
+                  const key = window.localStorage.key(i);
+                  if (key) {
+                    localStorage[key] = window.localStorage.getItem(key);
+                  }
+                }
+              } catch (e) {
+                console.log('Error reading localStorage:', e.message);
+              }
+              
+              try {
+                for (let i = 0; i < window.sessionStorage.length; i++) {
+                  const key = window.sessionStorage.key(i);
+                  if (key) {
+                    sessionStorage[key] = window.sessionStorage.getItem(key);
+                  }
+                }
+              } catch (e) {
+                console.log('Error reading sessionStorage:', e.message);
+              }
+              
+              return { localStorage, sessionStorage };
+            });
+          } catch (e) {
+            console.log('Error capturing storage:', e.message);
+            return { localStorage: {}, sessionStorage: {} };
+          }
+        }
 
         // Capture pre-consent state
         console.log('Capturing pre-consent state');
         results.finalUrl = page.url();
         results.renderedHTML_pre = await page.content();
-        results.cookies_pre = await page.cookies();
+        results.cookies_pre = await getAllCookies();
         results.requests_pre = [...requests_pre];
+        results.responses_pre = [...responses_pre];
+        results.storage_pre = await captureStorage();
 
         // Try to find and click consent button in main page and iframes
         console.log('Looking for consent accept button');
@@ -201,6 +296,8 @@ serve(async (req) => {
           await page.setRequestInterception(false);
           await page.setRequestInterception(true);
           page.removeAllListeners('request');
+          page.removeAllListeners('response');
+          
           page.on('request', (request) => {
             requests_post.push({
               url: request.url(),
@@ -211,19 +308,33 @@ serve(async (req) => {
             request.continue();
           });
 
+          page.on('response', (response) => {
+            const setCookieHeaders = response.headers()['set-cookie'];
+            responses_post.push({
+              url: response.url(),
+              status: response.status(),
+              headers: response.headers(),
+              setCookies: setCookieHeaders ? (Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders]) : []
+            });
+          });
+
           // Wait for post-consent changes with extended time
-          await page.waitForTimeout(5000);
+          await page.waitForTimeout(8000);
           
           // Capture post-consent state
           console.log('Capturing post-consent state');
           results.renderedHTML_post = await page.content();
-          results.cookies_post = await page.cookies();
+          results.cookies_post = await getAllCookies();
           results.requests_post = [...requests_post];
+          results.responses_post = [...responses_post];
+          results.storage_post = await captureStorage();
         } else {
           console.log('No consent button found, using pre-consent state for both');
           results.renderedHTML_post = results.renderedHTML_pre;
           results.cookies_post = results.cookies_pre;
           results.requests_post = results.requests_pre;
+          results.responses_post = results.responses_pre;
+          results.storage_post = results.storage_pre;
         }
 
         console.log('Render and inspect completed');
@@ -265,6 +376,10 @@ serve(async (req) => {
       cookies_post: result.cookies_post || [],
       requests_pre: result.requests_pre || [],
       requests_post: result.requests_post || [],
+      responses_pre: result.responses_pre || [],
+      responses_post: result.responses_post || [],
+      storage_pre: result.storage_pre || {},
+      storage_post: result.storage_post || {},
       finalUrl: result.finalUrl
     };
 
