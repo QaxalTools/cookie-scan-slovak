@@ -10,9 +10,14 @@ import {
   Cookie, 
   Eye, 
   Mail,
-  Download
+  Download,
+  Upload,
+  X,
+  Image
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
+import { useState } from 'react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -20,6 +25,10 @@ interface AuditResultsProps {
 }
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  // Screenshot state
+  const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+
   // Consistency checks
   const performConsistencyChecks = () => {
     const checks = [];
@@ -60,6 +69,27 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
     URL.revokeObjectURL(url);
   };
 
+  const handleScreenshotUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const base64 = e.target?.result as string;
+        setScreenshot(base64);
+        setScreenshotPreview(URL.createObjectURL(file));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const removeScreenshot = () => {
+    setScreenshot(null);
+    if (screenshotPreview) {
+      URL.revokeObjectURL(screenshotPreview);
+      setScreenshotPreview(null);
+    }
+  };
+
   const handleDownloadPDF = () => {
     const printWindow = window.open('', '_blank');
     if (printWindow) {
@@ -78,6 +108,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               .status-ok { color: green; font-weight: bold; }
               .status-warning { color: orange; font-weight: bold; }
               .status-error { color: red; font-weight: bold; }
+              .screenshot { max-width: 100%; height: auto; margin: 10px 0; border: 1px solid #ddd; }
               @media print { body { margin: 0; } }
             </style>
           </head>
@@ -238,6 +269,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   <tr><td>Detailné nastavenia</td><td>${detailedSettings}</td></tr>
                 </table>
                 <p><strong>Celkové hodnotenie UX:</strong> <span class="status-${assessment === 'Transparentná' ? 'ok' : assessment === 'Nevyvážená' ? 'warning' : 'error'}">${assessment.toUpperCase()}</span></p>
+                ${screenshot ? `<img src="${screenshot}" alt="Cookie banner screenshot" class="screenshot" />` : ''}
                 `;
               })()}
               
@@ -758,6 +790,67 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                       {assessment === 'Nevyvážená' && 'CMP nástroj je prítomný, ale neblokuje trackery pred súhlasom.'}
                       {assessment === 'Transparentná' && 'CMP nástroj správne blokuje trackery až po súhlase používateľa.'}
                     </p>
+                  </div>
+                  
+                  {/* Screenshot Upload Section */}
+                  <div className="mt-4 p-4 border-2 border-dashed border-muted-foreground/30 rounded-lg">
+                    <h4 className="font-semibold mb-3 flex items-center gap-2">
+                      <Image className="h-4 w-4" />
+                      Screenshot cookie lišty (voliteľné)
+                    </h4>
+                    
+                    {!screenshotPreview ? (
+                      <div className="text-center">
+                        <label htmlFor="screenshot-upload" className="cursor-pointer">
+                          <div className="flex flex-col items-center gap-2 p-6 hover:bg-muted/50 rounded-lg transition-colors">
+                            <Upload className="h-8 w-8 text-muted-foreground" />
+                            <p className="text-sm text-muted-foreground">
+                              Nahrajte screenshot cookie lišty pre lepšiu UX analýzu
+                            </p>
+                            <Button variant="outline" type="button" className="mt-2">
+                              Vybrať súbor
+                            </Button>
+                          </div>
+                        </label>
+                        <input
+                          id="screenshot-upload"
+                          type="file"
+                          accept="image/*"
+                          onChange={handleScreenshotUpload}
+                          className="hidden"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="relative">
+                          <img 
+                            src={screenshotPreview} 
+                            alt="Cookie banner screenshot" 
+                            className="w-full max-w-md mx-auto rounded-lg border"
+                          />
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={removeScreenshot}
+                            className="absolute top-2 right-2"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground text-center">
+                          Screenshot bude zahrnutý v PDF reporte pre detailnú UX analýzu.
+                        </p>
+                      </div>
+                    )}
+                    
+                    {!screenshot && !screenshotPreview && (
+                      <Alert className="mt-3">
+                        <AlertTriangle className="h-4 w-4" />
+                        <AlertDescription className="text-xs">
+                          Pre kompletný UX audit cookie lišty odporúčame nahrať screenshot.
+                        </AlertDescription>
+                      </Alert>
+                    )}
                   </div>
                 </div>
               );
