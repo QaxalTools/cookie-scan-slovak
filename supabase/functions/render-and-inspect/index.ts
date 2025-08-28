@@ -1,399 +1,314 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.56.0';
 
-Deno.serve(async (req: Request) => {
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  };
+// CORS headers for browser requests
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS'
+};
 
-  // Handle CORS preflight requests
+// Handle CORS preflight requests
+serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
-  let traceId = crypto.randomUUID();
-  let startedAt = Date.now();
-  let requestData = null;
-  let url = '';
-  let supabase, browserlessApiKey;
-
-  // Set-Cookie header parsers
-  const parseSetCookieHeader = (setCookieValue: string) => {
-    const parts = setCookieValue.split(';').map(p => p.trim());
-    const [nameValue, ...attributes] = parts;
-    const [name, value] = nameValue.split('=', 2);
-    
-    const cookie = {
-      name: name?.trim() || '',
-      value: value?.trim() || '',
-      domain: '',
-      path: '/',
-      expires: null as number | null,
-      maxAge: null as number | null,
-      secure: false,
-      httpOnly: false,
-      sameSite: 'Lax'
-    };
-    
-    attributes.forEach(attr => {
-      const [key, val] = attr.split('=', 2);
-      const lowerKey = key?.toLowerCase();
-      
-      if (lowerKey === 'domain') {
-        cookie.domain = val?.trim() || '';
-      } else if (lowerKey === 'path') {
-        cookie.path = val?.trim() || '/';
-      } else if (lowerKey === 'expires') {
-        const expiresDate = new Date(val?.trim() || '');
-        if (!isNaN(expiresDate.getTime())) {
-          cookie.expires = Math.floor(expiresDate.getTime() / 1000);
-        }
-      } else if (lowerKey === 'max-age') {
-        const maxAge = parseInt(val?.trim() || '0');
-        if (!isNaN(maxAge)) {
-          cookie.maxAge = maxAge;
-          cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
-        }
-      } else if (lowerKey === 'secure') {
-        cookie.secure = true;
-      } else if (lowerKey === 'httponly') {
-        cookie.httpOnly = true;
-      } else if (lowerKey === 'samesite') {
-        cookie.sameSite = val?.trim() || 'Lax';
-      }
-    });
-    
-    return cookie;
-  };
-  
-  // Parse request body once at the start
-  try {
-    requestData = await req.json();
-    url = requestData?.url || '';
-  } catch (parseError) {
-    console.error(`❌ Failed to parse request body [${traceId}]:`, parseError.message);
-    return new Response(JSON.stringify({
-      success: false,
-      trace_id: traceId,
-      error_code: 'PARSE_ERROR',
-      error_message: 'Invalid request format',
-      data: { _error: parseError.message }
-    }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 200
-    });
-  }
-
-  if (!url) {
-    return new Response(JSON.stringify({
-      success: false,
-      trace_id: traceId,
-      error_code: 'MISSING_URL',
-      error_message: 'URL is required',
-      data: { _error: 'URL parameter is missing' }
-    }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 200
-    });
-  }
-
-  // Initialize Supabase client
-  supabase = createClient(
-    Deno.env.get('SUPABASE_URL') ?? '',
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-  );
-
-  // Helper function to log to database
-  const logToDatabase = async (level: string, message: string, data?: any) => {
-    try {
-      await supabase.from('audit_logs').insert({
-        trace_id: traceId,
-        level,
-        message,
-        source: 'render-and-inspect',
-        data: data || null
-      });
-    } catch (logError) {
-      console.error('Failed to log to database:', logError.message);
-    }
-  };
+  const traceId = crypto.randomUUID();
+  const startTime = Date.now();
 
   try {
     console.log(`🚀 Starting render-and-inspect function [${traceId}]`);
-    await logToDatabase('info', '🚀 Starting render-and-inspect function', { url });
+
+    // Parse request
+    const { url } = await req.json();
+    if (!url) {
+      throw new Error('URL is required');
+    }
+
+    // Initialize Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
     
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error('Missing Supabase configuration');
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // Browserless configuration
+    const browserlessToken = Deno.env.get('BROWSERLESS_TOKEN');
+    if (!browserlessToken) {
+      throw new Error('Missing Browserless token');
+    }
+
+    const BROWSERLESS_WS_URL = 'wss://chrome.browserless.io';
+    const REQUEST_TIMEOUT = 45000;
+
+    console.log(`🔑 Using Browserless token: ${browserlessToken.slice(0, 8)}...${browserlessToken.slice(-4)}`);
     console.log(`📝 Analyzing URL: ${url}`);
 
-    browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
-    if (!browserlessApiKey) {
-      throw new Error('BROWSERLESS_API_KEY not configured');
-    }
-
-    // Log masked token for verification
-    const maskedToken = `${browserlessApiKey.substring(0, 8)}...${browserlessApiKey.substring(browserlessApiKey.length - 4)}`;
-    console.log(`🔑 Using Browserless token: ${maskedToken}`);
-    await logToDatabase('info', '🔑 Token verification', { masked_token: maskedToken });
-
-    // Health check Browserless first
+    // Check Browserless health
     console.log('🏥 Checking Browserless health...');
-    let healthStatus = 'unknown';
-    
-    try {
-      const healthResponse = await fetch(`https://production-sfo.browserless.io/json/version?token=${browserlessApiKey}`, {
-        method: 'GET'
-      });
-      
-      healthStatus = healthResponse.ok ? 'healthy' : 'unhealthy';
-      
-      if (healthResponse.ok) {
-        console.log('✅ Browserless health check passed');
-      } else {
-        console.log(`⚠️ Browserless health check failed: ${healthResponse.status}`);
-      }
-    } catch (healthError) {
-      healthStatus = 'error';
-      console.log(`❌ Browserless health check error: ${healthError.message}`);
+    const healthResponse = await fetch(`https://chrome.browserless.io/health?token=${browserlessToken}`);
+    if (!healthResponse.ok) {
+      throw new Error(`Browserless health check failed: ${healthResponse.status}`);
     }
-    
-    await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus });
+    console.log('✅ Browserless health check passed');
 
-    // Raw WebSocket CDP implementation
-    console.log('🌐 Starting Raw WebSocket CDP analysis...');
-    
-    const WSE = `wss://production-sfo.browserless.io?token=${browserlessApiKey}`;
-    
-    let wsSocket;
-    let browserlessData = {
-      finalUrl: url,
+    // Main data collection object
+    const browserlessData: any = {
+      requests: [],
       cookies_pre: [],
       cookies_post_accept: [],
       cookies_post_reject: [],
+      storage_pre: {},
+      storage_post_accept: {},
+      storage_post_reject: {},
       set_cookie_headers_pre: [],
       set_cookie_headers_post_accept: [],
       set_cookie_headers_post_reject: [],
-      storage_pre: { localStorage: {}, sessionStorage: {} },
-      storage_post_accept: { localStorage: {}, sessionStorage: {} },
-      storage_post_reject: { localStorage: {}, sessionStorage: {} },
-      requests_pre: [],
-      requests_post_accept: [],
-      requests_post_reject: [],
-      cmp_detected: false,
-      consent_clicked: false,
-      accept_clicked: false,
-      reject_clicked: false,
-      readyState: 'unknown',
-      bl_status_code: 200,
-      bl_health_status: healthStatus
+      cmp: {},
+      final_url: url,
+      data_sent_to_third_parties: 0
     };
+
+    /**
+     * Helper function for database logging
+     */
+    async function logToDatabase(level: string, message: string, data?: any) {
+      try {
+        await supabase.from('audit_logs').insert({
+          trace_id: traceId,
+          level,
+          message,
+          data: data || null,
+          timestamp: new Date().toISOString(),
+          source: 'render-and-inspect'
+        });
+      } catch (e) {
+        console.log('Failed to log to database:', e.message);
+      }
+    }
+
+    await logToDatabase('info', 'Analysis started', { url, trace_id: traceId });
+
+    // ============= Raw WebSocket CDP Implementation =============
     
     try {
-      // Initialize WebSocket connection to Browserless
+      console.log('🌐 Starting Raw WebSocket CDP analysis...');
       console.log('🔗 Connecting to Browserless WebSocket...');
-      wsSocket = new WebSocket(WSE);
       
+      const wsSocket = new WebSocket(`${BROWSERLESS_WS_URL}?token=${browserlessToken}&--no-sandbox&--disable-setuid-sandbox&--disable-dev-shm-usage&--disable-background-timer-throttling&--disable-backgrounding-occluded-windows&--disable-renderer-backgrounding&--disable-features=TranslateUI&--disable-ipc-flooding-protection&--disable-crash-reporter&--disable-breakpad&--disable-client-side-phishing-detection&--disable-background-networking&--disable-default-apps&--disable-component-extensions-with-background-pages&--disable-logging&--silent`);
+      
+      const sessions = new Map();
+      let pageSessionId = null;
+      let commandId = 0;
+      let isPreConsent = true;
+      let currentPhase = 'pre';
+
+      // Maps to store network request tracking
+      const requestMap = new Map();
+      const responseInfo = new Map();
+      const responseExtraInfo = new Map();
+      const setCookieEvents_pre = [];
+      const setCookieEvents_post_accept = [];
+      const setCookieEvents_post_reject = [];
+      let requestCounter = 0;
+
+      // Set-Cookie parser function
+      const parseSetCookie = (cookieString, requestId) => {
+        try {
+          const parts = cookieString.split(';').map(p => p.trim());
+          const [nameValue, ...attributes] = parts;
+          const [name, value] = nameValue.split('=');
+          
+          if (!name) return null;
+          
+          const cookie = {
+            name: name.trim(),
+            valueMasked: value ? (value.length > 12 ? value.slice(0, 12) + '…' : value) : '',
+            domain: null,
+            path: '/',
+            expiresEpochMs: null,
+            secure: false,
+            httpOnly: false,
+            sameSite: null,
+            sourceUrl: responseInfo.get(requestId)?.url || 'unknown',
+            phase: currentPhase,
+            persisted: false,
+            source: 'set-cookie'
+          };
+          
+          // Parse attributes
+          attributes.forEach(attr => {
+            const [key, val] = attr.split('=');
+            const lowerKey = key.toLowerCase();
+            
+            if (lowerKey === 'domain') {
+              cookie.domain = val || null;
+            } else if (lowerKey === 'path') {
+              cookie.path = val || '/';
+            } else if (lowerKey === 'expires') {
+              const expDate = new Date(val);
+              if (!isNaN(expDate.getTime())) {
+                cookie.expiresEpochMs = expDate.getTime();
+              }
+            } else if (lowerKey === 'max-age') {
+              const maxAge = parseInt(val);
+              if (!isNaN(maxAge)) {
+                cookie.expiresEpochMs = Date.now() + (maxAge * 1000);
+              }
+            } else if (lowerKey === 'secure') {
+              cookie.secure = true;
+            } else if (lowerKey === 'httponly') {
+              cookie.httpOnly = true;
+            } else if (lowerKey === 'samesite') {
+              cookie.sameSite = val || null;
+            }
+          });
+          
+          // Set default domain if not specified
+          if (!cookie.domain && responseInfo.get(requestId)?.url) {
+            try {
+              const url = new URL(responseInfo.get(requestId).url);
+              cookie.domain = url.hostname;
+            } catch (e) {
+              cookie.domain = 'unknown';
+            }
+          }
+          
+          return cookie;
+        } catch (e) {
+          console.log('Error parsing Set-Cookie:', e.message);
+          return null;
+        }
+      };
+
+      // Promise for WebSocket connection
       await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('WebSocket connection timeout'));
-        }, 30000);
+        const timeout = setTimeout(() => reject(new Error('WebSocket connection timeout')), 10000);
         
         wsSocket.onopen = () => {
           clearTimeout(timeout);
           console.log('🔗 WebSocket connected to Browserless');
-          resolve(true);
+          resolve(null);
         };
-        
+
         wsSocket.onerror = (error) => {
           clearTimeout(timeout);
           reject(new Error(`WebSocket connection failed: ${error}`));
         };
       });
-      
-      // CDP session management
-      let requestId = 1;
-      const cdpResults = {};
-      const sessions = new Map(); // sessionId -> target info
-      let browserSessionId = null;
-      let pageSessionId = null;
-      let isPreConsent = true;
-      
-      // Session-aware CDP command wrapper
-      const sendCDPCommand = (method, params = {}, sessionId = null) => {
+
+      // CDP command helper
+      const sendCDPCommand = (method: string, params: any = {}, sessionId?: string) => {
         return new Promise((resolve, reject) => {
-          const id = requestId++;
-          const message = sessionId 
-            ? JSON.stringify({ id, method, params, sessionId })
-            : JSON.stringify({ id, method, params });
+          const id = ++commandId;
+          const message = { id, method, params };
+          if (sessionId) {
+            message.sessionId = sessionId;
+          }
           
           const timeout = setTimeout(() => {
-            delete cdpResults[id];
             reject(new Error(`CDP command timeout: ${method}`));
-          }, 15000);
+          }, 10000);
           
-          cdpResults[id] = { resolve, reject, timeout };
-          wsSocket.send(message);
+          const messageHandler = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.id === id) {
+                clearTimeout(timeout);
+                wsSocket.removeEventListener('message', messageHandler);
+                if (data.error) {
+                  reject(new Error(`CDP error: ${data.error.message}`));
+                } else {
+                  resolve(data.result);
+                }
+              }
+            } catch (e) {
+              // Ignore parsing errors for other messages
+            }
+          };
+          
+          wsSocket.addEventListener('message', messageHandler);
+          wsSocket.send(JSON.stringify(message));
         });
       };
-      
-      // Storage for network events and data
-      const requests = [];
-      const setCookieHeaders = [];
-      
-      // Handle CDP responses and events
-      wsSocket.onmessage = (event) => {
+
+      // Event listeners
+      wsSocket.addEventListener('message', (event) => {
         try {
           const data = JSON.parse(event.data);
           
-          // Handle command responses
-          if (data.id && cdpResults[data.id]) {
-            const { resolve, timeout } = cdpResults[data.id];
-            clearTimeout(timeout);
-            delete cdpResults[data.id];
+          // Handle browser-level events
+          if (data.method === 'Target.attachedToTarget') {
+            const { sessionId, targetInfo } = data.params;
+            sessions.set(sessionId, targetInfo);
+            console.log(`📎 Target attached: ${targetInfo.type} [${targetInfo.targetId}]`);
+          } else if (data.method === 'Network.requestWillBeSent' && data.sessionId === 'browser') {
+            requestCounter++;
             
-            if (data.error) {
-              console.log(`CDP Error [${data.id}]:`, data.error);
-            }
-            resolve(data.result || data);
-            return;
-          }
-          
-          // Handle events from all sessions
-          if (data.method) {
-            const sessionId = data.sessionId;
+            const params = data.params;
+            requestMap.set(params.requestId, {
+              id: requestCounter,
+              url: params.request.url,
+              method: params.request.method,
+              requestId: params.requestId,
+              referrer: params.request.headers.Referer || params.referrer || '',
+              timestamp: Date.now(),
+              sessionId: data.sessionId
+            });
+          } else if (data.method === 'Network.responseReceived') {
+            const params = data.params;
+            responseInfo.set(params.requestId, {
+              url: params.response.url,
+              status: params.response.status
+            });
+          } else if (data.method === 'Network.responseReceivedExtraInfo') {
+            const params = data.params;
+            const existingExtraInfo = responseExtraInfo.get(params.requestId) || [];
+            existingExtraInfo.push(params);
+            responseExtraInfo.set(params.requestId, existingExtraInfo);
             
-            // Track new attached targets
-            if (data.method === 'Target.attachedToTarget') {
-              const targetSessionId = data.params.sessionId;
-              const targetInfo = data.params.targetInfo;
-              sessions.set(targetSessionId, targetInfo);
-              console.log(`📎 Target attached: ${targetInfo.type} [${targetSessionId}]`);
-              
-              // Enable domains for new page sessions
-              if (targetInfo.type === 'page' || targetInfo.type === 'iframe') {
-                sendCDPCommand('Page.enable', {}, targetSessionId).catch(e => console.log('Page.enable failed:', e.message));
-                sendCDPCommand('Runtime.enable', {}, targetSessionId).catch(e => console.log('Runtime.enable failed:', e.message));
-                sendCDPCommand('Network.enable', {
-                  maxTotalBufferSize: 10_000_000,
-                  maxResourceBufferSize: 5_000_000
-                }, targetSessionId).catch(e => console.log('Network.enable failed:', e.message));
-              }
-            }
-            
-            // Network event handling (filter by page session if available)
-            if (data.method === 'Network.requestWillBeSent') {
-              const request = {
-                id: data.params.requestId,
-                url: data.params.request.url,
-                method: data.params.request.method,
-                headers: data.params.request.headers,
-                timestamp: data.params.timestamp,
-                phase: isPreConsent ? 'pre' : 'post',
-                sessionId: sessionId,
-                query: {},
-                trackingParams: {},
-                isPreConsent: isPreConsent
-              };
-              
-              // Parse query parameters with tracking detection
-              try {
-                const urlObj = new URL(data.params.request.url);
-                const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-                
-                urlObj.searchParams.forEach((value, key) => {
-                  request.query[key] = value;
-                  if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                    request.trackingParams[key] = value;
-                  }
-                });
-              } catch (e) {
-                console.log('URL parsing error:', e.message);
-              }
-              
-              // Parse POST data
-              if (data.params.request.postData) {
-                const contentType = data.params.request.headers['content-type'] || '';
-                request.postData = data.params.request.postData;
-                
-                if (contentType.includes('application/json')) {
-                  try {
-                    request.postDataParsed = JSON.parse(data.params.request.postData);
-                    // Extract tracking params from POST data
-                    if (typeof request.postDataParsed === 'object') {
-                      const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-                      Object.entries(request.postDataParsed).forEach(([key, value]) => {
-                        if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                          request.trackingParams[key] = value;
+            // Process Set-Cookie headers immediately
+            if (params.headers) {
+              Object.entries(params.headers).forEach(([name, value]) => {
+                if (name.toLowerCase() === 'set-cookie') {
+                  const cookies = Array.isArray(value) ? value : [value];
+                  cookies.forEach(cookieStr => {
+                    if (cookieStr) {
+                      const parsed = parseSetCookie(cookieStr, params.requestId);
+                      if (parsed) {
+                        if (currentPhase === 'pre') {
+                          setCookieEvents_pre.push(parsed);
+                        } else if (currentPhase === 'post_accept') {
+                          setCookieEvents_post_accept.push(parsed);
+                        } else if (currentPhase === 'post_reject') {
+                          setCookieEvents_post_reject.push(parsed);
                         }
-                      });
-                    }
-                  } catch (e) {
-                    console.log('JSON parse error:', e.message);
-                  }
-                } else if (contentType.includes('application/x-www-form-urlencoded')) {
-                  try {
-                    const urlencoded = new URLSearchParams(data.params.request.postData);
-                    const formData = {};
-                    const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-                    urlencoded.forEach((value, key) => {
-                      formData[key] = value;
-                      if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                        request.trackingParams[key] = value;
                       }
-                    });
-                    request.postDataParsed = formData;
-                  } catch (e) {
-                    console.log('URLEncoded parse error:', e.message);
-                  }
-                }
-              }
-              
-              requests.push(request);
-            }
-            
-            // Capture Set-Cookie headers from responses
-            if (data.method === 'Network.responseReceived') {
-              const response = data.params.response;
-              if (response.headers && response.headers['set-cookie']) {
-                const setCookieValue = response.headers['set-cookie'];
-                const setCookieArray = Array.isArray(setCookieValue) ? setCookieValue : [setCookieValue];
-                
-                setCookieArray.forEach(cookieHeader => {
-                  try {
-                    const parsedCookie = parseSetCookieHeader(cookieHeader);
-                    if (parsedCookie.name) {
-                      setCookieHeaders.push({
-                        ...parsedCookie,
-                        isPreConsent: isPreConsent,
-                        timestamp: data.params.timestamp,
-                        url: response.url
-                      });
                     }
-                  } catch (e) {
-                    console.log('Set-Cookie parse error:', e.message);
-                  }
-                });
-              }
+                  });
+                }
+              });
             }
           }
         } catch (e) {
-          // Ignore non-JSON messages
+          console.log('❌ CDP event error:', e.message);
         }
-      };
-      
-      // B) BROWSER-LEVEL CDP SESSION (before anything else)
-      console.log('🌐 Setting up browser-level auto-attach...');
-      await sendCDPCommand('Target.setAutoAttach', {
-        autoAttach: true,
-        flatten: true,
-        waitForDebuggerOnStart: false,
       });
-      await sendCDPCommand('Target.setDiscoverTargets', { discover: true });
+
+      // A) Setup browser-level auto-attach
+      console.log('🌐 Setting up browser-level auto-attach...');
+      await sendCDPCommand('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, filter: [{ type: 'page' }] });
       console.log('✅ Browser-level auto-attach enabled');
-      
-      // Get available targets
+
+      // B) Get targets and attach to page
       console.log('🎯 Getting browser targets...');
       const targets = await sendCDPCommand('Target.getTargets');
-      console.log('TARGET CHECK', targets.targetInfos?.map(t => ({ type: t.type, url: t.url })));
-      
+      console.log('TARGET CHECK', targets.targetInfos?.slice(0, 1).map(t => ({ type: t.type, url: t.url })));
+
       const pageTarget = targets.targetInfos?.find(t => t.type === 'page');
       
       if (!pageTarget) {
@@ -587,8 +502,21 @@ Deno.serve(async (req: Request) => {
       
       console.log('✅ Page load event fired');
       
-      // Wait for network idle (additional 6 seconds)
+      // Multi-timing cookie collection for pre-consent
+      console.log('🍪 Collecting pre-consent cookies (M1: post-load)...');
+      const cookies_pre_load = await collectCookies('pre-load');
+      
+      // Wait for network idle
+      console.log('⏳ Waiting for network idle...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      console.log('🍪 Collecting pre-consent cookies (M2: post-idle)...');
+      const cookies_pre_idle = await collectCookies('pre-idle');
+      
+      // Extra wait for additional resources
+      console.log('⏳ Waiting for extra idle period...');
       await new Promise(resolve => setTimeout(resolve, 6000));
+      console.log('🍪 Collecting pre-consent cookies (M3: extra-idle)...');
+      const cookies_pre_extra = await collectCookies('pre-extra');
       
       // Get final URL and readyState
       const finalUrlResult = await sendCDPCommand('Runtime.evaluate', {
@@ -601,404 +529,334 @@ Deno.serve(async (req: Request) => {
       }, pageSessionId);
       const readyState = readyStateResult.result?.value || 'unknown';
       
+      // 🍪 Merge pre-consent cookies from multiple collections
+      console.log('🍪 Merging pre-consent cookies from multiple collections...');
       console.log('CDP ok', { url: finalUrl, ready: readyState });
-      browserlessData.finalUrl = finalUrl;
-      browserlessData.readyState = readyState;
       
-      // Check if we captured any network traffic
-      const preCdp = requests.filter(r => r.phase === 'pre').length;
-      console.log('REQUESTS PRE counts', { cdp: preCdp });
+      console.log('REQUESTS PRE counts', { cdp: Array.from(requestMap.values()).length });
       
-      if (preCdp === 0) {
-        console.log('NO TRAFFIC – network capture empty (CDP not bound)');
-        browserlessData._quality = {
-          incomplete: true,
-          reason: 'NETWORK_CAPTURE_EMPTY_CDP_AND_PAGE'
-        };
-        
-        // Return early with empty data but success: true
-        return new Response(JSON.stringify({
-          success: true,
-          trace_id: traceId,
-          timestamp: Date.now(),
-          data: browserlessData
-        }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders },
-          status: 200
+      // Merge all pre-consent cookies (deduplicate by name+domain+path)
+      const cookieMap = new Map();
+      [cookies_pre_load, cookies_pre_idle, cookies_pre_extra].forEach(cookieList => {
+        cookieList.forEach(cookie => {
+          const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+          if (!cookieMap.has(key)) {
+            cookieMap.set(key, cookie);
+          }
         });
-      }
-      
-      // F) COOKIES & STORAGE - Phase 1: Pre-consent (multi-timing collection)
-      console.log('🍪 Collecting pre-consent cookies and storage...');
-      
-      // Multi-timing pre-consent cookie collection
-      const preLoadCookies = await collectCookies('pre-load');
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Network idle wait
-      const preIdleCookies = await collectCookies('pre-idle');
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Extra idle wait
-      const preExtraCookies = await collectCookies('pre-extra');
-      
-      // Merge and deduplicate pre-consent cookies
-      const allPreCookies = [...preLoadCookies, ...preIdleCookies, ...preExtraCookies];
-      const uniquePreCookies = new Map();
-      allPreCookies.forEach(cookie => {
-        const key = `${cookie.name}|${cookie.domain}|${cookie.path}`;
-        if (!uniquePreCookies.has(key) || 
-            (cookie.expires && (!uniquePreCookies.get(key).expires || cookie.expires > uniquePreCookies.get(key).expires))) {
-          uniquePreCookies.set(key, cookie);
-        }
       });
+      const cookies_pre = Array.from(cookieMap.values());
+      console.log('Cookies merged pre-consent:', cookies_pre.length);
       
-      browserlessData.cookies_pre = Array.from(uniquePreCookies.values());
-      browserlessData.storage_pre = await collectStorage('pre-consent');
-      browserlessData.requests_pre = requests.filter(r => r.isPreConsent);
+      const storage_pre = await collectStorage('pre-consent');
       
-      // Store pre-consent Set-Cookie headers
-      browserlessData.set_cookie_headers_pre = setCookieHeaders.filter(c => c.isPreConsent);
-      
+      // Log Set-Cookie events collected during pre-consent
+      console.log('📊 Pre-consent stats:', { 
+        cookies: cookies_pre.length, 
+        setCookieEvents: setCookieEvents_pre.length, 
+        storage: Object.keys(storage_pre.localStorage).length + Object.keys(storage_pre.sessionStorage).length, 
+        requests: Array.from(requestMap.values()).length 
+      });
       console.log('✅ Pre-consent data collected');
-      console.log('📊 Pre-consent stats:', {
-        cookies: browserlessData.cookies_pre.length,
-        setCookieHeaders: browserlessData.set_cookie_headers_pre.length,
-        storage: Object.keys(browserlessData.storage_pre.localStorage).length + Object.keys(browserlessData.storage_pre.sessionStorage).length,
-        requests: browserlessData.requests_pre.length
-      });
-      
-      // G) CMP DETECTION AND INTERACTION
+
+      // F) CMP Detection
       console.log('🔍 Detecting CMP...');
-      
-      const cmpDetection = await sendCDPCommand('Runtime.evaluate', {
+      const cmpResult = await sendCDPCommand('Runtime.evaluate', {
         expression: `
           (() => {
-            const results = {
-              cmpDetected: false,
-              cmpType: '',
-              cmpSelectors: [],
-              acceptButton: null,
-              rejectButton: null
+            const result = {
+              detected: undefined,
+              type: undefined,
+              acceptButton: false,
+              rejectButton: false
             };
+
+            // OneTrust detection
+            if (window.OneTrust || document.querySelector('#onetrust-banner-sdk')) {
+              result.detected = true;
+              result.type = 'OneTrust';
+            }
             
-            // Common CMP detection patterns
-            const cmpChecks = [
-              { name: 'CookieScript', check: () => !!window.CookieScript || !!document.querySelector('[data-cs-i18n-read-more]') },
-              { name: 'Cookiebot', check: () => !!window.Cookiebot || !!document.querySelector('#CybotCookiebotDialog') },
-              { name: 'OneTrust', check: () => !!window.OneTrust || !!document.querySelector('#onetrust-banner-sdk') },
-              { name: 'Quantcast', check: () => !!window.__qc || !!document.querySelector('.qc-cmp-ui') },
-              { name: 'TrustArc', check: () => !!window.truste || !!document.querySelector('#truste-consent-track') },
-              { name: 'Didomi', check: () => !!window.Didomi || !!document.querySelector('.didomi-consent-popup') },
-              { name: 'Klaro', check: () => !!window.klaro || !!document.querySelector('.klaro') },
-              { name: 'Cookie Yes', check: () => !!document.querySelector('.cky-consent-container') }
+            // CookieScript detection
+            if (window.CookieScript || document.querySelector('.cs-default')) {
+              result.detected = true;
+              result.type = 'CookieScript';
+            }
+            
+            // Generic CMP detection
+            if (document.querySelector('[data-testid*="consent"]') || 
+                document.querySelector('[id*="cookie"]') ||
+                document.querySelector('[class*="consent"]')) {
+              result.detected = true;
+              result.type = result.type || 'Generic';
+            }
+
+            // Check for accept/reject buttons
+            const acceptSelectors = [
+              'button[data-testid="accept-all"]',
+              'button[aria-label*="Accept all"]',
+              'button:contains("Accept all")',
+              'button:contains("Prijať všetko")',
+              'button:contains("Súhlasiť")',
+              '.cookie-accept-all',
+              '.accept-all-cookies'
             ];
             
-            // Detect CMP
-            for (const cmp of cmpChecks) {
-              try {
-                if (cmp.check()) {
-                  results.cmpDetected = true;
-                  results.cmpType = cmp.name;
-                  break;
-                }
-              } catch (e) {
-                console.log('CMP check failed for ' + cmp.name + ':', e.message);
-              }
-            }
-            
-            // Generic CMP detection based on common selectors
-            const genericCmpSelectors = [
-              '[data-cs-i18n-read-more]',
-              '#CybotCookiebotDialog',
-              '#onetrust-banner-sdk',
-              '.qc-cmp-ui',
-              '#truste-consent-track',
-              '.didomi-consent-popup',
-              '.klaro',
-              '.cky-consent-container',
-              '[class*="cookie"][class*="banner"]',
-              '[class*="consent"][class*="popup"]',
-              '[id*="cookie"][id*="consent"]'
+            const rejectSelectors = [
+              'button[data-testid="reject-all"]',
+              'button[aria-label*="Reject all"]',
+              'button:contains("Reject all")',
+              'button:contains("Odmietnuť všetko")',
+              'button:contains("Zamietnuť")',
+              '.cookie-reject-all',
+              '.reject-all-cookies'
             ];
-            
-            for (const selector of genericCmpSelectors) {
-              const element = document.querySelector(selector);
-              if (element && element.offsetParent !== null) {
-                results.cmpDetected = true;
-                if (!results.cmpType) results.cmpType = 'Generic';
-                results.cmpSelectors.push(selector);
-              }
-            }
-            
-            // Find accept/reject buttons
-            if (results.cmpDetected) {
-              const acceptSelectors = [
-                '[data-cs-accept-all]',
-                '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
-                '#onetrust-accept-btn-handler',
-                '.qc-cmp-button[mode="primary"]',
-                '[class*="accept"]',
-                '[class*="allow"]',
-                '[id*="accept"]'
-              ];
-              
-              const rejectSelectors = [
-                '[data-cs-reject-all]',
-                '#CybotCookiebotDialogBodyButtonDecline',
-                '#onetrust-reject-all-handler',
-                '.qc-cmp-button[mode="secondary"]',
-                '[class*="reject"]',
-                '[class*="decline"]',
-                '[id*="reject"]'
-              ];
-              
-              for (const selector of acceptSelectors) {
-                const button = document.querySelector(selector);
-                if (button && button.offsetParent !== null) {
-                  results.acceptButton = selector;
-                  break;
-                }
-              }
-              
-              for (const selector of rejectSelectors) {
-                const button = document.querySelector(selector);
-                if (button && button.offsetParent !== null) {
-                  results.rejectButton = selector;
-                  break;
-                }
-              }
-            }
-            
-            return results;
+
+            result.acceptButton = acceptSelectors.some(sel => {
+              const btn = document.querySelector(sel);
+              return btn && btn.offsetParent !== null;
+            });
+
+            result.rejectButton = rejectSelectors.some(sel => {
+              const btn = document.querySelector(sel);
+              return btn && btn.offsetParent !== null;
+            });
+
+            return result;
           })()
         `
       }, pageSessionId);
-      
-      const cmpDetectionResult = cmpDetection.result?.value || {};
-      browserlessData.cmp_detected = cmpDetectionResult.cmpDetected || false;
-      
-      console.log('🔍 CMP detection result:', {
-        detected: cmpDetectionResult.cmpDetected,
-        type: cmpDetectionResult.cmpType,
-        acceptButton: !!cmpDetectionResult.acceptButton,
-        rejectButton: !!cmpDetectionResult.rejectButton
-      });
-      
-      // Try to click accept if CMP detected
-      if (cmpDetectionResult.cmpDetected && cmpDetectionResult.acceptButton) {
+
+      console.log('🔍 CMP detection result:', JSON.stringify(cmpResult.result?.value, null, 2));
+
+      // G) Consent scenarios
+      if (cmpResult.result?.value?.acceptButton) {
         try {
-          console.log('✅ Attempting to accept cookies...');
+          console.log('🤖 Attempting to click "Accept All" button...');
+          currentPhase = 'post_accept';
           
-          // Switch to post-consent phase
-          isPreConsent = false;
-          
-          // Click accept button
           await sendCDPCommand('Runtime.evaluate', {
             expression: `
               (() => {
-                const button = document.querySelector('${cmpDetectionResult.acceptButton}');
-                if (button) {
-                  button.click();
-                  return true;
+                const selectors = [
+                  'button[data-testid="accept-all"]',
+                  'button[aria-label*="Accept all"]',
+                  'button:contains("Accept all")',
+                  'button:contains("Prijať všetko")',
+                  'button:contains("Súhlasiť")',
+                  '.cookie-accept-all',
+                  '.accept-all-cookies',
+                  '[data-cy="accept-all"]'
+                ];
+                
+                for (const selector of selectors) {
+                  const btn = document.querySelector(selector);
+                  if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    return 'clicked: ' + selector;
+                  }
                 }
-                return false;
+                return 'no_button_found';
               })()
             `
           }, pageSessionId);
           
-          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for consent processing
+          console.log('⏳ Waiting for consent processing...');
+          await new Promise(resolve => setTimeout(resolve, 3000));
           
-          browserlessData.consent_clicked = true;
-          browserlessData.accept_clicked = true;
+          const cookies_post_accept_1 = await collectCookies('post-accept-1');
           
-          console.log('✅ Accept clicked successfully');
+          console.log('⏳ Waiting for additional consent processing...');
+          await new Promise(resolve => setTimeout(resolve, 4000));
           
-          // Phase 2: Post-accept data collection (multi-timing)
-          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for tracking to fire
+          const cookies_post_accept_2 = await collectCookies('post-accept-2');
           
-          const postAcceptCookies1 = await collectCookies('post-accept-1');
-          await new Promise(resolve => setTimeout(resolve, 4000)); // Additional wait
-          const postAcceptCookies2 = await collectCookies('post-accept-2');
-          
-          // Merge and deduplicate post-accept cookies
-          const allPostAcceptCookies = [...postAcceptCookies1, ...postAcceptCookies2];
-          const uniquePostAcceptCookies = new Map();
-          allPostAcceptCookies.forEach(cookie => {
-            const key = `${cookie.name}|${cookie.domain}|${cookie.path}`;
-            if (!uniquePostAcceptCookies.has(key) || 
-                (cookie.expires && (!uniquePostAcceptCookies.get(key).expires || cookie.expires > uniquePostAcceptCookies.get(key).expires))) {
-              uniquePostAcceptCookies.set(key, cookie);
-            }
+          // Merge post-accept cookies
+          const postAcceptMap = new Map();
+          [cookies_post_accept_1, cookies_post_accept_2].forEach(cookieList => {
+            cookieList.forEach(cookie => {
+              const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+              if (!postAcceptMap.has(key)) {
+                postAcceptMap.set(key, cookie);
+              }
+            });
           });
+          const cookies_post_accept = Array.from(postAcceptMap.values());
           
-          browserlessData.cookies_post_accept = Array.from(uniquePostAcceptCookies.values());
-          browserlessData.storage_post_accept = await collectStorage('post-accept');
-          browserlessData.requests_post_accept = requests.filter(r => !r.isPreConsent);
+          const storage_post_accept = await collectStorage('post-accept');
           
-          // Store post-accept Set-Cookie headers
-          browserlessData.set_cookie_headers_post_accept = setCookieHeaders.filter(c => !c.isPreConsent);
+          browserlessData.cookies_post_accept = cookies_post_accept;
+          browserlessData.storage_post_accept = storage_post_accept;
           
           console.log('✅ Post-accept data collected');
-          console.log('📊 Post-accept stats:', {
-            cookies: browserlessData.cookies_post_accept.length,
-            setCookieHeaders: browserlessData.set_cookie_headers_post_accept.length,
-            storage: Object.keys(browserlessData.storage_post_accept.localStorage).length + Object.keys(browserlessData.storage_post_accept.sessionStorage).length,
-            requests: browserlessData.requests_post_accept.length
-          });
-          
-        } catch (clickError) {
-          console.log('❌ Failed to click accept button:', clickError.message);
+        } catch (e) {
+          console.log('❌ Accept scenario failed:', e.message);
         }
-    }
-    
-    console.log('✅ Analysis completed successfully');
-    
-    // H) POPULATE "Data Sent to Third Parties" Section  
-    const normalizeHost = (hostname) => {
-      try {
-        return hostname.toLowerCase().replace(/^www\./, '');
-      } catch {
-        return hostname || 'unknown';
-      }
-    };
-    
-    const getDomainFromUrl = (url) => {
-      try {
-        const urlObj = new URL(url);
-        return normalizeHost(urlObj.hostname);
-      } catch {
-        return 'unknown';
-      }
-    };
-    
-    const firstPartyDomain = normalizeHost(getDomainFromUrl(browserlessData.finalUrl));
-    const allRequests = [...(browserlessData.requests_pre || []), ...(browserlessData.requests_post_accept || []), ...(browserlessData.requests_post_reject || [])];
-    
-    const dataSentToThirdParties = [];
-    const seenEntries = new Set();
-    
-    allRequests.forEach(request => {
-      const requestHost = getDomainFromUrl(request.url);
-      
-      // Skip first-party and unknown hosts
-      if (requestHost === firstPartyDomain || requestHost === 'unknown') return;
-      
-      // Extract parameters with preference for trackingParams
-      const params = {};
-      
-      // Priority 1: trackingParams (already filtered for tracking data)
-      if (request.trackingParams && typeof request.trackingParams === 'object') {
-        Object.assign(params, request.trackingParams);
-      }
-      
-      // Priority 2: query parameters
-      if (request.query && typeof request.query === 'object') {
-        Object.assign(params, request.query);
-      }
-      
-      // Priority 3: POST data
-      if (request.postDataParsed && typeof request.postDataParsed === 'object') {
-        Object.assign(params, request.postDataParsed);
-      }
-      
-      // Only include if there are parameters
-      if (Object.keys(params).length > 0) {
-        const entryKey = `${requestHost}:${Object.keys(params).sort().join(',')}`;
-        
-        if (!seenEntries.has(entryKey)) {
-          seenEntries.add(entryKey);
-          dataSentToThirdParties.push({
-            host: requestHost,
-            url: request.url.length > 100 ? request.url.substring(0, 100) + '...' : request.url,
-            params: Object.keys(params).slice(0, 10), // Limit to 10 params per entry
-            sample_values: Object.fromEntries(
-              Object.entries(params).slice(0, 5).map(([k, v]) => [k, String(v).length > 50 ? String(v).substring(0, 50) + '...' : String(v)])
-            )
-          });
+
+        if (cmpResult.result?.value?.rejectButton) {
+          try {
+            console.log('🚫 Attempting to click "Reject All" button...');
+            currentPhase = 'post_reject';
+            
+            await sendCDPCommand('Runtime.evaluate', {
+              expression: `
+                (() => {
+                  const selectors = [
+                    'button[data-testid="reject-all"]',
+                    'button[aria-label*="Reject all"]',
+                    'button:contains("Reject all")',
+                    'button:contains("Odmietnuť všetko")',
+                    'button:contains("Zamietnuť")',
+                    '.cookie-reject-all',
+                    '.reject-all-cookies',
+                    '[data-cy="reject-all"]'
+                  ];
+                  
+                  for (const selector of selectors) {
+                    const btn = document.querySelector(selector);
+                    if (btn && btn.offsetParent !== null) {
+                      btn.click();
+                      return 'clicked: ' + selector;
+                    }
+                  }
+                  return 'no_button_found';
+                })()
+              `
+            }, pageSessionId);
+            
+            console.log('⏳ Waiting for rejection processing...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            const cookies_post_reject_1 = await collectCookies('post-reject-1');
+            
+            console.log('⏳ Waiting for additional rejection processing...');
+            await new Promise(resolve => setTimeout(resolve, 4000));
+            
+            const cookies_post_reject_2 = await collectCookies('post-reject-2');
+            
+            // Merge post-reject cookies
+            const postRejectMap = new Map();
+            [cookies_post_reject_1, cookies_post_reject_2].forEach(cookieList => {
+              cookieList.forEach(cookie => {
+                const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+                if (!postRejectMap.has(key)) {
+                  postRejectMap.set(key, cookie);
+                }
+              });
+            });
+            const cookies_post_reject = Array.from(postRejectMap.values());
+            
+            const storage_post_reject = await collectStorage('post-reject');
+            
+            browserlessData.cookies_post_reject = cookies_post_reject;
+            browserlessData.storage_post_reject = storage_post_reject;
+            
+            console.log('✅ Post-reject data collected');
+          } catch (e) {
+            console.log('❌ Reject scenario failed:', e.message);
+          }
         }
       }
-    });
-    
-    // Limit to 20 entries to avoid response bloat
-    browserlessData.data_sent_to_third_parties = dataSentToThirdParties.slice(0, 20);
-    console.log(`📤 data_sent_to_third_parties: ${browserlessData.data_sent_to_third_parties.length}`);
-    
-    } catch (cdpError) {
-      console.error('❌ CDP analysis failed:', cdpError.message);
-      browserlessData._error = cdpError.message;
+
+      // Store network requests and basic data
+      browserlessData.requests = Array.from(requestMap.values());
+      browserlessData.cookies_pre = cookies_pre;
+      browserlessData.storage_pre = storage_pre;
+      browserlessData.cmp = cmpResult.result?.value || {};
+      browserlessData.final_url = finalUrl;
       
-      await logToDatabase('error', 'CDP analysis failed', {
-        error: cdpError.message,
-        url: url
+      // Store Set-Cookie events
+      browserlessData.set_cookie_headers_pre = setCookieEvents_pre;
+      browserlessData.set_cookie_headers_post_accept = setCookieEvents_post_accept;
+      browserlessData.set_cookie_headers_post_reject = setCookieEvents_post_reject;
+      
+      // Log detailed counts for debugging
+      console.log('📊 Final collection summary:', {
+        requests: browserlessData.requests.length,
+        cookies_pre: cookies_pre.length,
+        setCookie_pre: setCookieEvents_pre.length,
+        setCookie_post_accept: setCookieEvents_post_accept.length,
+        setCookie_post_reject: setCookieEvents_post_reject.length,
+        storage_pre_items: Object.keys(storage_pre.localStorage).length + Object.keys(storage_pre.sessionStorage).length
       });
-    } finally {
-      // Cleanup
-      if (wsSocket) {
+
+      // Data transfer analysis (simplified)
+      const mainHost = new URL(finalUrl).hostname;
+      const thirdPartyRequests = browserlessData.requests.filter(r => {
         try {
-          wsSocket.close();
-          console.log('🔌 WebSocket connection closed');
-        } catch (closeError) {
-          console.log('WebSocket close warning:', closeError.message);
+          const reqHost = new URL(r.url).hostname;
+          return reqHost !== mainHost && !reqHost.endsWith(`.${mainHost}`);
+        } catch {
+          return false;
         }
-      }
-    }
-    
-    // Insert audit run record
-    try {
-      await supabase.from('audit_runs').insert({
-        trace_id: traceId,
-        url: url,
-        status: browserlessData._error ? 'error' : 'completed',
-        duration_ms: Date.now() - startedAt,
-        data: browserlessData
       });
-    } catch (insertError) {
-      console.error('Failed to insert audit run:', insertError.message);
+
+      browserlessData.data_sent_to_third_parties = thirdPartyRequests.length;
+      console.log('📤 data_sent_to_third_parties:', browserlessData.data_sent_to_third_parties);
+
+      console.log('✅ Analysis completed successfully');
+      
+      // Close WebSocket
+      wsSocket.close();
+      console.log('🔌 WebSocket connection closed');
+
+    } catch (cdpError) {
+      console.log('❌ CDP Analysis failed:', cdpError.message);
+      await logToDatabase('error', 'CDP analysis failed', { error: cdpError.message });
+      throw cdpError;
     }
-    
-    console.log('✅ Analysis function completed successfully');
-    await logToDatabase('info', 'Analysis completed', {
-      finalUrl: browserlessData.finalUrl,
-      cookiesPre: browserlessData.cookies_pre?.length,
-      requestsPre: browserlessData.requests_pre?.length,
-      cmpDetected: browserlessData.cmp_detected,
-      consentClicked: browserlessData.consent_clicked
+
+    await logToDatabase('info', 'Analysis completed successfully', { 
+      url: browserlessData.final_url,
+      requests: browserlessData.requests?.length || 0,
+      cookies_pre: browserlessData.cookies_pre?.length || 0,
+      data_sent_to_third_parties: browserlessData.data_sent_to_third_parties
     });
-    
+
+    console.log('✅ Analysis function completed successfully');
+
+    // Return the analysis results
     return new Response(JSON.stringify({
       success: true,
       trace_id: traceId,
-      timestamp: Date.now(),
-      bl_status_code: 200,
-      bl_health_status: healthStatus,
+      execution_time_ms: Date.now() - startTime,
       data: browserlessData
     }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 200
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
-    console.error(`❌ Function error [${traceId}]:`, error.message);
+    console.log('❌ Function error:', error.message, error.stack);
     
-    await logToDatabase('error', 'Function error', {
-      error: error.message,
-      stack: error.stack,
-      url: url
-    });
-    
+    // Log error to database
+    try {
+      const supabaseUrl = Deno.env.get('SUPABASE_URL');
+      const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+      
+      if (supabaseUrl && supabaseKey) {
+        const supabase = createClient(supabaseUrl, supabaseKey);
+        await supabase.from('audit_logs').insert({
+          trace_id: traceId,
+          level: 'error',
+          message: `Function failed: ${error.message}`,
+          data: { error: error.message, stack: error.stack },
+          timestamp: new Date().toISOString(),
+          source: 'render-and-inspect'
+        });
+      }
+    } catch (logError) {
+      console.log('Failed to log error to database:', logError.message);
+    }
+
     return new Response(JSON.stringify({
       success: false,
       trace_id: traceId,
-      error_code: 'FUNCTION_ERROR',
-      error_message: error.message,
-      data: {
-        _error: error.message,
-        debug: {
-          url: url,
-          timestamp: Date.now(),
-          duration_ms: Date.now() - startedAt
-        }
-      }
+      execution_time_ms: Date.now() - startTime,
+      error: error.message
     }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 200
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 });

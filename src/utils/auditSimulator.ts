@@ -371,7 +371,7 @@ function extractBeaconsFromRequests(requests: any[]): Array<{ host: string; samp
 function transformCookies(
   cookies: any[], 
   baseDomain: string
-): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null; sources?: any; persisted?: boolean }> {
   const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
   
   cookies.forEach((cookie: any) => {

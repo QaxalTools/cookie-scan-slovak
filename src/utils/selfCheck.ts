@@ -150,7 +150,7 @@ function mergeCookieSources(renderData: any, mainDomain: string): MergedCookie[]
       cookie.name,
       cookie.domain,
       cookie.path || '/',
-      cookie.expires ? cookie.expires * 1000 : null,
+      cookie.expiresEpochMs || null,
       'setCookie'
     );
   });
