@@ -356,7 +356,7 @@ Deno.serve(async (req: Request) => {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }, pageSessionId);
       
-      await sendCDPCommand('Page.setExtraHTTPHeaders', {
+      await sendCDPCommand('Network.setExtraHTTPHeaders', {
         headers: {
           'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
           'DNT': '1',
@@ -728,10 +728,80 @@ Deno.serve(async (req: Request) => {
         } catch (clickError) {
           console.log('❌ Failed to click accept button:', clickError.message);
         }
+    }
+    
+    console.log('✅ Analysis completed successfully');
+    
+    // H) POPULATE "Data Sent to Third Parties" Section  
+    const normalizeHost = (hostname) => {
+      try {
+        return hostname.toLowerCase().replace(/^www\./, '');
+      } catch {
+        return hostname || 'unknown';
+      }
+    };
+    
+    const getDomainFromUrl = (url) => {
+      try {
+        const urlObj = new URL(url);
+        return normalizeHost(urlObj.hostname);
+      } catch {
+        return 'unknown';
+      }
+    };
+    
+    const firstPartyDomain = normalizeHost(getDomainFromUrl(browserlessData.finalUrl));
+    const allRequests = [...(browserlessData.requests_pre || []), ...(browserlessData.requests_post_accept || []), ...(browserlessData.requests_post_reject || [])];
+    
+    const dataSentToThirdParties = [];
+    const seenEntries = new Set();
+    
+    allRequests.forEach(request => {
+      const requestHost = getDomainFromUrl(request.url);
+      
+      // Skip first-party and unknown hosts
+      if (requestHost === firstPartyDomain || requestHost === 'unknown') return;
+      
+      // Extract parameters with preference for trackingParams
+      const params = {};
+      
+      // Priority 1: trackingParams (already filtered for tracking data)
+      if (request.trackingParams && typeof request.trackingParams === 'object') {
+        Object.assign(params, request.trackingParams);
       }
       
-      console.log('✅ Analysis completed successfully');
+      // Priority 2: query parameters
+      if (request.query && typeof request.query === 'object') {
+        Object.assign(params, request.query);
+      }
       
+      // Priority 3: POST data
+      if (request.postDataParsed && typeof request.postDataParsed === 'object') {
+        Object.assign(params, request.postDataParsed);
+      }
+      
+      // Only include if there are parameters
+      if (Object.keys(params).length > 0) {
+        const entryKey = `${requestHost}:${Object.keys(params).sort().join(',')}`;
+        
+        if (!seenEntries.has(entryKey)) {
+          seenEntries.add(entryKey);
+          dataSentToThirdParties.push({
+            host: requestHost,
+            url: request.url.length > 100 ? request.url.substring(0, 100) + '...' : request.url,
+            params: Object.keys(params).slice(0, 10), // Limit to 10 params per entry
+            sample_values: Object.fromEntries(
+              Object.entries(params).slice(0, 5).map(([k, v]) => [k, String(v).length > 50 ? String(v).substring(0, 50) + '...' : String(v)])
+            )
+          });
+        }
+      }
+    });
+    
+    // Limit to 20 entries to avoid response bloat
+    browserlessData.data_sent_to_third_parties = dataSentToThirdParties.slice(0, 20);
+    console.log(`📤 data_sent_to_third_parties: ${browserlessData.data_sent_to_third_parties.length}`);
+    
     } catch (cdpError) {
       console.error('❌ CDP analysis failed:', cdpError.message);
       browserlessData._error = cdpError.message;

@@ -260,13 +260,16 @@ async function transformRenderDataToInternalJson(
   allRequests.forEach((request: any) => {
     try {
       const host = getDomain(request.url);
-      if (host !== baseDomain && host !== 'unknown') {
+      // Exclude first-party and its subdomains, and unknown hosts
+      if (host !== baseDomain && !host.endsWith(`.${baseDomain}`) && host !== 'unknown') {
         thirdPartyHosts.add(host);
       }
     } catch (e) {
       console.log('Error processing request URL:', e.message);
     }
   });
+  
+  console.log(`🔍 Third-party analysis: baseDomain=${baseDomain}, thirdParties=${thirdPartyHosts.size}`);
 
   const thirdParties = Array.from(thirdPartyHosts).map(host => ({
     host,
@@ -368,7 +371,7 @@ function transformCookies(
   const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
   
   cookies.forEach((cookie: any) => {
-    const cookieDomain = cookie.domain || baseDomain;
+    const cookieDomain = getDomain(cookie.domain || baseDomain);
     const isFirstParty = cookieDomain === baseDomain || cookieDomain.endsWith(`.${baseDomain}`);
     
     // Classify cookie type
@@ -1043,13 +1046,14 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
   };
 }
 
-// Helper functions
+// Helper functions with unified domain normalization
 function getDomain(url: string): string {
   try {
-    return new URL(url).hostname;
+    const urlObj = new URL(url);
+    return urlObj.hostname.toLowerCase().replace(/^www\./, '');
   } catch {
     if (url.includes('.')) {
-      return url.split('/')[0];
+      return url.split('/')[0].toLowerCase().replace(/^www\./, '');
     }
     return 'unknown';
   }
