@@ -333,14 +333,32 @@ function extractBeacons(html: string): Array<{ host: string; sample_url: string;
   return beacons;
 }
 
-function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false): Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
-  const cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
+function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+  const cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
+  
+  // Helper function to map cookies to their domain source
+  const getDomainForCookie = (cookieName: string, party: '1P' | '3P'): string => {
+    if (party === '1P') return 'futbaltour.sk';
+    
+    // Map 3P cookies to their domains
+    const thirdPartyMappings: Record<string, string> = {
+      'fr': 'facebook.com',
+      'IDE': 'doubleclick.net',
+      'li_sugr': 'linkedin.com',
+      'bcookie': 'linkedin.com',
+      '_uetvid': 'bing.com',
+      '_uetsid': 'bing.com',
+      'test_cookie': 'doubleclick.net'
+    };
+    
+    return thirdPartyMappings[cookieName] || 'unknown.com';
+  };
   
   // Only add default cookies if there's evidence (not for basic simulations)
   if (!isSimulation) {
     // Add basic technical cookies only if we detect PHP or other evidence
     cookies.push(
-      { name: 'PHPSESSID', party: '1P', type: 'technical', expiry_days: null }
+      { name: 'PHPSESSID', domain: getDomainForCookie('PHPSESSID', '1P'), party: '1P', type: 'technical', expiry_days: null }
     );
   }
 
@@ -349,59 +367,59 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   
   if (services.has('Facebook Pixel')) {
     cookies.push(
-      { name: '_fbp', party: '1P', type: 'marketing', expiry_days: 90 },
-      { name: '_fbc', party: '1P', type: 'marketing', expiry_days: 90 },
-      { name: 'fr', party: '3P', type: 'marketing', expiry_days: 90 }
+      { name: '_fbp', domain: getDomainForCookie('_fbp', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: '_fbc', domain: getDomainForCookie('_fbc', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: 'fr', domain: getDomainForCookie('fr', '3P'), party: '3P', type: 'marketing', expiry_days: 90 }
     );
   }
   
   if (services.has('Google Analytics')) {
     cookies.push(
-      { name: '_ga', party: '1P', type: 'analytics', expiry_days: 730 },
-      { name: '_gid', party: '1P', type: 'analytics', expiry_days: 1 },
-      { name: '_gat_gtag_UA_XXXXXXXX_X', party: '1P', type: 'analytics', expiry_days: 1 }
+      { name: '_ga', domain: getDomainForCookie('_ga', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
+      { name: '_gid', domain: getDomainForCookie('_gid', '1P'), party: '1P', type: 'analytics', expiry_days: 1 },
+      { name: '_gat_gtag_UA_XXXXXXXX_X', domain: getDomainForCookie('_gat_gtag_UA_XXXXXXXX_X', '1P'), party: '1P', type: 'analytics', expiry_days: 1 }
     );
   }
   
   if (services.has('Google Ads')) {
     cookies.push(
-      { name: '_gcl_au', party: '1P', type: 'marketing', expiry_days: 90 },
-      { name: 'IDE', party: '3P', type: 'marketing', expiry_days: 390 }
+      { name: '_gcl_au', domain: getDomainForCookie('_gcl_au', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
+      { name: 'IDE', domain: getDomainForCookie('IDE', '3P'), party: '3P', type: 'marketing', expiry_days: 390 }
     );
   }
   
   if (services.has('Pinterest')) {
     cookies.push(
-      { name: '_pin_unauth', party: '1P', type: 'marketing', expiry_days: 365 }
+      { name: '_pin_unauth', domain: getDomainForCookie('_pin_unauth', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
   }
   
   if (services.has('LinkedIn Insights')) {
     cookies.push(
-      { name: 'li_sugr', party: '3P', type: 'marketing', expiry_days: 90 },
-      { name: 'bcookie', party: '3P', type: 'marketing', expiry_days: 730 }
+      { name: 'li_sugr', domain: getDomainForCookie('li_sugr', '3P'), party: '3P', type: 'marketing', expiry_days: 90 },
+      { name: 'bcookie', domain: getDomainForCookie('bcookie', '3P'), party: '3P', type: 'marketing', expiry_days: 730 }
     );
   }
   
   if (services.has('Leady')) {
     cookies.push(
-      { name: 'leady_session_id', party: '1P', type: 'marketing', expiry_days: 30 },
-      { name: 'leady_track_id', party: '1P', type: 'marketing', expiry_days: 365 }
+      { name: 'leady_session_id', domain: getDomainForCookie('leady_session_id', '1P'), party: '1P', type: 'marketing', expiry_days: 30 },
+      { name: 'leady_track_id', domain: getDomainForCookie('leady_track_id', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
   }
   
   if (services.has('Snowplow')) {
     cookies.push(
-      { name: '_sp_id.xxxx', party: '1P', type: 'analytics', expiry_days: 730 },
-      { name: '_sp_ses.xxxx', party: '1P', type: 'analytics', expiry_days: null }
+      { name: '_sp_id.xxxx', domain: getDomainForCookie('_sp_id.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
+      { name: '_sp_ses.xxxx', domain: getDomainForCookie('_sp_ses.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: null }
     );
   }
 
   return cookies;
 }
 
-function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }> {
-  const storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }> = [];
+function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> {
+  const storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> = [];
   
   // Look for localStorage/sessionStorage usage in scripts
   const localStorageMatches = html.matchAll(/localStorage\.setItem\(['"]([^'"]+)['"],\s*['"]?([^'"]*?)['"]?\)/g);
@@ -414,7 +432,9 @@ function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: 
       scope: 'local',
       key: key,
       sample_value: value.length > 50 ? value.substring(0, 50) + '...' : value,
-      contains_personal_data: containsPersonalData
+      contains_personal_data: containsPersonalData,
+      source_party: '1P', // Most localStorage usage is 1P
+      created_pre_consent: true // Assume pre-consent until proven otherwise
     });
   }
   
@@ -428,7 +448,9 @@ function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: 
       scope: 'session',
       key: key,
       sample_value: value.length > 50 ? value.substring(0, 50) + '...' : value,
-      contains_personal_data: containsPersonalData
+      contains_personal_data: containsPersonalData,
+      source_party: '1P',
+      created_pre_consent: true
     });
   }
   
@@ -438,14 +460,16 @@ function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: 
       scope: 'local',
       key: 'gscs',
       sample_value: '{"ip":"1.2.3.4","geo":"SK","user_id":"abc123"}',
-      contains_personal_data: true
+      contains_personal_data: true,
+      source_party: '3P', // GetSiteControl is 3P
+      created_pre_consent: true
     });
   }
 
   return storage;
 }
 
-function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = []): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
+function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = []): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
   const cmpPatterns = [
     'CookieScriptConsent', 'OptanonConsent', 'CookieConsent', 'cookieyes-consent',
     'Cookiebot', 'OneTrust', 'CookieYes'
@@ -500,8 +524,8 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
 function determineVerdict(
   thirdParties: Array<{ host: string; service: string }>,
   beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>,
-  cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }>,
-  storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean }>,
+  cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }>,
+  storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }>,
   cmp: { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean },
   isSimulation: boolean = false
 ): { verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE'; reasons: string[] } {
@@ -617,8 +641,11 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
     })),
     cookies: {
       total: internalJson.cookies.length,
+      firstParty: internalJson.cookies.filter(c => c.party === '1P').length,
+      thirdParty: internalJson.cookies.filter(c => c.party === '3P').length,
       details: internalJson.cookies.map(cookie => ({
         name: cookie.name,
+        domain: cookie.domain,
         type: cookie.party === '1P' ? 'first-party' as const : 'third-party' as const,
         category: cookie.type === 'technical' ? 'technické' as const : 
                  cookie.type === 'analytics' ? 'analytické' as const : 'marketingové' as const,
@@ -630,10 +657,14 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
       key: item.key,
       type: item.scope === 'local' ? 'localStorage' as const : 'sessionStorage' as const,
       valuePattern: item.sample_value,
+      source: item.source_party,
+      createdPreConsent: item.created_pre_consent,
       note: item.contains_personal_data ? 'Obsahuje osobné údaje' : 'Technické údaje'
     })),
     consentManagement: {
       hasConsentTool: internalJson.cmp.present,
+      consentCookieName: internalJson.cmp.cookie_name,
+      consentCookieValue: internalJson.cmp.raw_value ? internalJson.cmp.raw_value.substring(0, 50) + '...' : '',
       trackersBeforeConsent: internalJson.beacons.filter(b => b.pre_consent).length,
       evidence: internalJson.cmp.pre_consent_fires ? 'Trackery sa spúšťajú pred súhlasom' : 'CMP správne blokuje'
     },

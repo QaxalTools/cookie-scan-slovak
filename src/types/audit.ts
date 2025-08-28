@@ -18,6 +18,7 @@ export interface InternalAuditJson {
   }>;
   cookies: Array<{
     name: string;
+    domain: string;
     party: '1P' | '3P';
     type: 'technical' | 'analytics' | 'marketing';
     expiry_days: number | null;
@@ -27,6 +28,8 @@ export interface InternalAuditJson {
     key: string;
     sample_value: string;
     contains_personal_data: boolean;
+    source_party: '1P' | '3P';
+    created_pre_consent: boolean;
   }>;
   cmp: {
     present: boolean;
@@ -72,27 +75,34 @@ export interface AuditData {
       status: 'ok' | 'warning' | 'error';
       spamsBeforeConsent: boolean;
     }>;
-    cookies: {
-      total: number;
-      details: Array<{
-        name: string;
-        type: 'first-party' | 'third-party';
-        category: 'technické' | 'analytické' | 'marketingové';
-        expiration: string;
-        status: 'ok' | 'warning' | 'error';
-      }>;
-    };
-    storage: Array<{
-      key: string;
-      type: 'localStorage' | 'sessionStorage';
-      valuePattern: string;
-      note: string;
+  cookies: {
+    total: number;
+    firstParty: number;
+    thirdParty: number;
+    details: Array<{
+      name: string;
+      domain: string;
+      type: 'first-party' | 'third-party';
+      category: 'technické' | 'analytické' | 'marketingové';
+      expiration: string;
+      status: 'ok' | 'warning' | 'error';
     }>;
-    consentManagement: {
-      hasConsentTool: boolean;
-      trackersBeforeConsent: number;
-      evidence: string;
-    };
+  };
+  storage: Array<{
+    key: string;
+    type: 'localStorage' | 'sessionStorage';
+    valuePattern: string;
+    source: '1P' | '3P';
+    createdPreConsent: boolean;
+    note: string;
+  }>;
+  consentManagement: {
+    hasConsentTool: boolean;
+    consentCookieName: string;
+    consentCookieValue: string;
+    trackersBeforeConsent: number;
+    evidence: string;
+  };
     legalSummary: string;
   };
 

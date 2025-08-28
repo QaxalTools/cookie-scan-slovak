@@ -20,6 +20,45 @@ interface AuditResultsProps {
 }
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  // Consistency checks
+  const performConsistencyChecks = () => {
+    const checks = [];
+    
+    // Check cookie count consistency
+    const expectedCookieCount = data.detailedAnalysis.cookies.firstParty + data.detailedAnalysis.cookies.thirdParty;
+    if (expectedCookieCount !== data.detailedAnalysis.cookies.total) {
+      checks.push(`Cookie count mismatch: ${data.detailedAnalysis.cookies.total} total vs ${expectedCookieCount} calculated`);
+    }
+    
+    // Check pre-consent trackers count
+    const preConsentCount = data.detailedAnalysis.trackers.filter(t => t.spamsBeforeConsent).length;
+    if (preConsentCount !== data.detailedAnalysis.consentManagement.trackersBeforeConsent) {
+      checks.push(`Pre-consent tracker count mismatch: ${data.detailedAnalysis.consentManagement.trackersBeforeConsent} stated vs ${preConsentCount} in table`);
+    }
+    
+    // Check third party count
+    const thirdPartyDomains = new Set(data.detailedAnalysis.thirdParties.list.map(p => p.domain));
+    if (thirdPartyDomains.size !== data.detailedAnalysis.thirdParties.total) {
+      checks.push(`Third party count mismatch: ${data.detailedAnalysis.thirdParties.total} stated vs ${thirdPartyDomains.size} unique domains`);
+    }
+    
+    return checks;
+  };
+
+  const consistencyIssues = performConsistencyChecks();
+
+  const handleDownloadJSON = () => {
+    const jsonData = JSON.stringify(data._internal, null, 2);
+    const blob = new Blob([jsonData], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `audit-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
   const handleDownloadPDF = () => {
     const printWindow = window.open('', '_blank');
     if (printWindow) {
@@ -298,14 +337,20 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
              )}
            </div>
 
-           {/* 4. Cookies */}
+          {/* 4. Cookies */}
           <div>
-            <h3 className="font-semibold mb-2">4. Cookies ({data.detailedAnalysis.cookies.total})</h3>
+            <h3 className="font-semibold mb-2">
+              4. Cookies ({data.detailedAnalysis.cookies.total})
+              <span className="text-sm font-normal text-muted-foreground ml-2">
+                First-party: {data.detailedAnalysis.cookies.firstParty} | Third-party: {data.detailedAnalysis.cookies.thirdParty}
+              </span>
+            </h3>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b">
                     <th className="text-left p-2">Názov</th>
+                    <th className="text-left p-2">Doména</th>
                     <th className="text-left p-2">1P/3P</th>
                     <th className="text-left p-2">Typ</th>
                     <th className="text-left p-2">Expirácia</th>
@@ -316,6 +361,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   {data.detailedAnalysis.cookies.details.map((cookie, index) => (
                     <tr key={index} className="border-b">
                       <td className="p-2 font-mono text-xs">{cookie.name}</td>
+                      <td className="p-2 text-xs text-muted-foreground">{cookie.domain}</td>
                       <td className="p-2">{cookie.type === 'first-party' ? '1P' : '3P'}</td>
                       <td className="p-2">{cookie.category}</td>
                       <td className="p-2">{cookie.expiration}</td>
@@ -337,6 +383,8 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     <tr className="border-b">
                       <th className="text-left p-2">Kľúč</th>
                       <th className="text-left p-2">Vzor hodnôt</th>
+                      <th className="text-left p-2">Zdroj</th>
+                      <th className="text-left p-2">Vznik pred súhlasom</th>
                       <th className="text-left p-2">Poznámka</th>
                     </tr>
                   </thead>
@@ -345,6 +393,12 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                       <tr key={index} className="border-b">
                         <td className="p-2 font-mono text-xs">{storage.key}</td>
                         <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
+                        <td className="p-2">{storage.source}</td>
+                        <td className="p-2">
+                          <Badge variant={storage.createdPreConsent ? 'destructive' : 'secondary'} className="text-xs">
+                            {storage.createdPreConsent ? 'ÁNO' : 'NIE'}
+                          </Badge>
+                        </td>
                         <td className="p-2">{storage.note}</td>
                       </tr>
                     ))}
@@ -364,6 +418,19 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
                 </Badge>
               </div>
+              {data.detailedAnalysis.consentManagement.consentCookieName && (
+                <div className="flex items-center justify-between">
+                  <span>Detegovaný consent cookie:</span>
+                  <span className="font-mono text-xs bg-muted rounded px-2 py-1">
+                    {data.detailedAnalysis.consentManagement.consentCookieName}
+                  </span>
+                </div>
+              )}
+              {data.detailedAnalysis.consentManagement.consentCookieValue && (
+                <div className="text-xs text-muted-foreground">
+                  <strong>Raw value:</strong> {data.detailedAnalysis.consentManagement.consentCookieValue}
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <span>Trackery pred súhlasom:</span>
                 <Badge variant={data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'destructive' : 'secondary'}>
@@ -432,8 +499,32 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         </CardContent>
       </Card>
 
+      {/* Consistency Check Alert */}
+      {consistencyIssues.length > 0 && (
+        <Card className="shadow-medium border-destructive">
+          <CardHeader>
+            <CardTitle className="text-destructive">⚠️ INCOMPLETE - Zber alebo parsing neúplný</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Detegované boli nasledujúce konzistenčné problémy:
+              </p>
+              <ul className="list-disc list-inside space-y-1">
+                {consistencyIssues.map((issue, index) => (
+                  <li key={index} className="text-sm text-destructive">{issue}</li>
+                ))}
+              </ul>
+              <p className="text-sm text-muted-foreground mt-2">
+                Verdikt zostáva <strong>NESÚLAD</strong>, ale dáta môžu byť neúplné.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Akcie */}
-      <div className="flex gap-4">
+      <div className="flex gap-4 flex-wrap">
         <Button onClick={onGenerateEmail} variant="gradient" className="flex items-center gap-2">
           <Mail className="h-4 w-4" />
           Vygenerovať email pre klienta
@@ -441,6 +532,10 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         <Button onClick={handleDownloadPDF} variant="outline" className="flex items-center gap-2">
           <Download className="h-4 w-4" />
           Stiahnuť PDF správu
+        </Button>
+        <Button onClick={handleDownloadJSON} variant="outline" className="flex items-center gap-2">
+          <Download className="h-4 w-4" />
+          Stiahnuť JSON export
         </Button>
       </div>
     </div>
