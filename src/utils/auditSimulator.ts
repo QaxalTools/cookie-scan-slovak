@@ -4,11 +4,12 @@ export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
 }
 
-// Known service mappings for deterministic detection
+// Enhanced service mappings including CDN and subdomains
 const SERVICE_PATTERNS = {
   'facebook.com': 'Facebook Pixel',
   'connect.facebook.net': 'Facebook SDK',
   'static.xx.fbcdn.net': 'Facebook CDN',
+  'www.facebook.com': 'Facebook',
   'google-analytics.com': 'Google Analytics',
   'region1.google-analytics.com': 'Google Analytics 4',
   'googletagmanager.com': 'Google Tag Manager',
@@ -20,6 +21,7 @@ const SERVICE_PATTERNS = {
   'px.ads.linkedin.com': 'LinkedIn Ads',
   'snap.licdn.com': 'LinkedIn Insights',
   'platform.linkedin.com': 'LinkedIn Platform',
+  'static.licdn.com': 'LinkedIn CDN',
   'pinterest.com': 'Pinterest Tag',
   'ct.pinterest.com': 'Pinterest Conversion',
   's.pinimg.com': 'Pinterest CDN',
@@ -34,32 +36,44 @@ const SERVICE_PATTERNS = {
   'l.getsitecontrol.com': 'GetSiteControl Loader',
   's2.getsitecontrol.com': 'GetSiteControl Static',
   'collector.snowplow.io': 'Snowplow',
-  'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow',
+  'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow CloudFront',
   'etarget.sk': 'eTarget',
   'sk.search.etargetnet.com': 'eTarget Search',
   'matomo.org': 'Matomo',
   'gstatic.com': 'Google Static',
   'recaptcha.net': 'reCAPTCHA',
-  'google.com': 'reCAPTCHA'
+  'google.com': 'reCAPTCHA',
+  'cookiebot.com': 'Cookiebot',
+  'consent.cookiebot.com': 'Cookiebot CMP',
+  'cookiescript.com': 'CookieScript',
+  'cdn.cookielaw.org': 'OneTrust CMP',
+  'optanon.blob.core.windows.net': 'OneTrust CDN',
+  'assets.website-files.com': 'Webflow CDN',
+  'fonts.googleapis.com': 'Google Fonts',
+  'fonts.gstatic.com': 'Google Fonts CDN'
 };
 
-// Pre-consent beacon patterns (critical for GDPR compliance)
+// Enhanced beacon patterns with more comprehensive tracking detection
 const PRE_CONSENT_PATTERNS = [
-  { pattern: /facebook\.com\/tr.*ev=PageView/, service: 'Facebook Pixel' },
-  { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect.*en=page_view/, service: 'Google Ads' },
-  { pattern: /region1\.google-analytics\.com\/g\/collect/, service: 'Google Analytics' },
-  { pattern: /google-analytics\.com.*collect/, service: 'Google Analytics' },
-  { pattern: /ct\.pinterest\.com\/v3.*event=init/, service: 'Pinterest' },
-  { pattern: /ct\.pinterest\.com\/user/, service: 'Pinterest' },
-  { pattern: /t\.leady\.com\/L\?/, service: 'Leady' },
-  { pattern: /events\.getsitectrl\.com\/api\/v1\/events/, service: 'GetSiteControl' },
-  { pattern: /collector\.snowplow\.io.*\/i\?.*e=pv/, service: 'Snowplow' },
-  { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?.*e=pv/, service: 'Snowplow' },
-  { pattern: /clarity\.ms.*collect/, service: 'Microsoft Clarity' },
-  { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' },
-  { pattern: /px\.ads\.linkedin\.com.*collect/, service: 'LinkedIn Ads' },
-  { pattern: /snap\.licdn\.com.*li_fat_id/, service: 'LinkedIn Insights' },
-  { pattern: /analytics\.twitter\.com.*track/, service: 'Twitter Analytics' }
+  { pattern: /facebook\.com\/tr/i, service: 'Facebook Pixel' },
+  { pattern: /connect\.facebook\.net.*\/fbevents\.js/i, service: 'Facebook SDK' },
+  { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect/i, service: 'Google Ads' },
+  { pattern: /region1\.google-analytics\.com\/g\/collect/i, service: 'Google Analytics 4' },
+  { pattern: /google-analytics\.com.*collect/i, service: 'Google Analytics' },
+  { pattern: /googletagmanager\.com.*gtm\.js/i, service: 'Google Tag Manager' },
+  { pattern: /ct\.pinterest\.com\/v3/i, service: 'Pinterest Conversion' },
+  { pattern: /ct\.pinterest\.com\/user/i, service: 'Pinterest User' },
+  { pattern: /s\.pinimg\.com.*pintrk/i, service: 'Pinterest Tag' },
+  { pattern: /t\.leady\.com\/L/i, service: 'Leady' },
+  { pattern: /events\.getsitectrl\.com\/api\/v1\/events/i, service: 'GetSiteControl' },
+  { pattern: /collector\.snowplow\.io.*\/i\?/i, service: 'Snowplow' },
+  { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?/i, service: 'Snowplow CloudFront' },
+  { pattern: /clarity\.ms.*collect/i, service: 'Microsoft Clarity' },
+  { pattern: /analytics\.tiktok\.com/i, service: 'TikTok Pixel' },
+  { pattern: /px\.ads\.linkedin\.com.*collect/i, service: 'LinkedIn Ads' },
+  { pattern: /snap\.licdn\.com.*li_fat_id/i, service: 'LinkedIn Insights' },
+  { pattern: /analytics\.twitter\.com/i, service: 'Twitter Analytics' },
+  { pattern: /platform\.twitter\.com.*widgets\.js/i, service: 'Twitter Widget' }
 ];
 
 // Cookie classification patterns
@@ -282,7 +296,7 @@ async function generateInternalAuditJson(
   let { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
   
   // Add INCOMPLETE checks
-  const incompleteChecks = performIncompleteChecks(thirdParties, beacons, cookies, storage, renderData);
+  const incompleteChecks = performIncompleteChecks(thirdParties, beacons, cookies, storage, [], renderData);
   if (incompleteChecks.hasInconsistencies) {
     verdict = 'INCOMPLETE';
     reasons = [...reasons, ...incompleteChecks.reasons];
@@ -612,32 +626,31 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
     }
   }
   
-  // Also check for CMP consent cookies in the cookie list and render data
+  // Enhanced CMP cookie detection in both parsed and render cookies
   if (!cmpPresent) {
-    const consentCookies = ['CookieScriptConsent', 'cookiebot', 'OptanonConsent', 'euconsent-v2', 'cookielawinfo-consent', 'CookieConsent'];
+    const consentCookies = [
+      'CookieScriptConsent', 'cookiebot', 'OptanonConsent', 'euconsent-v2', 
+      'cookielawinfo-consent', 'CookieConsent', 'tarteaucitron', 'cookieyes-consent',
+      'CookieYes-consent', 'cc_cookie_accept', 'cookie_notice_accepted'
+    ];
     
     // Check in parsed cookies
-    const hasCMPCookie = cookies.some(cookie => 
+    const foundCookie = cookies.find(cookie => 
       consentCookies.some(consentCookie => 
         cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
       )
     );
     
-    // Check in render cookies
-    const hasRenderCMPCookie = renderCookies.some(cookie => 
+    // Check in render cookies if not found in parsed
+    const foundRenderCookie = renderCookies.find(cookie => 
       consentCookies.some(consentCookie => 
         cookie.name && cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
       )
     );
     
-    if (hasCMPCookie || hasRenderCMPCookie) {
+    if (foundCookie || foundRenderCookie) {
       cmpPresent = true;
-      const foundCookie = renderCookies.find(cookie => 
-        consentCookies.some(consentCookie => 
-          cookie.name && cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
-        )
-      );
-      cookieName = foundCookie?.name || 'CookieScriptConsent';
+      cookieName = foundCookie?.name || foundRenderCookie?.name || 'CookieScriptConsent';
     }
   }
   
@@ -807,7 +820,10 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
       evidence: internalJson.cmp.pre_consent_fires ? 'Trackery sa spúšťajú pred súhlasom' : 'CMP správne blokuje'
     },
     legalSummary: generateLegalSummary(internalJson),
-    dataTransfers: renderData?.postConsentData?.requests ? extractDataTransfersFromRequests([...renderData.preConsentData?.requests || [], ...renderData.postConsentData.requests]) : undefined
+    dataTransfers: renderData ? extractDataTransfersFromRequests([
+      ...(renderData.preConsentData?.requests || renderData.requests_pre || []),
+      ...(renderData.postConsentData?.requests || renderData.requests_post || [])
+    ]) : undefined
   };
 
   // Generate risk table
@@ -815,6 +831,26 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
 
   // Generate recommendations
   const recommendations = generateRecommendations(internalJson);
+
+  // Perform comprehensive validation checks
+  const { hasInconsistencies, reasons } = performIncompleteChecks(
+    internalJson.third_parties,
+    internalJson.beacons,
+    internalJson.cookies,
+    internalJson.storage,
+    detailedAnalysis.dataTransfers || [],
+    renderData
+  );
+
+  // If major inconsistencies detected, mark as INCOMPLETE
+  if (hasInconsistencies && internalJson.verdict !== 'INCOMPLETE') {
+    internalJson.verdict = 'INCOMPLETE';
+    internalJson.reasons.push(...reasons);
+    
+    // Update management summary
+    managementSummary.verdict = 'neúplné dáta' as const;
+    managementSummary.overall = generateOverallSummary(internalJson);
+  }
 
   return {
     url: originalInput,
@@ -1120,17 +1156,44 @@ function mergeBeacons(htmlBeacons: any[], renderBeacons: any[]): any[] {
   return Array.from(merged.values());
 }
 
+function getETLDPlusOne(domain: string): string {
+  if (!domain) return '';
+  
+  // Remove protocol and port
+  const cleanDomain = domain.replace(/^https?:\/\//, '').split(':')[0];
+  
+  // For Slovak domains and common TLDs
+  const parts = cleanDomain.split('.');
+  if (parts.length <= 1) return cleanDomain;
+  
+  // Handle common Slovak second-level domains
+  if (parts.length >= 3 && parts[parts.length - 2] === 'co' && parts[parts.length - 1] === 'sk') {
+    return parts.slice(-3).join('.');
+  }
+  
+  // Handle other multi-part TLDs
+  if (parts.length >= 2) {
+    return parts.slice(-2).join('.');
+  }
+  
+  return cleanDomain;
+}
+
 function mergePrePostCookies(preCookies: any[], postCookies: any[], baseDomain: string): any[] {
   const cookieMap = new Map<string, any>();
+  const baseETLD = getETLDPlusOne(baseDomain);
   
   // Process all cookies and merge by unique key
   [...preCookies, ...postCookies].forEach(cookie => {
-    const key = `${cookie.name}|${cookie.domain || baseDomain}|${cookie.path || '/'}`;
+    const cookieDomain = cookie.domain || baseDomain;
+    const cookieETLD = getETLDPlusOne(cookieDomain);
+    
+    const key = `${cookie.name}|${cookieDomain}|${cookie.path || '/'}`;
     if (!cookieMap.has(key)) {
       const processed = {
         name: cookie.name,
-        domain: cookie.domain || baseDomain,
-        party: (cookie.domain === baseDomain || !cookie.domain) ? '1P' as const : '3P' as const,
+        domain: cookieDomain,
+        party: (cookieETLD === baseETLD || cookieDomain === baseDomain || !cookie.domain) ? '1P' as const : '3P' as const,
         type: categorizeCookieFromName(cookie.name),
         expiry_days: cookie.expires ? Math.round((new Date(cookie.expires * 1000).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null
       };
@@ -1214,6 +1277,10 @@ function extractStorageFromRenderData(preStorage: any, postStorage: any): Array<
 
 function extractDataTransfersFromRequests(requests: any[]): Array<{ service: string; parameter: string; sampleValue: string; containsPersonalData: boolean; preConsent: boolean }> {
   const transfers: Array<{ service: string; parameter: string; sampleValue: string; containsPersonalData: boolean; preConsent: boolean }> = [];
+  const seen = new Set<string>();
+  
+  // Significant parameters to extract (ignore technical noise)
+  const significantParams = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k', '_fbp', '_fbc', 'client_id', 'visitor_id', 'session_id'];
   
   requests.forEach(request => {
     const host = getDomain(request.url);
@@ -1223,16 +1290,47 @@ function extractDataTransfersFromRequests(requests: any[]): Array<{ service: str
     // Extract query parameters
     if (request.queryParams && Object.keys(request.queryParams).length > 0) {
       Object.entries(request.queryParams).forEach(([param, value]: [string, any]) => {
-        const containsPersonalData = /id|uid|cid|sid|fbp|fbc|email|ip|geo|user/i.test(param) || 
-                                   /id|uid|cid|sid|fbp|fbc|email|ip|geo|user/i.test(String(value));
+        // Only include significant parameters or those with personal data patterns
+        const isSignificant = significantParams.some(sp => param.toLowerCase().includes(sp.toLowerCase()));
+        const containsPersonalData = /id|uid|cid|sid|fbp|fbc|email|ip|geo|user|visitor|client|session/i.test(param) || 
+                                   /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|GA[0-9]|FB\.|[0-9]{10,}/i.test(String(value));
         
-        transfers.push({
-          service,
-          parameter: param,
-          sampleValue: String(value).length > 30 ? String(value).substring(0, 30) + '...' : String(value),
-          containsPersonalData,
-          preConsent: isPreConsent
-        });
+        if (isSignificant || containsPersonalData) {
+          const key = `${service}|${param}|${String(value).substring(0, 12)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            transfers.push({
+              service,
+              parameter: param,
+              sampleValue: String(value).length > 12 ? String(value).substring(0, 12) + '…' : String(value),
+              containsPersonalData,
+              preConsent: isPreConsent
+            });
+          }
+        }
+      });
+    }
+    
+    // Extract POST data parameters
+    if (request.postDataParsed && typeof request.postDataParsed === 'object') {
+      Object.entries(request.postDataParsed).forEach(([param, value]: [string, any]) => {
+        const isSignificant = significantParams.some(sp => param.toLowerCase().includes(sp.toLowerCase()));
+        const containsPersonalData = /id|uid|cid|sid|fbp|fbc|email|ip|geo|user|visitor|client|session/i.test(param) || 
+                                   /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|GA[0-9]|FB\.|[0-9]{10,}/i.test(String(value));
+        
+        if (isSignificant || containsPersonalData) {
+          const key = `${service}|${param}|${String(value).substring(0, 12)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            transfers.push({
+              service,
+              parameter: param,
+              sampleValue: String(value).length > 12 ? String(value).substring(0, 12) + '…' : String(value),
+              containsPersonalData,
+              preConsent: isPreConsent
+            });
+          }
+        }
       });
     }
   });
@@ -1240,7 +1338,7 @@ function extractDataTransfersFromRequests(requests: any[]): Array<{ service: str
   return transfers;
 }
 
-function performIncompleteChecks(thirdParties: any[], beacons: any[], cookies: any[], storage: any[], renderData?: any): { hasInconsistencies: boolean; reasons: string[] } {
+function performIncompleteChecks(thirdParties: any[], beacons: any[], cookies: any[], storage: any[], dataTransfers: any[] = [], renderData?: any): { hasInconsistencies: boolean; reasons: string[] } {
   const reasons: string[] = [];
   let hasInconsistencies = false;
   
@@ -1249,37 +1347,67 @@ function performIncompleteChecks(thirdParties: any[], beacons: any[], cookies: a
   const thirdPartyCookies = cookies.filter(c => c.party === '3P');
   const totalCookies = cookies.length;
   
-  if (totalCookies !== firstParty.length + thirdPartyCookies.length) {
+  if (totalCookies !== firstParty.length + thirdPartyCookies.length && totalCookies > 0) {
     hasInconsistencies = true;
-    reasons.push(`Inconsistent cookie count: total=${totalCookies}, 1P=${firstParty.length}, 3P=${thirdPartyCookies.length}`);
+    reasons.push(`Cookie enumeration mismatch: total=${totalCookies}, 1P=${firstParty.length}, 3P=${thirdPartyCookies.length}`);
   }
   
-  // Third party count validation 
+  // Third party host validation
   const uniqueHosts = new Set(thirdParties.map(tp => tp.host)).size;
-  if (uniqueHosts !== thirdParties.length) {
+  if (uniqueHosts !== thirdParties.length && thirdParties.length > 0) {
     hasInconsistencies = true;
-    reasons.push(`Duplicate third parties detected: ${thirdParties.length} entries vs ${uniqueHosts} unique hosts`);
+    reasons.push(`Host enumeration mismatch: ${thirdParties.length} entries vs ${uniqueHosts} unique hosts`);
   }
   
-  // Storage validation - if render data exists but storage is empty
-  if (renderData?.postConsentData?.storage && storage.length === 0) {
-    const hasStorageData = Object.keys(renderData.postConsentData.storage.localStorage || {}).length > 0 ||
-                          Object.keys(renderData.postConsentData.storage.sessionStorage || {}).length > 0;
-    if (hasStorageData) {
+  // Storage validation - expected data but empty extraction
+  if (renderData?.storage_post) {
+    const hasLocalStorage = Object.keys(renderData.storage_post.localStorage || {}).length > 0;
+    const hasSessionStorage = Object.keys(renderData.storage_post.sessionStorage || {}).length > 0;
+    if ((hasLocalStorage || hasSessionStorage) && storage.length === 0) {
       hasInconsistencies = true;
-      reasons.push('Storage data exists in render but not extracted properly');
+      reasons.push('Storage data exists but extraction failed');
     }
   }
   
-  // Beacon validation - if requests exist but no tracking detected
-  if (renderData?.postConsentData?.requests?.length > 0 && beacons.length === 0) {
-    const trackingRequests = renderData.postConsentData.requests.filter((req: any) => 
-      /facebook|google|linkedin|pinterest|analytics|tracking/i.test(req.url)
+  // Beacon vs requests validation
+  if (renderData?.requests_post?.length > 0) {
+    const trackingRequests = renderData.requests_post.filter((req: any) => 
+      /facebook|google|linkedin|pinterest|analytics|tracking|collect|beacon|pixel/i.test(req.url)
     );
-    if (trackingRequests.length > 0) {
+    if (trackingRequests.length > 0 && beacons.length === 0) {
       hasInconsistencies = true;
-      reasons.push('Tracking requests detected but no beacons extracted');
+      reasons.push(`Tracking requests found (${trackingRequests.length}) but no beacons extracted`);
     }
+  }
+  
+  // Data transfer section validation
+  if (beacons.length > 0 && dataTransfers.length === 0) {
+    // Check if any beacon URLs have query parameters or if there are POST requests
+    const hasQueryParams = renderData?.requests_post?.some((req: any) => 
+      req.queryParams && Object.keys(req.queryParams).length > 0
+    ) || false;
+    const hasPostData = renderData?.requests_post?.some((req: any) => 
+      req.postDataRaw || req.postDataParsed
+    ) || false;
+    
+    if (hasQueryParams || hasPostData) {
+      hasInconsistencies = true;
+      reasons.push('Beacons detected with parameters but Section 7 is empty - query/POST parsing failed');
+    } else if (beacons.length > 0) {
+      reasons.push('Žiadne extrahovateľné parametre (pravdepodobne POST telo binárne alebo šifrované)');
+    }
+  }
+  
+  // Cookie absence check (very unusual for modern websites)
+  if (renderData?.cookies_post?.length === 0 && renderData?.cookies_pre?.length === 0) {
+    hasInconsistencies = true;
+    reasons.push('No cookies detected - collection may have failed');
+  }
+  
+  // Minimum data threshold check
+  if (cookies.length < 3 && thirdParties.length < 3 && storage.length === 0) {
+    hasInconsistencies = true;
+    reasons.push('Unusually low data collection - potential CDP/extraction failure');
   }
   
   return { hasInconsistencies, reasons };
