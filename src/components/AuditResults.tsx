@@ -93,6 +93,19 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 ).join('')}
               </table>
               
+              <h3>5. LocalStorage/SessionStorage</h3>
+              ${data._internal?.storage && data._internal.storage.length > 0 ? `
+              <table>
+                <tr><th>Kľúč</th><th>Scope</th><th>Vzorová hodnota</th><th>Osobné údaje</th></tr>
+                ${data._internal.storage.map(item => `
+                  <tr><td style="font-family: monospace;">${item.key}</td><td>${item.scope}</td><td style="font-family: monospace; font-size: 12px;">${item.sample_value.length > 50 ? item.sample_value.substring(0, 50) + '...' : item.sample_value}</td><td class="status-${item.contains_personal_data ? 'error' : 'ok'}">${item.contains_personal_data ? 'Áno' : 'Nie'}</td></tr>
+                `).join('')}
+              </table>
+              ${data._internal.storage.some(item => item.contains_personal_data) ? `
+              <p class="status-error"><strong>⚠️ Poznámka:</strong> Nájdené osobné údaje v storage bez užívateľského súhlasu.</p>
+              ` : ''}
+              ` : '<p>Žiadne údaje v LocalStorage/SessionStorage neboli nájdené.</p>'}
+              
               <h3>6. Consent Management</h3>
               <p><strong>Consent nástroj:</strong> ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}</p>
               <p><strong>Trackery pred súhlasom:</strong> ${data.detailedAnalysis.consentManagement.trackersBeforeConsent}</p>

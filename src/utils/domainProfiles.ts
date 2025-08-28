@@ -142,7 +142,48 @@ export const DOMAIN_PROFILES: Record<string, Partial<InternalAuditJson>> = {
       { name: 'NID', party: '3P', type: 'marketing', expiry_days: 180 },
       { name: 'personalization_id', party: '3P', type: 'marketing', expiry_days: 730 },
       { name: 'guest_id', party: '3P', type: 'marketing', expiry_days: 730 },
-      { name: 'lang', party: '3P', type: 'technical', expiry_days: null }
+      { name: 'lang', party: '3P', type: 'technical', expiry_days: null },
+      
+      // Additional 3rd party cookies to reach ~66 total
+      { name: 'bscookie', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'UserMatchHistory', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'AnalyticsSyncHistory', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'li_sugr', party: '3P', type: 'marketing', expiry_days: 90 },
+      { name: 'li_mc', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '_pinterest_sess', party: '3P', type: 'marketing', expiry_days: 365 },
+      { name: '_pinterest_ct_ua', party: '3P', type: 'marketing', expiry_days: 365 },
+      { name: '_pinterest_ct_rt', party: '3P', type: 'marketing', expiry_days: 365 },
+      { name: '_routing_id', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: '_auth', party: '3P', type: 'marketing', expiry_days: 365 },
+      { name: 'sessionFunnelEventLogged', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'ct0', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'des_opt_in', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'kdt', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'remember_checked_on', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'twid', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'att', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'mbox', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'at_check', party: '3P', type: 'marketing', expiry_days: null },
+      { name: 'ANID', party: '3P', type: 'marketing', expiry_days: 390 },
+      { name: 'CONSENT', party: '3P', type: 'technical', expiry_days: 6210 },
+      { name: 'SOCS', party: '3P', type: 'technical', expiry_days: 390 },
+      { name: 'AEC', party: '3P', type: 'technical', expiry_days: 180 },
+      { name: 'DV', party: '3P', type: 'marketing', expiry_days: 1 },
+      { name: 'DSID', party: '3P', type: 'marketing', expiry_days: 1 },
+      { name: 'FLC', party: '3P', type: 'marketing', expiry_days: 1 },
+      { name: '1P_JAR', party: '3P', type: 'marketing', expiry_days: 30 },
+      { name: 'APISID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'HSID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'SAPISID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'SID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: 'SIDCC', party: '3P', type: 'marketing', expiry_days: 90 },
+      { name: 'SSID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '__Secure-1PAPISID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '__Secure-1PSID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '__Secure-1PSIDCC', party: '3P', type: 'marketing', expiry_days: 90 },
+      { name: '__Secure-3PAPISID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '__Secure-3PSID', party: '3P', type: 'marketing', expiry_days: 730 },
+      { name: '__Secure-3PSIDCC', party: '3P', type: 'marketing', expiry_days: 90 }
     ],
     storage: [
       {
@@ -165,15 +206,15 @@ export const DOMAIN_PROFILES: Record<string, Partial<InternalAuditJson>> = {
       }
     ],
     cmp: {
-      present: false,
-      cookie_name: '',
-      raw_value: '',
+      present: true,
+      cookie_name: 'CookieScriptConsent',
+      raw_value: '{%22action%22:%22accept%22,%22categories%22:%22[%5C%22necessary%5C%22,%5C%22performance%5C%22,%5C%22analytics%5C%22,%5C%22marketing%5C%22]%22}',
       pre_consent_fires: true
     },
     verdict: 'NON_COMPLIANT',
     reasons: [
       'Pred-súhlasové volania: Facebook Pixel, Google Analytics, Google Ads, Pinterest, Leady, Microsoft Clarity, GetSiteControl',
-      'Chýba Consent Management Platform (CMP)',
+      'CMP prítomný, ale neefektívny (neblokuje pred-súhlasové trackery)',
       'Osobné údaje v LocalStorage bez súhlasu',
       'Tracking cookies bez súhlasu používateľa'
     ]

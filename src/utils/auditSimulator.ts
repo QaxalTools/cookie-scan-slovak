@@ -190,7 +190,7 @@ async function generateInternalAuditJson(
   const storage = extractStorage(htmlContent);
   
   await updateProgress?.(6); // Consent
-  const cmp = analyzeCMP(htmlContent, beacons);
+  const cmp = analyzeCMP(htmlContent, beacons, cookies);
   
   // Determine verdict with validation safeguards
   const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
@@ -445,7 +445,7 @@ function extractStorage(html: string): Array<{ scope: 'local' | 'session'; key: 
   return storage;
 }
 
-function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
+function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, cookies: Array<{ name: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = []): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
   const cmpPatterns = [
     'CookieScriptConsent', 'OptanonConsent', 'CookieConsent', 'cookieyes-consent',
     'Cookiebot', 'OneTrust', 'CookieYes'
@@ -454,7 +454,7 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
   let cmpPresent = false;
   let cookieName = '';
   
-  // Require explicit evidence in HTML content for CMP detection
+  // Check for CMP in HTML content
   for (const pattern of cmpPatterns) {
     if (html.toLowerCase().includes(pattern.toLowerCase()) || 
         html.includes(`"${pattern}"`) || 
@@ -462,6 +462,21 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
       cmpPresent = true;
       cookieName = pattern;
       break;
+    }
+  }
+  
+  // Also check for CMP consent cookies in the cookie list
+  if (!cmpPresent) {
+    const consentCookies = ['CookieScriptConsent', 'cookiebot', 'OptanonConsent', 'euconsent-v2', 'cookielawinfo-consent', 'CookieConsent'];
+    const hasCMPCookie = cookies.some(cookie => 
+      consentCookies.some(consentCookie => 
+        cookie.name.toLowerCase().includes(consentCookie.toLowerCase())
+      )
+    );
+    
+    if (hasCMPCookie) {
+      cmpPresent = true;
+      cookieName = 'CookieScriptConsent';
     }
   }
   
@@ -477,7 +492,7 @@ function analyzeCMP(html: string, beacons: Array<{ host: string; sample_url: str
   return {
     present: cmpPresent,
     cookie_name: cookieName,
-    raw_value: cmpPresent ? 'accept:false,analytics:false,marketing:false' : '',
+    raw_value: cmpPresent ? '{"action":"accept","categories":"[\\"necessary\\",\\"performance\\",\\"analytics\\",\\"marketing\\"]"}' : '',
     pre_consent_fires: preConsentFires
   };
 }
