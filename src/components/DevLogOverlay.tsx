@@ -103,7 +103,7 @@ export const DevLogOverlay: React.FC<DevLogOverlayProps> = ({
                       key={log.id}
                       className="p-2 border-b border-border/50 text-xs hover:bg-muted/50"
                     >
-                      <div className="flex items-start gap-2 mb-1">
+                      <div className="flex items-start gap-2 mb-1 flex-wrap">
                         <Badge 
                           variant={getTypeColor(log.type) as any}
                           className="text-xs px-1 py-0"
@@ -117,6 +117,32 @@ export const DevLogOverlay: React.FC<DevLogOverlayProps> = ({
                           <span className="text-muted-foreground text-xs">
                             ({log.source})
                           </span>
+                        )}
+                        {log.traceId && (
+                          <Badge 
+                            variant="secondary" 
+                            className="text-xs cursor-pointer hover:bg-secondary/80"
+                            onClick={() => navigator.clipboard.writeText(log.traceId!)}
+                            title="Click to copy trace ID"
+                          >
+                            🔍 {log.traceId.substring(0, 8)}
+                          </Badge>
+                        )}
+                        {log.blStatusCode && (
+                          <Badge 
+                            variant={log.blStatusCode === 200 ? "default" : "destructive"}
+                            className="text-xs"
+                          >
+                            BL:{log.blStatusCode}
+                          </Badge>
+                        )}
+                        {log.blHealthStatus && (
+                          <Badge 
+                            variant={log.blHealthStatus === 'healthy' ? "default" : "destructive"}
+                            className="text-xs"
+                          >
+                            {log.blHealthStatus}
+                          </Badge>
                         )}
                       </div>
                       <div className="font-mono text-xs break-words">

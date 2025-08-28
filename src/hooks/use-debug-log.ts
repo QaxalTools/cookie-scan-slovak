@@ -7,6 +7,9 @@ export interface DebugLogEntry {
   message: string;
   source?: string;
   stack?: string;
+  traceId?: string;
+  blStatusCode?: number;
+  blHealthStatus?: string;
 }
 
 export const useDebugLog = () => {

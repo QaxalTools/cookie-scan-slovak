@@ -146,6 +146,21 @@ export async function performLiveAudit(
 
     if (!data?.success) {
       console.warn('⚠️ performLiveAudit: Edge function returned non-success, using fallback. Error:', data?.error);
+      console.log('Trace ID:', data?.trace_id);
+      console.log('Browserless Status:', data?.bl_status_code, data?.bl_health_status);
+      
+      // Log enhanced error info for debugging
+      if ((window as any).debugLog?.addLog) {
+        (window as any).debugLog.addLog({
+          type: 'error',
+          message: `Audit failed: ${data?.error}`,
+          source: 'audit-simulator',
+          traceId: data?.trace_id,
+          blStatusCode: data?.bl_status_code,
+          blHealthStatus: data?.bl_health_status
+        });
+      }
+      
       // Fall back to basic analysis
       const internalJson = await generateInternalAuditJson(input, false, updateProgress);
       await updateProgress(7);
@@ -155,6 +170,21 @@ export async function performLiveAudit(
     }
 
     console.log('✅ performLiveAudit: Live data received from Edge Function');
+    console.log('Trace ID:', data?.trace_id);
+    console.log('Browserless Status:', data?.bl_status_code, data?.bl_health_status);
+    
+    // Log success info for debugging  
+    if ((window as any).debugLog?.addLog) {
+      (window as any).debugLog.addLog({
+        type: 'info',
+        message: `Audit completed successfully`,
+        source: 'audit-simulator',
+        traceId: data?.trace_id,
+        blStatusCode: data?.bl_status_code,
+        blHealthStatus: data?.bl_health_status
+      });
+    }
+    
     if (data.data) {
       console.log('📊 performLiveAudit: Data stats:', {
         finalUrl: data.data.finalUrl,

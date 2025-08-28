@@ -13,6 +13,9 @@ const queryClient = new QueryClient();
 const App = () => {
   const debugLog = useDebugLog();
   
+  // Make debug log globally available for audit logging
+  (window as any).debugLog = debugLog;
+  
   // Show debug overlay in development or if ?debug=true is in URL
   const showDebugOverlay = 
     import.meta.env.DEV || 

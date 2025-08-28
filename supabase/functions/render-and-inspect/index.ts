@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
 Deno.serve(async (req: Request) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -9,13 +11,109 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const traceId = crypto.randomUUID();
+  const startTime = Date.now();
+  let requestData = null;
+  
+  // Parse request body once at the start
   try {
-    console.log('🚀 Starting render-and-inspect function');
-    
-    const { url } = await req.json();
-    if (!url) {
-      throw new Error('URL is required');
+    requestData = await req.json();
+  } catch (parseError) {
+    console.error(`❌ Failed to parse request body [${traceId}]:`, parseError.message);
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Invalid request format',
+      trace_id: traceId,
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      status: 400
+    });
+  }
+
+  const { url } = requestData;
+  if (!url) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'URL is required',
+      trace_id: traceId,
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      status: 400
+    });
+  }
+
+  // Initialize Supabase client
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL') ?? '',
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  );
+
+  // Helper function to log to database
+  const logToDatabase = async (level: string, message: string, data?: any) => {
+    try {
+      await supabase.from('audit_logs').insert({
+        trace_id: traceId,
+        level,
+        message,
+        source: 'render-and-inspect',
+        data: data || null
+      });
+    } catch (logError) {
+      console.error('Failed to log to database:', logError.message);
     }
+  };
+
+  try {
+    console.log(`🚀 Starting render-and-inspect function [${traceId}]`);
+    await logToDatabase('info', '🚀 Starting render-and-inspect function', { url });
+    
+    console.log(`📝 Analyzing URL: ${url}`);
+
+    const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
+    if (!browserlessApiKey) {
+      throw new Error('BROWSERLESS_API_KEY not configured');
+    }
+
+    // Log masked token for verification
+    const maskedToken = `${browserlessApiKey.substring(0, 8)}...${browserlessApiKey.substring(browserlessApiKey.length - 4)}`;
+    console.log(`🔑 Using Browserless token: ${maskedToken}`);
+    await logToDatabase('info', '🔑 Token verification', { masked_token: maskedToken });
+
+    // Health check Browserless first
+    console.log('🏥 Checking Browserless health...');
+    let healthStatus = 'unknown';
+    let healthDetails = {};
+    
+    try {
+      const healthResponse = await fetch(`https://chrome.browserless.io/json/version?token=${browserlessApiKey}`, {
+        method: 'GET',
+        timeout: 10000
+      });
+      
+      healthStatus = healthResponse.ok ? 'healthy' : 'unhealthy';
+      healthDetails = {
+        status_code: healthResponse.status,
+        headers: Object.fromEntries(healthResponse.headers.entries())
+      };
+      
+      if (healthResponse.ok) {
+        const healthData = await healthResponse.json();
+        healthDetails.version_info = healthData;
+        console.log('✅ Browserless health check passed');
+      } else {
+        const errorText = await healthResponse.text();
+        healthDetails.error_response = errorText;
+        console.log(`⚠️ Browserless health check failed: ${healthResponse.status}`);
+      }
+    } catch (healthError) {
+      healthStatus = 'error';
+      healthDetails.error = healthError.message;
+      console.log(`❌ Browserless health check error: ${healthError.message}`);
+    }
+    
+    await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus, details: healthDetails });
 
     console.log(`📝 Analyzing URL: ${url}`);
 
@@ -379,13 +477,13 @@ export default async ({ page, context }) => {
 };`;
 
     console.log('🌐 Calling Browserless API...');
+    await logToDatabase('info', '🌐 Calling Browserless API', { url });
 
-    // Call Browserless API
-    const browserlessResponse = await fetch('https://chrome.browserless.io/function', {
+    // Call Browserless API with token in query string for better compatibility
+    const browserlessResponse = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${browserlessApiKey}`,
       },
       body: JSON.stringify({
         code: browserlessFunction,
@@ -394,24 +492,71 @@ export default async ({ page, context }) => {
       }),
     });
 
+    const responseHeaders = Object.fromEntries(browserlessResponse.headers.entries());
+    
     if (!browserlessResponse.ok) {
       const errorText = await browserlessResponse.text();
       console.error('❌ Browserless API error:', errorText);
+      
+      await logToDatabase('error', '❌ Browserless API failed', {
+        status_code: browserlessResponse.status,
+        response_headers: responseHeaders,
+        error_response: errorText.substring(0, 1000) // Truncate long responses
+      });
+      
       throw new Error(`Browserless API failed: ${browserlessResponse.status} - ${errorText}`);
     }
 
     const renderData = await browserlessResponse.json();
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    
     console.log('✅ Browserless data received');
     console.log(`Final URL: ${renderData.finalUrl}`);
     console.log(`Cookies: pre=${renderData.cookies_pre?.length || 0}, post=${renderData.cookies_post?.length || 0}`);
     console.log(`Requests: pre=${renderData.requests_pre?.length || 0}, post=${renderData.requests_post?.length || 0}`);
     console.log(`Storage items: pre=${Object.keys(renderData.storage_pre?.localStorage || {}).length + Object.keys(renderData.storage_pre?.sessionStorage || {}).length}, post=${Object.keys(renderData.storage_post?.localStorage || {}).length + Object.keys(renderData.storage_post?.sessionStorage || {}).length}`);
 
+    // Log successful completion to database
+    await supabase.from('audit_runs').insert({
+      trace_id: traceId,
+      input_url: url,
+      normalized_url: renderData.finalUrl,
+      status: 'completed',
+      data_source: 'live',
+      duration_ms: duration,
+      bl_status_code: browserlessResponse.status,
+      bl_health_status: healthStatus,
+      requests_total: (renderData.requests_pre?.length || 0) + (renderData.requests_post?.length || 0),
+      requests_pre_consent: renderData.requests_pre?.length || 0,
+      third_parties_count: new Set([...(renderData.requests_pre || []), ...(renderData.requests_post || [])].map(r => new URL(r.url).hostname)).size,
+      beacons_count: [...(renderData.requests_pre || []), ...(renderData.requests_post || [])].filter(r => 
+        r.url.includes('analytics') || r.url.includes('track') || r.url.includes('beacon')).length,
+      cookies_pre_count: renderData.cookies_pre?.length || 0,
+      cookies_post_count: renderData.cookies_post?.length || 0,
+      meta: {
+        health_check: healthDetails,
+        response_headers: responseHeaders,
+        consent_clicked: renderData.consent_clicked,
+        cmp_detected: renderData.cmp_detected
+      }
+    });
+
+    await logToDatabase('info', '✅ Analysis completed successfully', {
+      duration_ms: duration,
+      final_url: renderData.finalUrl,
+      cookies_pre: renderData.cookies_pre?.length || 0,
+      cookies_post: renderData.cookies_post?.length || 0,
+      requests_total: (renderData.requests_pre?.length || 0) + (renderData.requests_post?.length || 0)
+    });
+
     return new Response(JSON.stringify({
       success: true,
       data: renderData,
-      trace_id: crypto.randomUUID(),
-      timestamp: new Date().toISOString()
+      trace_id: traceId,
+      timestamp: new Date().toISOString(),
+      bl_status_code: browserlessResponse.status,
+      bl_health_status: healthStatus
     }), {
       headers: { 
         'Content-Type': 'application/json',
@@ -420,20 +565,36 @@ export default async ({ page, context }) => {
     });
 
   } catch (error) {
-    const traceId = crypto.randomUUID();
+    const endTime = Date.now();
+    const duration = endTime - startTime;
     const timestamp = new Date().toISOString();
     
     console.error(`❌ Error in render-and-inspect [${traceId}]:`, error.message);
     console.error(`❌ Stack trace [${traceId}]:`, error.stack);
     
-    // Get URL from outer scope properly
-    let requestUrl = 'unknown';
-    try {
-      const { url: parsedUrl } = await req.json();
-      requestUrl = parsedUrl || 'unknown';
-    } catch (parseError) {
-      console.error('❌ Failed to parse URL from request:', parseError.message);
-    }
+    // Log error to database
+    await logToDatabase('error', '❌ Function failed', {
+      error: error.message,
+      stack: error.stack,
+      duration_ms: duration
+    });
+
+    // Log failed run to database
+    await supabase.from('audit_runs').insert({
+      trace_id: traceId,
+      input_url: url,
+      status: 'failed',
+      error_message: error.message,
+      duration_ms: duration,
+      bl_status_code: healthDetails?.status_code || null,
+      bl_health_status: healthStatus,
+      meta: {
+        error_details: error.stack,
+        health_check: healthDetails
+      }
+    });
+    
+    const requestUrl = url || 'unknown';
     
     // Return a basic fallback response instead of failing completely
     const fallbackData = {
@@ -463,7 +624,9 @@ export default async ({ page, context }) => {
       data: fallbackData,
       error: error.message,
       trace_id: traceId,
-      timestamp: timestamp
+      timestamp: timestamp,
+      bl_status_code: healthDetails?.status_code || null,
+      bl_health_status: healthStatus
     }), {
       headers: { 
         'Content-Type': 'application/json',
