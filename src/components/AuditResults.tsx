@@ -245,6 +245,21 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 </div>
                 
                 <div>
+                  <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
+                  <p className="text-sm text-muted-foreground">{data.managementSummary.overall}</p>
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-2">Riziká</h4>
+                  <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
+                </div>
+                {data.managementSummary.data_source && (
+                  <div>
+                    <h4 className="font-semibold mb-2">Zdroj dát</h4>
+                    <p className="text-sm text-muted-foreground">{data.managementSummary.data_source}</p>
+                  </div>
+                )}
+                
+                <div>
                   <h4 className="font-semibold mb-3">Rizikový scoring (0–5)</h4>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -271,21 +286,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     </table>
                   </div>
                 </div>
-                
-                <div>
-                  <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
-                  <p className="text-sm text-muted-foreground">{data.managementSummary.overall}</p>
-                </div>
-                <div>
-                  <h4 className="font-semibold mb-2">Riziká</h4>
-                  <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
-                </div>
-                {data.managementSummary.data_source && (
-                  <div>
-                    <h4 className="font-semibold mb-2">Zdroj dát</h4>
-                    <p className="text-sm text-muted-foreground">{data.managementSummary.data_source}</p>
-                  </div>
-                )}
               </>
             );
           })()}
