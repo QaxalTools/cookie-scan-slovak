@@ -571,7 +571,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                                 <td className="p-2 text-xs">{cookie.expiration}</td>
                                 <td className="p-2">
                                   <Badge className={`text-white text-xs ${isLongRetention ? 'bg-orange-500' : 'bg-green-600'}`}>
-                                    {isLongRetention ? 'DLHÁ RETENCIE' : 'OK'}
+                                    {isLongRetention ? 'DLHÁ RETENCIA' : 'OK'}
                                   </Badge>
                                 </td>
                               </tr>
