@@ -1,5 +1,6 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
 import { supabase } from '@/integrations/supabase/client';
+import { addQualityChecks } from './qualityChecks';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -189,9 +190,11 @@ export async function performLiveAudit(
       console.log('📊 performLiveAudit: Data stats:', {
         finalUrl: data.data.finalUrl,
         cookiesPre: data.data.cookies_pre?.length || 0,
-        cookiesPost: data.data.cookies_post?.length || 0,
+        cookiesPostAccept: data.data.cookies_post_accept?.length || 0,
+        cookiesPostReject: data.data.cookies_post_reject?.length || 0,
         requestsPre: data.data.requests_pre?.length || 0,
-        requestsPost: data.data.requests_post?.length || 0,
+        requestsPostAccept: data.data.requests_post_accept?.length || 0,
+        requestsPostReject: data.data.requests_post_reject?.length || 0,
         cmpDetected: data.data.cmp_detected,
         consentClicked: data.data.consent_clicked,
         hasError: !!data.data._error
@@ -205,16 +208,19 @@ export async function performLiveAudit(
     
     await updateProgress(7);
     
-    // Convert to display format
-    const auditData = convertToDisplayFormat(internalJson, input);
-    
-    // Minimum duration for UX
-    const elapsed = Date.now() - startTime;
-    if (elapsed < minDurationMs) {
-      await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
-    }
-    
-    return auditData;
+  // Convert to display format
+  const auditData = convertToDisplayFormat(internalJson, input);
+  
+  // Add quality checks and INCOMPLETE banners
+  auditData.managementSummary = addQualityChecks(auditData.managementSummary, renderData, internalJson);
+  
+  // Minimum duration for UX
+  const elapsed = Date.now() - startTime;
+  if (elapsed < minDurationMs) {
+    await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
+  }
+  
+  return auditData;
 
   } catch (error) {
     console.error('❌ performLiveAudit: Live analysis failed, falling back to basic analysis:', error);
@@ -244,8 +250,8 @@ async function transformRenderDataToInternalJson(
 
   // Extract data from renderData
   const finalUrl = renderData.finalUrl || 'unknown';
-  const allRequests = [...(renderData.requests_pre || []), ...(renderData.requests_post || [])];
-  const allCookies = [...(renderData.cookies_pre || []), ...(renderData.cookies_post || [])];
+  const allRequests = [...(renderData.requests_pre || []), ...(renderData.requests_post_accept || []), ...(renderData.requests_post_reject || [])];
+  const allCookies = [...(renderData.cookies_pre || []), ...(renderData.cookies_post_accept || []), ...(renderData.cookies_post_reject || [])];
   
   // Build third parties from network requests
   const thirdPartyHosts = new Set<string>();
@@ -273,8 +279,12 @@ async function transformRenderDataToInternalJson(
   // Transform cookies with proper classification
   const cookies = transformCookies(allCookies, baseDomain);
 
-  // Transform storage
-  const storage = transformStorage(renderData.storage_pre, renderData.storage_post);
+  // Transform storage (include all post-consent storage)
+  const storagePost = { 
+    ...renderData.storage_post_accept, 
+    ...renderData.storage_post_reject 
+  };
+  const storage = transformStorage(renderData.storage_pre, storagePost);
 
   // Analyze CMP from cookies and data
   const cmp = analyzeCMPFromLiveData(renderData, beacons, cookies);
@@ -331,12 +341,17 @@ function extractBeaconsFromRequests(requests: any[]): Array<{ host: string; samp
           params.push(...Object.keys(request.postDataParsed));
         }
         
+        // Add tracking parameters from new trackingParams field
+        if (request.trackingParams && typeof request.trackingParams === 'object') {
+          params.push(...Object.keys(request.trackingParams));
+        }
+        
         beacons.push({
           host: host,
           sample_url: url.length > 100 ? url.substring(0, 100) + '...' : url,
-          params: params.slice(0, 10), // Limit to first 10 params
+          params: [...new Set(params)].slice(0, 10), // Deduplicate and limit to first 10 params
           service: pattern.service,
-          pre_consent: request.isPreConsent || false
+          pre_consent: request.phase === 'pre' || request.isPreConsent || false
         });
         break;
       }

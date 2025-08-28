@@ -11,36 +11,39 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const traceId = crypto.randomUUID();
-  const startTime = Date.now();
+  let traceId = crypto.randomUUID();
+  let startedAt = Date.now();
   let requestData = null;
+  let url = '';
   
   // Parse request body once at the start
   try {
     requestData = await req.json();
+    url = requestData?.url || '';
   } catch (parseError) {
     console.error(`❌ Failed to parse request body [${traceId}]:`, parseError.message);
     return new Response(JSON.stringify({
       success: false,
-      error: 'Invalid request format',
       trace_id: traceId,
-      timestamp: new Date().toISOString()
+      error_code: 'PARSE_ERROR',
+      error_message: 'Invalid request format',
+      data: { _error: parseError.message }
     }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 400
+      status: 200
     });
   }
 
-  const { url } = requestData;
   if (!url) {
     return new Response(JSON.stringify({
       success: false,
-      error: 'URL is required',
       trace_id: traceId,
-      timestamp: new Date().toISOString()
+      error_code: 'MISSING_URL',
+      error_message: 'URL is required',
+      data: { _error: 'URL parameter is missing' }
     }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      status: 400
+      status: 200
     });
   }
 
@@ -81,10 +84,9 @@ Deno.serve(async (req: Request) => {
     console.log(`🔑 Using Browserless token: ${maskedToken}`);
     await logToDatabase('info', '🔑 Token verification', { masked_token: maskedToken });
 
-    // Health check Browserless first with production endpoint
+    // Health check Browserless first
     console.log('🏥 Checking Browserless health...');
     let healthStatus = 'unknown';
-    let healthDetails = {};
     
     try {
       const healthResponse = await fetch(`https://production-sfo.browserless.io/json/version?token=${browserlessApiKey}`, {
@@ -92,212 +94,364 @@ Deno.serve(async (req: Request) => {
       });
       
       healthStatus = healthResponse.ok ? 'healthy' : 'unhealthy';
-      healthDetails = {
-        status_code: healthResponse.status,
-        headers: Object.fromEntries(healthResponse.headers.entries())
-      };
       
       if (healthResponse.ok) {
-        const healthData = await healthResponse.json();
-        healthDetails.version_info = healthData;
         console.log('✅ Browserless health check passed');
       } else {
-        const errorText = await healthResponse.text();
-        healthDetails.error_response = errorText;
         console.log(`⚠️ Browserless health check failed: ${healthResponse.status}`);
       }
     } catch (healthError) {
       healthStatus = 'error';
-      healthDetails.error = healthError.message;
       console.log(`❌ Browserless health check error: ${healthError.message}`);
     }
     
-    await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus, details: healthDetails });
+    await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus });
 
-    // Multi-scenario function to be executed in Browserless
-    const browserlessFunction = `
-export default async ({ page, context }) => {
-  console.log('🔍 Starting multi-scenario analysis for:', context.url);
-  
-  // Custom sleep function for Puppeteer compatibility
-  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-  
-  // Initialize three scenario results
-  const scenarios = {
-    baseline: null,
-    accept: null,
-    reject: null
-  };
+    // WebSocket CDP implementation - Direct script execution
+    console.log('🌐 Starting CDP WebSocket analysis...');
+    
+    // Build the complete CDP analysis script
+    const cdpScript = `
+// CDP WebSocket Analysis Script
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // Stealth setup - realistic browser fingerprint
-  await page.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-  );
-  
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
-    'DNT': '1',
-    'Sec-GPC': '1'
+// Initialize results structure
+const results = {
+  finalUrl: "${url}",
+  cookies_pre: [],
+  cookies_post_accept: [],
+  cookies_post_reject: [],
+  requests_pre: [],
+  requests_post_accept: [],
+  requests_post_reject: [],
+  storage_pre: {},
+  storage_post_accept: {},
+  storage_post_reject: {},
+  cmp_detected: false,
+  cmp_cookie_name: '',
+  cmp_cookie_value: '',
+  consent_clicked: false,
+  scenarios: { baseline: true, accept: false, reject: false }
+};
+
+// Helper: Get eTLD+1 domain
+const getDomain = (urlStr) => {
+  try {
+    const url = new URL(urlStr);
+    return url.hostname.replace(/^www\\./, '');
+  } catch {
+    return 'unknown';
+  }
+};
+
+// Helper: Deduplicate cookies
+const dedupeCookies = (cookies) => {
+  const seen = new Set();
+  return cookies.filter(cookie => {
+    const key = \`\${cookie.name}|\${cookie.domain}|\${cookie.path || '/'}\`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
+};
+
+// Helper: Calculate expiry days
+const getExpiryDays = (expires) => {
+  if (!expires || expires <= 0) return null;
+  const now = Date.now() / 1000;
+  return Math.round((expires - now) / (24 * 60 * 60));
+};
+
+// Helper: Collect cookies (3 methods)
+const collectCookies = async (page, client) => {
+  const cookies = [];
   
-  // Set timezone to Slovakia (Puppeteer-safe)
-  try {
-    await page.emulateTimezone('Europe/Bratislava');
-  } catch (e) {
-    console.log('⚠️ Timezone emulation not available:', e.message);
+  // Method 1: CDP Network.getAllCookies
+  if (client) {
+    try {
+      const { cookies: cdpCookies } = await client.send('Network.getAllCookies');
+      cookies.push(...cdpCookies.map(c => ({
+        ...c,
+        expiry_days: getExpiryDays(c.expires)
+      })));
+    } catch (e) {
+      console.log('CDP cookies failed:', e.message);
+    }
   }
   
-  // Remove webdriver detection (Puppeteer-safe)
+  // Method 2: page.cookies()
   try {
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    });
+    const pageCookies = await page.cookies();
+    cookies.push(...pageCookies.map(c => ({
+      ...c,
+      expiry_days: getExpiryDays(c.expires)
+    })));
   } catch (e) {
-    console.log('⚠️ evaluateOnNewDocument not available:', e.message);
+    console.log('Page cookies failed:', e.message);
+  }
+  
+  // Method 3: document.cookie
+  try {
+    const docCookies = await page.evaluate(() => {
+      const cookies = [];
+      if (document.cookie) {
+        document.cookie.split(';').forEach(cookie => {
+          const [name, value] = cookie.trim().split('=');
+          if (name && value) {
+            cookies.push({
+              name: name.trim(),
+              value: value.trim(),
+              domain: window.location.hostname,
+              path: '/',
+              secure: false,
+              httpOnly: false,
+              sameSite: 'Lax',
+              expires: 0
+            });
+          }
+        });
+      }
+      return cookies;
+    });
+    cookies.push(...docCookies);
+  } catch (e) {
+    console.log('Document cookies failed:', e.message);
   }
 
-  // Helper: Create isolated context for each scenario
-  const createIsolatedContext = async () => {
+  return dedupeCookies(cookies);
+};
+
+// Helper: Collect storage
+const collectStorage = async (page, client, origin) => {
+  const storage = { localStorage: {}, sessionStorage: {} };
+  
+  // CDP method
+  if (client) {
     try {
-      let newContext, newPage;
-      
-      // Try Playwright approach first (newer)
-      if (page.context && typeof page.context === 'function') {
-        newContext = await page.context().browser().newContext();
-        newPage = await newContext.newPage();
-      } 
-      // Fallback to Puppeteer approach
-      else if (page.browser && typeof page.browser === 'function') {
-        newContext = await page.browser().createIncognitoBrowserContext();
-        newPage = await newContext.newPage();
+      const localStorage = await client.send('DOMStorage.getDOMStorageItems', {
+        storageId: { securityOrigin: origin, isLocalStorage: true }
+      });
+      if (localStorage.entries) {
+        localStorage.entries.forEach(([key, value]) => {
+          storage.localStorage[key] = value;
+        });
       }
-      // Use existing page if context creation fails
-      else {
-        console.log('⚠️ Using existing page, context isolation not available');
-        return { context: null, page: page };
+    } catch (e) {
+      console.log('CDP localStorage failed:', e.message);
+    }
+    
+    try {
+      const sessionStorage = await client.send('DOMStorage.getDOMStorageItems', {
+        storageId: { securityOrigin: origin, isLocalStorage: false }
+      });
+      if (sessionStorage.entries) {
+        sessionStorage.entries.forEach(([key, value]) => {
+          storage.sessionStorage[key] = value;
+        });
       }
+    } catch (e) {
+      console.log('CDP sessionStorage failed:', e.message);
+    }
+  }
+  
+  // Fallback: evaluate storage
+  try {
+    const evalStorage = await page.evaluate(() => {
+      const ls = {}, ss = {};
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key) ls[key] = localStorage.getItem(key);
+        }
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key) ss[key] = sessionStorage.getItem(key);
+        }
+      } catch (e) {
+        console.log('Storage eval error:', e.message);
+      }
+      return { localStorage: ls, sessionStorage: ss };
+    });
+    
+    Object.assign(storage.localStorage, evalStorage.localStorage);
+    Object.assign(storage.sessionStorage, evalStorage.sessionStorage);
+  } catch (e) {
+    console.log('Storage evaluate failed:', e.message);
+  }
+  
+  return storage;
+};
+
+// Helper: Detect and handle CMP
+const handleCMP = async (page) => {
+  let cmpDetected = false;
+  let cmpCookieName = '';
+  let cmpCookieValue = '';
+  
+  try {
+    // Look for common CMP elements and click patterns
+    const cmpInfo = await page.evaluate(() => {
+      const selectors = [
+        // Slovak/Czech patterns
+        'button[id*="accept"], button[class*="accept"]',
+        'button:contains("Súhlasím"), button:contains("Prijať")',
+        'button:contains("Akceptovať"), button:contains("Povoliť")',
+        // English patterns  
+        'button:contains("Accept"), button:contains("Allow")',
+        'button:contains("Agree"), button:contains("Consent")',
+        // Generic CMP patterns
+        '[data-testid*="accept"], [data-cy*="accept"]',
+        '.cookie-accept, .consent-accept, #cookie-accept',
+        '[onclick*="accept"], [onclick*="consent"]'
+      ];
       
-      // Apply same stealth settings
-      await newPage.setUserAgent(
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-      );
-      await newPage.setExtraHTTPHeaders({
-        'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
-        'DNT': '1',
-        'Sec-GPC': '1'
+      let foundButton = null;
+      let cmpDetected = false;
+      
+      // Check for CMP presence indicators
+      const cmpIndicators = [
+        'CookieScriptConsent', 'OptanonConsent', 'euconsent-v2', 
+        'CookieConsent', 'tarteaucitron', 'cookieyes-consent'
+      ];
+      
+      // Check cookies for CMP
+      cmpIndicators.forEach(indicator => {
+        if (document.cookie.includes(indicator)) {
+          cmpDetected = true;
+        }
       });
       
-      // Timezone (Puppeteer-safe)
-      try {
-        await newPage.emulateTimezone('Europe/Bratislava');
-      } catch (e) {
-        console.log('⚠️ Timezone emulation not supported:', e.message);
-      }
+      // Check DOM for CMP
+      const cmpElements = document.querySelectorAll([
+        '[id*="cookie"], [class*="cookie"]',
+        '[id*="consent"], [class*="consent"]',
+        '[id*="gdpr"], [class*="gdpr"]'
+      ].join(', '));
       
-      // WebDriver detection removal (Puppeteer-safe)
-      try {
-        await newPage.evaluateOnNewDocument(() => {
-          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-          Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
-          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        });
-      } catch (e) {
-        console.log('⚠️ evaluateOnNewDocument not available:', e.message);
-      }
+      if (cmpElements.length > 0) cmpDetected = true;
       
-      // Bypass service workers (Puppeteer only)
-      try {
-        if (newPage.setBypassServiceWorker) {
-          await newPage.setBypassServiceWorker(true);
+      // Find accept button
+      for (const selector of selectors) {
+        try {
+          if (selector.includes(':contains')) {
+            const text = selector.match(/\\(["'](.+?)["']\\)/)?.[1];
+            if (text) {
+              const buttons = Array.from(document.querySelectorAll('button'));
+              foundButton = buttons.find(btn => 
+                btn.textContent && btn.textContent.toLowerCase().includes(text.toLowerCase())
+              );
+              if (foundButton) break;
+            }
+          } else {
+            foundButton = document.querySelector(selector);
+            if (foundButton) break;
+          }
+        } catch (e) {
+          console.log('Selector error:', e.message);
         }
-      } catch (e) {
-        console.log('⚠️ Service worker bypass not available:', e.message);
       }
       
-      return { context: newContext, page: newPage };
-    } catch (error) {
-      console.log('⚠️ Context creation failed, using existing page:', error.message);
-      return { context: null, page: page };
-    }
-  };
-
-  // Helper: Run single scenario
-  const runScenario = async (scenarioName, cmpAction = 'none') => {
-    console.log(\`📋 Running scenario: \${scenarioName}\`);
+      return { cmpDetected, foundButton: !!foundButton };
+    });
     
-    const { context: isolatedContext, page: scenarioPage } = await createIsolatedContext();
+    cmpDetected = cmpInfo.cmpDetected;
+    
+    if (cmpInfo.foundButton) {
+      // Try to click the accept button
+      try {
+        await page.evaluate(() => {
+          const selectors = [
+            'button[id*="accept"], button[class*="accept"]',
+            '.cookie-accept, .consent-accept, #cookie-accept'
+          ];
+          
+          for (const selector of selectors) {
+            const btn = document.querySelector(selector);
+            if (btn) {
+              btn.click();
+              return true;
+            }
+          }
+          
+          // Text-based search
+          const buttons = Array.from(document.querySelectorAll('button'));
+          const acceptTexts = ['súhlasím', 'prijať', 'accept', 'allow', 'agree'];
+          
+          for (const btn of buttons) {
+            if (btn.textContent && acceptTexts.some(text => 
+              btn.textContent.toLowerCase().includes(text)
+            )) {
+              btn.click();
+              return true;
+            }
+          }
+          
+          return false;
+        });
+        
+        console.log('CMP accept button clicked');
+      } catch (e) {
+        console.log('CMP click failed:', e.message);
+      }
+    }
+    
+  } catch (e) {
+    console.log('CMP detection failed:', e.message);
+  }
+  
+  return { cmpDetected, cmpCookieName, cmpCookieValue };
+};
+
+// Main execution
+export default async ({ page, context }) => {
+  console.log('🔍 Starting CDP WebSocket analysis for:', "${url}");
+  
+  try {
+    // 1. Setup page with stealth and locale
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+    );
+    
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
+      'DNT': '1',
+      'Sec-GPC': '1'
+    });
     
     try {
-      // Set up CDP session (Puppeteer/Playwright compatible)
-      let client;
-      try {
-        // Try Puppeteer approach first
-        if (scenarioPage.target && typeof scenarioPage.target === 'function') {
-          client = await scenarioPage.target().createCDPSession();
-        }
-        // Try Playwright approach
-        else if (scenarioPage.context && scenarioPage.context()._connection) {
-          client = scenarioPage.context()._connection;
-        }
-        // Fallback: create basic client interface
-        else {
-          throw new Error('CDP not available');
-        }
-      } catch (cdpError) {
-        console.log('⚠️ CDP not available, using page-only collection:', cdpError.message);
-        client = null;
-      }
-      
-      // Enable CDP domains with increased buffer sizes (if CDP available)
-      if (client) {
-        try {
-          await client.send('Network.enable', { 
-            maxTotalBufferSize: 20000000, 
-            maxResourceBufferSize: 10000000 
-          });
-          await client.send('Page.enable');
-          await client.send('Runtime.enable');
-          await client.send('Storage.enable');
-          await client.send('DOMStorage.enable');
-        } catch (cdpEnableError) {
-          console.log('⚠️ CDP domain enable failed:', cdpEnableError.message);
-          client = null; // Disable CDP for this scenario
-        }
-      }
-      
-      // Initialize data collection for scenario
-      const data = {
-        scenario: scenarioName,
-        finalUrl: context.url,
-        cookies_phase1: [], // after load
-        cookies_phase2: [], // after network idle
-        cookies_phase3: [], // after extra idle + action
-        requests_pre: [],
-        requests_post: [],
-        responses_pre: [],
-        responses_post: [],
-        storage_phase1: {},
-        storage_phase2: {},
-        storage_phase3: {},
-        renderedHTML_pre: '',
-        renderedHTML_post: '',
-        console_logs: [],
-        cmp_detected: false,
-        cmp_cookie_name: '',
-        cmp_cookie_value: '',
-        consent_clicked: false,
-        cmp_action: cmpAction
-      };
-
-      let requestIndex = 0;
-      let isPreConsent = true;
-      const origin = new URL(context.url).origin;
-
-      // Network request logging with enhanced query/POST parsing (if CDP available)
-      if (client) {
-        client.on('Network.requestWillBeSent', (params) => {
+      await page.emulateTimezone('Europe/Bratislava');
+    } catch (e) {
+      console.log('Timezone emulation failed:', e.message);
+    }
+    
+    try {
+      await page.setBypassServiceWorker(true);
+    } catch (e) {
+      console.log('Service worker bypass not available:', e.message);
+    }
+    
+    // 2. Setup CDP session and enable domains BEFORE navigation
+    let client;
+    try {
+      client = await page.target().createCDPSession();
+      await client.send('Page.enable');
+      await client.send('Runtime.enable');
+      await client.send('Network.enable', { 
+        maxTotalBufferSize: 10000000, 
+        maxResourceBufferSize: 5000000 
+      });
+    } catch (cdpError) {
+      console.log('⚠️ CDP setup failed:', cdpError.message);
+      client = null;
+    }
+    
+    // 3. Register network listeners BEFORE navigation
+    const requests = [];
+    let requestIndex = 0;
+    let isPreConsent = true;
+    
+    if (client) {
+      client.on('Network.requestWillBeSent', (params) => {
         const request = {
           id: params.requestId,
           url: params.request.url,
@@ -305,47 +459,42 @@ export default async ({ page, context }) => {
           headers: params.request.headers,
           timestamp: params.timestamp,
           index: requestIndex++,
-          isPreConsent,
-          scenario: scenarioName,
+          phase: isPreConsent ? 'pre' : 'post',
           query: {},
-          postDataRaw: null,
-          postDataParsed: null,
+          postData: null,
           trackingParams: {}
         };
-
-        // Parse query parameters and identify tracking params
+        
+        // Parse query parameters
         try {
           const urlObj = new URL(params.request.url);
-          const query = {};
           const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
           
           urlObj.searchParams.forEach((value, key) => {
-            query[key] = value;
+            request.query[key] = value;
             if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
               request.trackingParams[key] = value;
             }
           });
-          request.query = query;
         } catch (e) {
-          console.log('Error parsing URL:', e.message);
+          console.log('URL parsing error:', e.message);
         }
-
-        // Enhanced POST data parsing
+        
+        // Parse POST data
         if (params.request.postData) {
-          request.postDataRaw = params.request.postData;
-          
           const contentType = params.request.headers['content-type'] || '';
+          request.postData = params.request.postData;
+          
           if (contentType.includes('application/json')) {
             try {
               request.postDataParsed = JSON.parse(params.request.postData);
             } catch (e) {
-              console.log('Error parsing JSON POST data:', e.message);
+              console.log('JSON parse error:', e.message);
             }
           } else if (contentType.includes('application/x-www-form-urlencoded')) {
             try {
               const parsed = {};
-              const pairs = params.request.postData.split('&');
-              pairs.forEach(pair => {
+              params.request.postData.split('&').forEach(pair => {
                 const [key, value] = pair.split('=');
                 if (key && value !== undefined) {
                   parsed[decodeURIComponent(key)] = decodeURIComponent(value);
@@ -353,544 +502,311 @@ export default async ({ page, context }) => {
               });
               request.postDataParsed = parsed;
             } catch (e) {
-              console.log('Error parsing form POST data:', e.message);
+              console.log('Form parse error:', e.message);
             }
-          }
-        }
-
-        if (isPreConsent) {
-          data.requests_pre.push(request);
-        } else {
-          data.requests_post.push(request);
-        }
-        });
-      
-        // Response logging
-        client.on('Network.responseReceived', (params) => {
-        const response = {
-          requestId: params.requestId,
-          url: params.response.url,
-          status: params.response.status,
-          headers: params.response.headers,
-          mimeType: params.response.mimeType,
-          timestamp: params.timestamp,
-          isPreConsent,
-          scenario: scenarioName
-        };
-
-        if (isPreConsent) {
-          data.responses_pre.push(response);
-        } else {
-          data.responses_post.push(response);
-        }
-        });
-      }
-
-      // Console logging
-      scenarioPage.on('console', msg => {
-        data.console_logs.push({
-          type: msg.type(),
-          text: msg.text(),
-          timestamp: Date.now(),
-          isPreConsent,
-          scenario: scenarioName
-        });
-      });
-
-      // Enhanced cookie collection (three phases)
-      const getAllCookies = async () => {
-        const cookies = [];
-        
-        // Method 1: CDP Network.getAllCookies (if client available)
-        if (client) {
-          try {
-            const { cookies: cdpCookies } = await client.send('Network.getAllCookies');
-            cookies.push(...cdpCookies);
-          } catch (e) {
-            console.log('CDP cookies failed:', e.message);
           }
         }
         
-        // Method 2: Puppeteer page.cookies()
-        try {
-          const pageCookies = await scenarioPage.cookies();
-          cookies.push(...pageCookies);
-        } catch (e) {
-          console.log('Page cookies failed:', e.message);
-        }
-        
-        // Method 3: document.cookie via evaluation
-        try {
-          const docCookies = await scenarioPage.evaluate(() => {
-            const cookies = [];
-            if (document.cookie) {
-              document.cookie.split(';').forEach(cookie => {
-                const [name, value] = cookie.trim().split('=');
-                if (name && value) {
-                  cookies.push({
-                    name: name.trim(),
-                    value: value.trim(),
-                    domain: window.location.hostname,
-                    path: '/',
-                    secure: false,
-                    httpOnly: false,
-                    sameSite: 'Lax'
-                  });
-                }
-              });
-            }
-            return cookies;
-          });
-          cookies.push(...docCookies);
-        } catch (e) {
-          console.log('Document cookies failed:', e.message);
-        }
-
-        // Deduplicate cookies
-        const uniqueCookies = [];
-        const seen = new Set();
-        cookies.forEach(cookie => {
-          const key = \`\${cookie.name}|\${cookie.domain}|\${cookie.path || '/'}\`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            uniqueCookies.push(cookie);
-          }
-        });
-
-        return uniqueCookies;
-      };
-
-      // Enhanced storage collection
-      const getStorage = async () => {
-        const storage = { localStorage: {}, sessionStorage: {} };
-        
-        // Get localStorage via CDP (if client available)
-        if (client) {
-          try {
-            const localStorageId = await client.send('DOMStorage.getDOMStorageItems', {
-              storageId: { securityOrigin: origin, isLocalStorage: true }
-            });
-            if (localStorageId.entries) {
-              localStorageId.entries.forEach(([key, value]) => {
-                storage.localStorage[key] = value;
-              });
-            }
-          } catch (e) {
-            console.log('CDP localStorage failed:', e.message);
-          }
-
-          try {
-            // Get sessionStorage via CDP  
-            const sessionStorageId = await client.send('DOMStorage.getDOMStorageItems', {
-              storageId: { securityOrigin: origin, isLocalStorage: false }
-            });
-            if (sessionStorageId.entries) {
-              sessionStorageId.entries.forEach(([key, value]) => {
-                storage.sessionStorage[key] = value;
-              });
-            }
-          } catch (e) {
-            console.log('CDP sessionStorage failed:', e.message);
-          }
-        }
-
-        // Fallback: evaluate storage directly
-        try {
-          const evalStorage = await scenarioPage.evaluate(() => {
-            const ls = {};
-            const ss = {};
-            
-            for (let i = 0; i < localStorage.length; i++) {
-              const key = localStorage.key(i);
-              if (key) ls[key] = localStorage.getItem(key);
-            }
-            
-            for (let i = 0; i < sessionStorage.length; i++) {
-              const key = sessionStorage.key(i);
-              if (key) ss[key] = sessionStorage.getItem(key);
-            }
-            
-            return { localStorage: ls, sessionStorage: ss };
-          });
-          
-          Object.assign(storage.localStorage, evalStorage.localStorage);
-          Object.assign(storage.sessionStorage, evalStorage.sessionStorage);
-        } catch (e) {
-          console.log('Evaluate storage failed:', e.message);
-        }
-
-        return storage;
-      };
-
-      console.log(\`🌐 [\${scenarioName}] Navigating to page...\`);
-      
-      // Navigate to the page (with compatibility for both Puppeteer/Playwright)
-      try {
-        await scenarioPage.goto(context.url, { 
-          waitUntil: 'networkidle2', 
-          timeout: 90000 
-        });
-      } catch (gotoError) {
-        // Fallback for Playwright compatibility
-        try {
-          await scenarioPage.goto(context.url, { 
-            waitUntil: 'networkidle', 
-            timeout: 90000 
-          });
-        } catch (fallbackError) {
-          // Basic goto if networkidle is not supported
-          await scenarioPage.goto(context.url, { timeout: 90000 });
-          await sleep(5000); // Basic wait using custom sleep function
-        }
-      }
-
-      console.log(\`📄 [\${scenarioName}] Page loaded\`);
-      
-      // PHASE 1: After load
-      data.cookies_phase1 = await getAllCookies();
-      data.storage_phase1 = await getStorage();
-      data.renderedHTML_pre = await scenarioPage.content();
-
-      console.log(\`📊 [\${scenarioName}] Phase 1: \${data.cookies_phase1.length} cookies\`);
-      
-      // Wait for network idle
-      await sleep(3000);
-      
-      // PHASE 2: After network idle
-      data.cookies_phase2 = await getAllCookies();
-      data.storage_phase2 = await getStorage();
-
-      console.log(\`📊 [\${scenarioName}] Phase 2: \${data.cookies_phase2.length} cookies\`);
-      
-      // CMP Detection with enhanced cookie detection
-      const cmpCookies = data.cookies_phase2.filter(cookie => 
-        /CookieScriptConsent|OptanonConsent|euconsent-v2|CookieConsent|tarteaucitron|cookieyes-consent|CookieYes-consent|cookielaw|gdpr/i.test(cookie.name)
-      );
-      
-      if (cmpCookies.length > 0) {
-        data.cmp_detected = true;
-        data.cmp_cookie_name = cmpCookies[0].name;
-        data.cmp_cookie_value = cmpCookies[0].value.substring(0, 100);
-        console.log(\`🍪 [\${scenarioName}] CMP cookie detected: \${data.cmp_cookie_name}\`);
-      }
-
-      // CMP Action based on scenario
-      if (cmpAction === 'accept') {
-        console.log(\`🍪 [\${scenarioName}] Looking for ACCEPT buttons...\`);
-        
-        const acceptSelectors = [
-          // XPath-style text matching 
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "accept")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "prijať")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "súhlas")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "allow")]',
-          // Traditional selectors
-          '[data-testid*="accept"]', '[id*="accept"]', '[class*="accept"]',
-          '.cc-allow', '.cookie-accept', '#onetrust-accept-btn-handler',
-          '.optanon-allow-all', '.cookiescript_accept'
-        ];
-
-        for (const selector of acceptSelectors) {
-          try {
-            let element;
-            if (selector.startsWith('//')) {
-              // XPath selector
-              const elements = await scenarioPage.\$x(selector);
-              element = elements[0];
-            } else {
-              element = await scenarioPage.\$(selector);
-            }
-            
-            if (element) {
-              await element.click();
-              console.log(\`✅ [\${scenarioName}] Clicked ACCEPT: \${selector}\`);
-              data.consent_clicked = true;
-              isPreConsent = false;
-              break;
-            }
-          } catch (e) {
-            // Continue trying other selectors
-          }
-        }
-      } else if (cmpAction === 'reject') {
-        console.log(\`🍪 [\${scenarioName}] Looking for REJECT buttons...\`);
-        
-        const rejectSelectors = [
-          // XPath-style text matching
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reject")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "decline")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "odmietnuť")]',
-          '//button[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "zamietnuť")]',
-          // Traditional selectors
-          '[data-testid*="reject"]', '[id*="reject"]', '[class*="reject"]',
-          '.cc-deny', '.cookie-reject', '#onetrust-reject-all-handler',
-          '.optanon-reject-all', '.cookiescript_reject'
-        ];
-
-        for (const selector of rejectSelectors) {
-          try {
-            let element;
-            if (selector.startsWith('//')) {
-              const elements = await scenarioPage.\$x(selector);
-              element = elements[0];
-            } else {
-              element = await scenarioPage.\$(selector);
-            }
-            
-            if (element) {
-              await element.click();
-              console.log(\`✅ [\${scenarioName}] Clicked REJECT: \${selector}\`);
-              data.consent_clicked = true;
-              isPreConsent = false;
-              break;
-            }
-          } catch (e) {
-            // Continue trying other selectors
-          }
-        }
-      }
-
-      // Extra idle wait (especially important after consent action)
-      await sleep(cmpAction !== 'none' ? 8000 : 5000);
-      
-      // PHASE 3: After extra idle + action
-      data.cookies_phase3 = await getAllCookies();
-      data.storage_phase3 = await getStorage();
-      data.renderedHTML_post = await scenarioPage.content();
-
-      console.log(\`📊 [\${scenarioName}] Phase 3: \${data.cookies_phase3.length} cookies\`);
-
-      // Use phase 3 as final cookies/storage
-      data.cookies_pre = data.cookies_phase2; // pre-consent = phase 2
-      data.cookies_post = data.cookies_phase3; // post-consent = phase 3
-      data.storage_pre = data.storage_phase2;
-      data.storage_post = data.storage_phase3;
-      
-      data.finalUrl = scenarioPage.url();
-
-      console.log(\`✅ [\${scenarioName}] Complete - Pre: \${data.requests_pre.length} req, \${data.cookies_pre.length} cookies; Post: \${data.requests_post.length} req, \${data.cookies_post.length} cookies\`);
-
-      return data;
-      
-    } finally {
-      // Clean up isolated context if it exists
-      try {
-        if (isolatedContext && isolatedContext.close) {
-          await isolatedContext.close();
-        }
-      } catch (cleanupError) {
-        console.log('⚠️ Context cleanup failed:', cleanupError.message);
-      }
-    }
-  };
-
-  // Run all three scenarios
-  try {
-    scenarios.baseline = await runScenario('baseline', 'none');
-    scenarios.accept = await runScenario('accept', 'accept');
-    scenarios.reject = await runScenario('reject', 'reject');
-  } catch (error) {
-    console.error('Error running scenarios:', error);
-    throw error;
-  }
-
-  console.log('🎯 All scenarios completed');
-  
-  // Return multi-scenario data with backward compatibility
-  return {
-    // Backward compatibility - use baseline data as default
-    ...scenarios.baseline,
-    
-    // Multi-scenario results
-    scenarios: scenarios,
-    
-    // Summary comparison
-    comparison: {
-      baseline_cookies: scenarios.baseline?.cookies_post?.length || 0,
-      accept_cookies: scenarios.accept?.cookies_post?.length || 0,
-      reject_cookies: scenarios.reject?.cookies_post?.length || 0,
-      baseline_requests: (scenarios.baseline?.requests_pre?.length || 0) + (scenarios.baseline?.requests_post?.length || 0),
-      accept_requests: (scenarios.accept?.requests_pre?.length || 0) + (scenarios.accept?.requests_post?.length || 0),
-      reject_requests: (scenarios.reject?.requests_pre?.length || 0) + (scenarios.reject?.requests_post?.length || 0)
-    }
-  };
-};`;
-
-    console.log('🌐 Calling Browserless API...');
-    await logToDatabase('info', '🌐 Calling Browserless API', { url });
-
-    // Call Browserless API with production endpoint and timeout as header
-    const browserlessResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-browserless-timeout': '180000', // 3 minutes timeout for multi-scenario
-      },
-      body: JSON.stringify({
-        code: browserlessFunction,
-        context: { url }
-      }),
-    });
-
-    const responseHeaders = Object.fromEntries(browserlessResponse.headers.entries());
-    
-    if (!browserlessResponse.ok) {
-      const errorText = await browserlessResponse.text();
-      console.error('❌ Browserless API error:', errorText);
-      
-      await logToDatabase('error', '❌ Browserless API failed', {
-        status_code: browserlessResponse.status,
-        response_headers: responseHeaders,
-        error_response: errorText.substring(0, 1000) // Truncate long responses
+        requests.push(request);
       });
       
-      throw new Error(`Browserless API failed: ${browserlessResponse.status} - ${errorText}`);
+      client.on('Network.responseReceived', (params) => {
+        // Find corresponding request and update
+        const req = requests.find(r => r.id === params.requestId);
+        if (req) {
+          req.status = params.response.status;
+          req.mimeType = params.response.mimeType;
+          req.resourceType = params.type;
+        }
+      });
     }
-
-    const renderData = await browserlessResponse.json();
-    const endTime = Date.now();
-    const duration = endTime - startTime;
     
-    console.log('✅ Browserless data received');
-    console.log(`Final URL: ${renderData.finalUrl}`);
-    console.log(`Cookies: pre=${renderData.cookies_pre?.length || 0}, post=${renderData.cookies_post?.length || 0}`);
-    console.log(`Requests: pre=${renderData.requests_pre?.length || 0}, post=${renderData.requests_post?.length || 0}`);
-    console.log(`Storage items: pre=${Object.keys(renderData.storage_pre?.localStorage || {}).length + Object.keys(renderData.storage_pre?.sessionStorage || {}).length}, post=${Object.keys(renderData.storage_post?.localStorage || {}).length + Object.keys(renderData.storage_post?.sessionStorage || {}).length}`);
+    // Fallback page-level network capture
+    page.on('request', (request) => {
+      requests.push({
+        url: request.url(),
+        method: request.method(),
+        phase: isPreConsent ? 'pre' : 'post',
+        resourceType: request.resourceType(),
+        timestamp: Date.now(),
+        fallback: true
+      });
+    });
     
-    // Enhanced logging for scenarios
-    if (renderData.scenarios) {
-      console.log('📊 Scenario comparison:');
-      console.log(`Baseline: ${renderData.scenarios.baseline?.cookies_post?.length || 0} cookies`);
-      console.log(`Accept: ${renderData.scenarios.accept?.cookies_post?.length || 0} cookies`);
-      console.log(`Reject: ${renderData.scenarios.reject?.cookies_post?.length || 0} cookies`);
-    }
-
-    // Log successful completion to database
-    await supabase.from('audit_runs').insert({
-      trace_id: traceId,
-      input_url: url,
-      normalized_url: renderData.finalUrl,
-      status: 'completed',
-      data_source: 'live',
-      duration_ms: duration,
-      bl_status_code: browserlessResponse.status,
-      bl_health_status: healthStatus,
-      requests_total: (renderData.requests_pre?.length || 0) + (renderData.requests_post?.length || 0),
-      requests_pre_consent: renderData.requests_pre?.length || 0,
-      third_parties_count: new Set([...(renderData.requests_pre || []), ...(renderData.requests_post || [])].map(r => new URL(r.url).hostname)).size,
-      beacons_count: [...(renderData.requests_pre || []), ...(renderData.requests_post || [])].filter(r => 
-        r.url.includes('analytics') || r.url.includes('track') || r.url.includes('beacon')).length,
-      cookies_pre_count: renderData.cookies_pre?.length || 0,
-      cookies_post_count: renderData.cookies_post?.length || 0,
-      meta: {
-        health_check: healthDetails,
-        response_headers: responseHeaders,
-        consent_clicked: renderData.consent_clicked,
-        cmp_detected: renderData.cmp_detected,
-        scenarios: renderData.scenarios ? {
-          baseline_cookies: renderData.scenarios.baseline?.cookies_post?.length || 0,
-          accept_cookies: renderData.scenarios.accept?.cookies_post?.length || 0,
-          reject_cookies: renderData.scenarios.reject?.cookies_post?.length || 0
-        } : null
-      }
-    });
-
-    await logToDatabase('info', '✅ Analysis completed successfully', {
-      duration_ms: duration,
-      final_url: renderData.finalUrl,
-      cookies_pre: renderData.cookies_pre?.length || 0,
-      cookies_post: renderData.cookies_post?.length || 0,
-      requests_total: (renderData.requests_pre?.length || 0) + (renderData.requests_post?.length || 0),
-      scenarios: renderData.scenarios ? Object.keys(renderData.scenarios) : ['single']
-    });
-
-    return new Response(JSON.stringify({
-      success: true,
-      data: renderData,
-      trace_id: traceId,
-      timestamp: new Date().toISOString(),
-      bl_status_code: browserlessResponse.status,
-      bl_health_status: healthStatus
-    }), {
-      headers: { 
-        'Content-Type': 'application/json',
-        ...corsHeaders 
-      },
-    });
-
-  } catch (error) {
-    const endTime = Date.now();
-    const duration = endTime - startTime;
-    const timestamp = new Date().toISOString();
+    // 4. Navigate and wait
+    console.log('📄 Navigating to URL...');
+    await page.goto("${url}", { waitUntil: 'load' });
     
-    console.error(`❌ Error in render-and-inspect [${traceId}]:`, error.message);
-    console.error(`❌ Stack trace [${traceId}]:`, error.stack);
-    
-    // Log error to database
-    await logToDatabase('error', '❌ Function failed', {
-      error: error.message,
-      stack: error.stack,
-      duration_ms: duration
-    });
-
-    // Log failed run to database (with safe error handling)
     try {
-      await supabase.from('audit_runs').insert({
-        trace_id: traceId,
-        input_url: url,
-        status: 'failed',
-        error_message: error.message,
-        duration_ms: duration,
-        bl_status_code: healthDetails?.status_code || null,
-        bl_health_status: healthStatus,
-        meta: {
-          error_details: error.stack,
-          health_check: healthDetails
-        }
-      });
-    } catch (dbError) {
-      console.error('Failed to log error to database:', dbError.message);
+      await page.waitForLoadState('networkidle');
+    } catch (e) {
+      console.log('Network idle wait failed:', e.message);
     }
     
-    const requestUrl = url || 'unknown';
+    await sleep(6000); // Extra idle time
     
-    // Return a basic fallback response instead of failing completely
-    const fallbackData = {
-      finalUrl: requestUrl,
+    const origin = new URL(page.url()).origin;
+    results.finalUrl = page.url();
+    
+    // 5. Collect pre-consent data (3 phases)
+    console.log('📊 Phase 1: After load');
+    const cookiesPhase1 = await collectCookies(page, client);
+    const storagePhase1 = await collectStorage(page, client, origin);
+    
+    await sleep(2000);
+    
+    console.log('📊 Phase 2: After network idle');
+    const cookiesPhase2 = await collectCookies(page, client);
+    const storagePhase2 = await collectStorage(page, client, origin);
+    
+    await sleep(2000);
+    
+    console.log('📊 Phase 3: After extra idle');
+    const cookiesPhase3 = await collectCookies(page, client);
+    const storagePhase3 = await collectStorage(page, client, origin);
+    
+    // Merge pre-consent cookies and storage
+    const allPreCookies = dedupeCookies([...cookiesPhase1, ...cookiesPhase2, ...cookiesPhase3]);
+    const allPreStorage = { 
+      localStorage: { ...storagePhase1.localStorage, ...storagePhase2.localStorage, ...storagePhase3.localStorage },
+      sessionStorage: { ...storagePhase1.sessionStorage, ...storagePhase2.sessionStorage, ...storagePhase3.sessionStorage }
+    };
+    
+    results.cookies_pre = allPreCookies;
+    results.storage_pre = allPreStorage;
+    results.requests_pre = requests.filter(r => r.phase === 'pre');
+    
+    // 6. CMP Detection and handling
+    console.log('🍪 Detecting CMP...');
+    const cmpInfo = await handleCMP(page);
+    results.cmp_detected = cmpInfo.cmpDetected;
+    results.cmp_cookie_name = cmpInfo.cmpCookieName;
+    results.cmp_cookie_value = cmpInfo.cmpCookieValue;
+    
+    if (results.cmp_detected) {
+      console.log('✅ CMP detected, collecting post-consent data...');
+      
+      // Switch to post-consent phase
+      isPreConsent = false;
+      
+      // Wait for consent processing
+      await sleep(4000);
+      await page.waitForLoadState('networkidle').catch(() => {});
+      
+      // Collect post-consent data
+      const cookiesPostAccept = await collectCookies(page, client);
+      const storagePostAccept = await collectStorage(page, client, origin);
+      
+      results.cookies_post_accept = cookiesPostAccept;
+      results.storage_post_accept = storagePostAccept;
+      results.requests_post_accept = requests.filter(r => r.phase === 'post');
+      results.consent_clicked = true;
+      results.scenarios.accept = true;
+      
+      console.log('📊 Post-consent collection complete');
+    } else {
+      console.log('ℹ️ No CMP detected, skipping post-consent scenarios');
+    }
+    
+    // 7. Generate summary stats
+    console.log('📊 Scenario comparison:');
+    console.log(\`Cookies: pre=\${results.cookies_pre.length}, post=\${results.cookies_post_accept.length}\`);
+    console.log(\`Requests: pre=\${results.requests_pre.length}, post=\${results.requests_post_accept.length}\`);
+    console.log(\`Storage items: pre=\${Object.keys(results.storage_pre.localStorage || {}).length + Object.keys(results.storage_pre.sessionStorage || {}).length}\`);
+    console.log(\`Final URL: \${results.finalUrl}\`);
+    
+    console.log('✅ CDP analysis complete');
+    return results;
+    
+  } catch (error) {
+    console.error('❌ CDP analysis failed:', error);
+    
+    // Return minimal results on failure
+    return {
+      finalUrl: "${url}",
       cookies_pre: [],
-      cookies_post: [],
+      cookies_post_accept: [],
+      cookies_post_reject: [],
       requests_pre: [],
-      requests_post: [],
-      responses_pre: [],
-      responses_post: [],
-      storage_pre: { localStorage: {}, sessionStorage: {} },
-      storage_post: { localStorage: {}, sessionStorage: {} },
-      renderedHTML_pre: `<html><body><h1>Fallback mode</h1><p>Real analysis failed: ${error.message}</p></body></html>`,
-      renderedHTML_post: `<html><body><h1>Fallback mode</h1><p>Real analysis failed: ${error.message}</p></body></html>`,
-      console_logs: [],
+      requests_post_accept: [],
+      requests_post_reject: [],
+      storage_pre: {},
+      storage_post_accept: {},
+      storage_post_reject: {},
       cmp_detected: false,
       cmp_cookie_name: '',
       cmp_cookie_value: '',
       consent_clicked: false,
-      _error: error.message,
-      _trace_id: traceId,
-      _timestamp: timestamp
+      scenarios: { baseline: true, accept: false, reject: false },
+      _error: error.message
     };
+  }
+};
+`;
+
+    // Execute the CDP script via Browserless /function
+    console.log('🌐 Calling Browserless API...');
+    
+    const browserlessResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-browserless-timeout': '180000'
+      },
+      body: JSON.stringify({
+        code: cdpScript,
+        context: {
+          url: url
+        }
+      })
+    });
+
+    let browserlessData = null;
+    
+    if (!browserlessResponse.ok) {
+      const errorText = await browserlessResponse.text();
+      console.log(`❌ Browserless API error: ${browserlessResponse.status} - ${errorText}`);
+      
+      await logToDatabase('error', '❌ Browserless API error', {
+        status: browserlessResponse.status,
+        error: errorText
+      });
+      
+      return new Response(JSON.stringify({
+        success: false,
+        trace_id: traceId,
+        error_code: 'BROWSERLESS_API_ERROR',
+        error_message: `Browserless API failed: ${browserlessResponse.status}`,
+        data: {
+          _error: errorText,
+          debug: {
+            bl_status_code: browserlessResponse.status,
+            bl_health_status: healthStatus
+          }
+        }
+      }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        status: 200
+      });
+    }
+
+    try {
+      browserlessData = await browserlessResponse.json();
+      console.log('✅ Browserless data received');
+      
+      // Log key metrics
+      console.log('📊 Scenario comparison:');
+      console.log(`Cookies: pre=${browserlessData.cookies_pre?.length || 0}, post=${browserlessData.cookies_post_accept?.length || 0}`);
+      console.log(`Requests: pre=${browserlessData.requests_pre?.length || 0}, post=${browserlessData.requests_post_accept?.length || 0}`);
+      console.log(`Storage items: pre=${Object.keys(browserlessData.storage_pre?.localStorage || {}).length + Object.keys(browserlessData.storage_pre?.sessionStorage || {}).length}`);
+      console.log(`Final URL: ${browserlessData.finalUrl}`);
+      
+    } catch (parseError) {
+      console.log(`❌ Failed to parse Browserless response: ${parseError.message}`);
+      
+      return new Response(JSON.stringify({
+        success: false,
+        trace_id: traceId,
+        error_code: 'BROWSERLESS_PARSE_ERROR',
+        error_message: 'Failed to parse Browserless response',
+        data: {
+          _error: parseError.message,
+          debug: {
+            bl_status_code: browserlessResponse.status,
+            bl_health_status: healthStatus
+          }
+        }
+      }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        status: 200
+      });
+    }
+
+    // Log successful completion to database
+    await logToDatabase('info', '✅ Analysis completed successfully', {
+      final_url: browserlessData.finalUrl,
+      cookies_pre_count: browserlessData.cookies_pre?.length || 0,
+      cookies_post_count: browserlessData.cookies_post_accept?.length || 0,
+      requests_pre_count: browserlessData.requests_pre?.length || 0,
+      requests_post_count: browserlessData.requests_post_accept?.length || 0,
+      cmp_detected: browserlessData.cmp_detected,
+      consent_clicked: browserlessData.consent_clicked
+    });
+
+    // Insert audit run record
+    try {
+      await supabase.from('audit_runs').insert({
+        trace_id: traceId,
+        url: url,
+        final_url: browserlessData.finalUrl,
+        status: 'completed',
+        bl_status_code: browserlessResponse.status,
+        bl_health_status: healthStatus,
+        cookies_pre_count: browserlessData.cookies_pre?.length || 0,
+        cookies_post_count: browserlessData.cookies_post_accept?.length || 0,
+        requests_pre_count: browserlessData.requests_pre?.length || 0,
+        requests_post_count: browserlessData.requests_post_accept?.length || 0,
+        cmp_detected: browserlessData.cmp_detected,
+        consent_clicked: browserlessData.consent_clicked,
+        duration_ms: Date.now() - startedAt
+      });
+    } catch (dbError) {
+      console.error('Failed to insert audit run:', dbError.message);
+    }
 
     return new Response(JSON.stringify({
-      success: false,
-      data: fallbackData,
-      error: error.message,
+      success: true,
       trace_id: traceId,
-      timestamp: timestamp,
-      bl_status_code: healthDetails?.status_code || null,
-      bl_health_status: healthStatus
+      bl_status_code: browserlessResponse.status,
+      bl_health_status: healthStatus,
+      timestamp: new Date().toISOString(),
+      data: browserlessData
     }), {
-      headers: { 
-        'Content-Type': 'application/json',
-        ...corsHeaders 
-      },
-      status: 200 // Return 200 so frontend can handle gracefully
+      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+    });
+
+  } catch (error) {
+    console.error(`❌ Function error [${traceId}]:`, error);
+    
+    await logToDatabase('error', '❌ Function error', {
+      error: error.message,
+      stack: error.stack
+    });
+
+    // Insert failed audit run record
+    try {
+      await supabase.from('audit_runs').insert({
+        trace_id: traceId,
+        url: url,
+        final_url: url,
+        status: 'failed',
+        error_code: 'FUNCTION_ERROR',
+        error_message: error.message,
+        duration_ms: Date.now() - startedAt
+      });
+    } catch (dbError) {
+      console.error('Failed to insert failed audit run:', dbError.message);
+    }
+
+    // Never return 500, always return 200 with success:false
+    return new Response(JSON.stringify({
+      success: false,
+      trace_id: traceId,
+      error_code: 'FUNCTION_ERROR',
+      error_message: error.message,
+      data: {
+        _error: error.message,
+        debug: {
+          req_pre: 0,
+          req_post_accept: 0,
+          req_post_reject: 0,
+          cookies_pre_count: 0,
+          cookies_post_count: 0
+        }
+      }
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      status: 200
     });
   }
 });
