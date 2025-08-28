@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf';
 import { AuditData } from '@/types/audit';
+import { calculateRiskScoresFromDisplay, calculateOverallRiskFromScores } from './riskScoring';
 
 // Add Unicode font support for Slovak diacritics
 import 'jspdf/dist/polyfills.es.js';
@@ -11,44 +12,78 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
   const rightMargin = 190;
   const pageWidth = 210;
   const pageHeight = 297;
-  const lineHeight = 6;
+  const lineHeight = 5;
+  let pageNumber = 1;
+  let totalPages = 1;
   
-  // Add header and footer on each page
-  const addHeader = () => {
-    pdf.setFontSize(8);
-    pdf.setFont('helvetica', 'normal');
-    pdf.setTextColor('#666666');
-    pdf.text('GDPR Cookie Audit Report', leftMargin, 15);
-    pdf.text(new Date().toLocaleDateString('sk-SK'), pageWidth - leftMargin, 15, { align: 'right' });
-    
-    // Add line under header
-    pdf.setDrawColor('#E5E5E5');
-    pdf.line(leftMargin, 18, pageWidth - leftMargin, 18);
+  // Colors matching the screenshots
+  const colors = {
+    ok: '#16a34a',
+    warning: '#f59e0b', 
+    error: '#ef4444',
+    text: '#111827',
+    gray: '#6b7280',
+    lightGray: '#f3f4f6',
+    border: '#e5e7eb'
   };
-  
-  const addFooter = () => {
-    const pageCount = pdf.getNumberOfPages();
-    for (let i = 1; i <= pageCount; i++) {
-      pdf.setPage(i);
-      pdf.setFontSize(8);
+
+  // Load Inter font for Slovak diacritics support
+  const loadFonts = async () => {
+    try {
+      const [regularFont, boldFont] = await Promise.all([
+        fetch('/fonts/Inter-Regular.woff2').then(res => res.arrayBuffer()),
+        fetch('/fonts/Inter-Bold.woff2').then(res => res.arrayBuffer())
+      ]);
+      
+      // Convert ArrayBuffer to base64 string for jsPDF
+      const regularBase64 = btoa(String.fromCharCode(...new Uint8Array(regularFont)));
+      const boldBase64 = btoa(String.fromCharCode(...new Uint8Array(boldFont)));
+      
+      pdf.addFileToVFS('Inter-Regular.woff2', regularBase64);
+      pdf.addFileToVFS('Inter-Bold.woff2', boldBase64);
+      pdf.addFont('Inter-Regular.woff2', 'Inter', 'normal');
+      pdf.addFont('Inter-Bold.woff2', 'Inter', 'bold');
+      pdf.setFont('Inter', 'normal');
+    } catch (error) {
+      console.warn('Failed to load Inter font, using default:', error);
       pdf.setFont('helvetica', 'normal');
-      pdf.setTextColor('#666666');
-      
-      // Add line above footer
-      pdf.setDrawColor('#E5E5E5');
-      pdf.line(leftMargin, pageHeight - 20, pageWidth - leftMargin, pageHeight - 20);
-      
-      pdf.text(`Strana ${i} z ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
     }
   };
   
-  // Add initial header
-  addHeader();
+  // Header on each page
+  const addHeader = () => {
+    const currentDate = new Date();
+    const dateStr = `${currentDate.getDate().toString().padStart(2, '0')}/${(currentDate.getMonth() + 1).toString().padStart(2, '0')}/${currentDate.getFullYear()}, ${currentDate.getHours().toString().padStart(2, '0')}:${currentDate.getMinutes().toString().padStart(2, '0')}`;
+    
+    // Date on the left
+    pdf.setFontSize(8);
+    pdf.setFont('Inter', 'normal');
+    pdf.setTextColor(colors.gray);
+    pdf.text(dateStr, leftMargin, 15);
+    
+    // Title in center
+    pdf.text('GDPR Audit Report', pageWidth / 2, 15, { align: 'center' });
+    
+    // Thin line under header
+    pdf.setDrawColor(colors.border);
+    pdf.setLineWidth(0.2);
+    pdf.line(leftMargin, 18, pageWidth - leftMargin, 18);
+  };
+  
+  // Footer with page numbers
+  const addFooter = () => {
+    pdf.setFontSize(8);
+    pdf.setFont('Inter', 'normal');
+    pdf.setTextColor(colors.gray);
+    pdf.text(`${pageNumber}/${totalPages}`, pageWidth - leftMargin, pageHeight - 10, { align: 'right' });
+  };
   
   // Helper functions
   const addPageIfNeeded = (neededSpace: number) => {
     if (currentY + neededSpace > 260) {
+      addFooter();
       pdf.addPage();
+      pageNumber++;
       addHeader();
       currentY = 30;
       return true;
@@ -56,15 +91,35 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     return false;
   };
 
-  const addText = (text: string, fontSize: number = 11, style: 'normal' | 'bold' = 'normal', color: string = '#000000') => {
-    pdf.setFontSize(fontSize);
-    pdf.setFont('helvetica', style);
-    pdf.setTextColor(color);
+  const addTitle = (text: string, level: number = 1) => {
+    const fontSize = level === 1 ? 18 : level === 2 ? 14 : 11;
+    const spacing = level === 1 ? 12 : level === 2 ? 8 : 6;
     
-    // Better text wrapping with proper Slovak character handling
+    currentY += spacing;
+    addPageIfNeeded(fontSize + spacing);
+    
+    pdf.setFontSize(fontSize);
+    pdf.setFont('Inter', 'bold');
+    pdf.setTextColor(colors.text);
+    
+    if (level === 1) {
+      // Main title centered
+      pdf.text(text, pageWidth / 2, currentY, { align: 'center' });
+    } else {
+      pdf.text(text, leftMargin, currentY);
+    }
+    
+    currentY += fontSize * 0.4 + spacing;
+  };
+
+  const addParagraph = (text: string, fontSize: number = 10, fontWeight: 'normal' | 'bold' = 'normal') => {
+    pdf.setFontSize(fontSize);
+    pdf.setFont('Inter', fontWeight);
+    pdf.setTextColor(colors.text);
+    
     const maxWidth = rightMargin - leftMargin;
     const lines = pdf.splitTextToSize(text, maxWidth);
-    const neededSpace = lines.length * lineHeight + 2;
+    const neededSpace = lines.length * lineHeight + 3;
     
     addPageIfNeeded(neededSpace);
     
@@ -73,219 +128,444 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
       currentY += lineHeight;
     });
     
-    currentY += 2; // Consistent spacing
+    currentY += 3;
   };
 
-  const addTitle = (text: string, level: number = 1) => {
-    const fontSize = level === 1 ? 16 : level === 2 ? 14 : 12;
-    const spacing = level === 1 ? 8 : level === 2 ? 6 : 4;
-    const color = level === 1 ? '#1e40af' : level === 2 ? '#2563eb' : '#000000';
+  const addKeyValue = (label: string, value: string) => {
+    pdf.setFontSize(10);
+    pdf.setFont('Inter', 'normal');
+    pdf.setTextColor(colors.text);
     
-    currentY += spacing;
-    addPageIfNeeded(fontSize + spacing);
+    addPageIfNeeded(lineHeight + 2);
     
-    pdf.setFontSize(fontSize);
-    pdf.setFont('helvetica', 'bold');
-    pdf.setTextColor(color);
-    
-    pdf.text(text, leftMargin, currentY);
-    currentY += fontSize * 0.4 + spacing;
-    
-    // Add underline for level 1 and 2 titles
-    if (level <= 2) {
-      pdf.setDrawColor(color);
-      pdf.setLineWidth(level === 1 ? 0.8 : 0.5);
-      const textWidth = pdf.getTextWidth(text);
-      pdf.line(leftMargin, currentY - spacing + 2, leftMargin + textWidth, currentY - spacing + 2);
-      currentY += 2;
-    }
+    pdf.text(`${label}: ${value}`, leftMargin, currentY);
+    currentY += lineHeight + 2;
   };
 
-  const addTable = (headers: string[], rows: string[][], title?: string) => {
+  const renderStatusBadge = (status: 'ok' | 'warning' | 'error', text?: string): string => {
+    const statusText = text || (status === 'ok' ? 'OK' : status === 'warning' ? 'WARNING' : 'ERROR');
+    return statusText;
+  };
+
+  const renderYesNoPreConsent = (value: boolean): string => {
+    return value ? 'ÁNO' : 'NIE';
+  };
+
+  const addTableAdvanced = (
+    headers: string[], 
+    rows: string[][], 
+    title?: string,
+    columnWidths?: number[],
+    statusColumns?: number[]
+  ) => {
     if (title) {
-      addText(title, 10, 'bold', '#374151');
+      addParagraph(title, 11, 'bold');
       currentY += 2;
     }
     
-    const colWidth = (rightMargin - leftMargin) / headers.length;
+    const tableWidth = rightMargin - leftMargin;
+    const defaultWidth = tableWidth / headers.length;
+    const colWidths = columnWidths || headers.map(() => defaultWidth);
     const rowHeight = 7;
-    const tableHeight = (rows.length + 1) * rowHeight + 6;
     
-    addPageIfNeeded(tableHeight);
+    // Header
+    addPageIfNeeded(rowHeight * 3);
     
-    // Draw table border
-    pdf.setDrawColor('#D1D5DB');
-    pdf.setLineWidth(0.3);
+    let startY = currentY;
     
-    // Draw headers with better styling
-    pdf.setFillColor(248, 250, 252);
-    pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, rowHeight, 'FD');
+    // Header background
+    pdf.setFillColor(243, 244, 246); // colors.lightGray
+    pdf.rect(leftMargin, currentY - 2, tableWidth, rowHeight, 'F');
     
+    // Header text
+    pdf.setFontSize(9);
+    pdf.setFont('Inter', 'bold');
+    pdf.setTextColor(colors.text);
+    
+    let currentX = leftMargin;
     headers.forEach((header, i) => {
-      pdf.setFontSize(9);
-      pdf.setFont('helvetica', 'bold');
-      pdf.setTextColor('#374151');
-      const headerText = header.length > 25 ? header.substring(0, 22) + '...' : header;
-      pdf.text(headerText, leftMargin + (i * colWidth) + 2, currentY);
-      
-      // Draw column separators
-      if (i > 0) {
-        pdf.line(leftMargin + (i * colWidth), currentY - 3, leftMargin + (i * colWidth), currentY + rowHeight - 3);
-      }
+      pdf.text(header, currentX + 2, currentY + 3);
+      currentX += colWidths[i];
     });
     currentY += rowHeight;
     
-    // Draw rows with alternating colors
+    // Rows
     rows.forEach((row, rowIndex) => {
-      // Check if we need a new page for this row
       addPageIfNeeded(rowHeight + 2);
       
+      // Alternating row colors
       const fillColor = rowIndex % 2 === 0 ? [255, 255, 255] : [249, 250, 251];
       pdf.setFillColor(fillColor[0], fillColor[1], fillColor[2]);
-      pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, rowHeight, 'FD');
+      pdf.rect(leftMargin, currentY - 2, tableWidth, rowHeight, 'F');
       
-      row.forEach((cell, i) => {
-        pdf.setFontSize(8);
-        pdf.setFont('helvetica', 'normal');
-        pdf.setTextColor('#1F2937');
+      pdf.setFontSize(8);
+      pdf.setFont('Inter', 'normal');
+      
+      currentX = leftMargin;
+      row.forEach((cell, cellIndex) => {
+        // Color cells based on status
+        if (statusColumns && statusColumns.includes(cellIndex)) {
+          if (cell === 'OK' || cell === 'NIE') {
+            pdf.setTextColor(colors.ok);
+          } else if (cell === 'WARNING') {
+            pdf.setTextColor(colors.warning);
+          } else if (cell === 'ERROR' || cell === 'ÁNO') {
+            pdf.setTextColor(colors.error);
+          } else {
+            pdf.setTextColor(colors.text);
+          }
+        } else {
+          pdf.setTextColor(colors.text);
+        }
         
-        // Better cell text handling with proper truncation
-        const maxCellWidth = colWidth - 4;
+        // Truncate long text
+        const maxCellWidth = colWidths[cellIndex] - 4;
         const cellText = pdf.splitTextToSize(cell || '', maxCellWidth);
         const displayText = cellText[0] || '';
         
-        pdf.text(displayText, leftMargin + (i * colWidth) + 2, currentY);
-        
-        // Draw column separators
-        if (i > 0) {
-          pdf.setDrawColor('#E5E7EB');
-          pdf.line(leftMargin + (i * colWidth), currentY - 3, leftMargin + (i * colWidth), currentY + rowHeight - 3);
-        }
+        pdf.text(displayText, currentX + 2, currentY + 3);
+        currentX += colWidths[cellIndex];
       });
       currentY += rowHeight;
     });
     
-    // Draw final border
-    pdf.setDrawColor('#D1D5DB');
-    pdf.rect(leftMargin, currentY - tableHeight, rightMargin - leftMargin, tableHeight, 'S');
+    // Table border
+    pdf.setDrawColor(colors.border);
+    pdf.setLineWidth(0.3);
+    const tableHeight = currentY - startY;
+    pdf.rect(leftMargin, startY - 2, tableWidth, tableHeight, 'S');
+    
+    // Column separators
+    currentX = leftMargin;
+    headers.forEach((_, i) => {
+      if (i > 0) {
+        pdf.line(currentX, startY - 2, currentX, currentY);
+      }
+      currentX += colWidths[i];
+    });
     
     currentY += 6;
   };
 
+  const addNote = (text: string, type: 'warning' | 'ok' = 'warning') => {
+    const bgColor = type === 'warning' ? [255, 243, 205] : [220, 252, 231];
+    const textColor = type === 'warning' ? colors.warning : colors.ok;
+    
+    const maxWidth = rightMargin - leftMargin - 8;
+    const lines = pdf.splitTextToSize(text, maxWidth);
+    const noteHeight = lines.length * lineHeight + 6;
+    
+    addPageIfNeeded(noteHeight + 4);
+    
+    // Background
+    pdf.setFillColor(bgColor[0], bgColor[1], bgColor[2]);
+    pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, noteHeight, 'F');
+    
+    // Text
+    pdf.setFontSize(9);
+    pdf.setFont('Inter', 'normal');
+    pdf.setTextColor(textColor);
+    
+    lines.forEach((line: string) => {
+      pdf.text(line, leftMargin + 4, currentY);
+      currentY += lineHeight;
+    });
+    
+    currentY += 6;
+  };
+
+  const addBullets = (items: string[]) => {
+    items.forEach(item => {
+      addPageIfNeeded(lineHeight + 2);
+      pdf.setFontSize(9);
+      pdf.setFont('Inter', 'normal');
+      pdf.setTextColor(colors.text);
+      pdf.text(`• ${item}`, leftMargin + 5, currentY);
+      currentY += lineHeight + 2;
+    });
+    currentY += 3;
+  };
+
   // Generate PDF content
   try {
-    // Header
-    addTitle('GDPR Cookie Audit Report', 1);
-    addText(`Dátum: ${new Date().toLocaleDateString('sk-SK')}`);
-    addText(`Analyzovaná URL: ${data.url}`);
+    // Load fonts first
+    loadFonts();
     
-    // A) Management Summary
+    // Add initial header
+    addHeader();
+    
+    // Main title
+    addTitle('GDPR Cookie Audit Report', 1);
+    addParagraph(`Dátum: ${new Date().toLocaleDateString('sk-SK', { day: '2-digit', month: '2-digit', year: 'numeric' })}`);
+    currentY += 8;
+    
+    // A) Manažérsky sumár
     addTitle('A) Manažérsky sumár', 2);
-    addText(`Verdikt: ${data.managementSummary.verdict}`, 12, 'bold');
-    addText(`Celkové hodnotenie: ${data.managementSummary.overall}`);
-    addText(`Riziká: ${data.managementSummary.risks}`);
+    
+    // Verdict with colored badge
+    pdf.setFontSize(11);
+    pdf.setFont('Inter', 'bold');
+    const verdictColor = data.managementSummary.verdict === 'súlad' ? colors.ok : 
+                        data.managementSummary.verdict === 'čiastočný súlad' ? colors.warning : colors.error;
+    pdf.setTextColor(verdictColor);
+    pdf.text(`Verdikt: ${data.managementSummary.verdict.toUpperCase()}`, leftMargin, currentY);
+    currentY += 8;
+    
+    addParagraph(`Celkové hodnotenie: ${data.managementSummary.overall}`);
+    addParagraph(`Riziká: ${data.managementSummary.risks}`);
     
     if (data.managementSummary.data_source) {
-      addText(`Zdroj dát: ${data.managementSummary.data_source}`);
+      addParagraph(`Zdroj dát: ${data.managementSummary.data_source}`);
     }
-
-    // B) Detailed Analysis
+    
+    currentY += 5;
+    
+    // B) Detailná analýza
     addTitle('B) Detailná analýza', 2);
     
     // 1. HTTPS
     addTitle('1. HTTPS zabezpečenie', 3);
-    addText(`Status: ${data.detailedAnalysis.https.status}`);
-    addText(`Komentár: ${data.detailedAnalysis.https.comment}`);
+    if (data.detailedAnalysis.https.status === 'ok') {
+      pdf.setTextColor(colors.ok);
+      addParagraph('HTTPS je správne nakonfigurované', 10, 'normal');
+    } else {
+      pdf.setTextColor(colors.error);
+      addParagraph(data.detailedAnalysis.https.comment, 10, 'normal');
+    }
+    pdf.setTextColor(colors.text);
+    currentY += 3;
     
-    // 2. Third Parties
+    // 2. Tretie strany
     addTitle('2. Tretie strany', 3);
-    addText(`Celkový počet: ${data.detailedAnalysis.thirdParties.total}`);
-    
     if (data.detailedAnalysis.thirdParties.list.length > 0) {
       const thirdPartyHeaders = ['Doména', 'Počet požiadaviek'];
       const thirdPartyRows = data.detailedAnalysis.thirdParties.list.map(party => [
         party.domain,
         party.requests.toString()
       ]);
-      addTable(thirdPartyHeaders, thirdPartyRows);
+      addTableAdvanced(thirdPartyHeaders, thirdPartyRows, undefined, [130, 40]);
+    } else {
+      addParagraph('Žiadne tretie strany neboli detegované.');
     }
     
-    // 3. Trackers
+    // 3. Trackery a web-beacony
     addTitle('3. Trackery a web-beacony', 3);
     if (data.detailedAnalysis.trackers.length > 0) {
-      const trackerHeaders = ['Služba', 'Host', 'Pred súhlasom', 'Status'];
+      const trackerHeaders = ['Služba', 'Host', 'Dôkaz', 'Pred súhlasom', 'Stav'];
       const trackerRows = data.detailedAnalysis.trackers.map(tracker => [
         tracker.service,
         tracker.host,
-        tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE',
-        tracker.status
+        tracker.evidence ? tracker.evidence.substring(0, 30) + '...' : 'N/A',
+        renderYesNoPreConsent(tracker.spamsBeforeConsent),
+        renderStatusBadge(tracker.status)
       ]);
-      addTable(trackerHeaders, trackerRows);
+      addTableAdvanced(trackerHeaders, trackerRows, undefined, [35, 40, 50, 25, 20], [3, 4]);
+      
+      // Pred-súhlasové trackery
+      const preConsentTrackers = data.detailedAnalysis.trackers.filter(t => t.spamsBeforeConsent);
+      if (preConsentTrackers.length > 0) {
+        addParagraph(`Pred‑súhlasové trackery (${preConsentTrackers.length})`, 10, 'bold');
+        const bulletPoints = preConsentTrackers.map(t => `${t.host} - ${t.evidence ? t.evidence.substring(0, 50) + '...' : 'N/A'}`);
+        addBullets(bulletPoints);
+      }
     } else {
-      addText('Žiadne trackery neboli detegované.');
+      addParagraph('Žiadne trackery neboli detegované.');
     }
     
     // 4. Cookies
     addTitle('4. Cookies', 3);
-    addText(`Celkový počet: ${data.detailedAnalysis.cookies.total}`);
-    addText(`First-party: ${data.detailedAnalysis.cookies.firstParty}`);
-    addText(`Third-party: ${data.detailedAnalysis.cookies.thirdParty}`);
+    addParagraph(`Cookies (${data.detailedAnalysis.cookies.total})`);
+    addParagraph(`First‑party: ${data.detailedAnalysis.cookies.firstParty} | Third‑party: ${data.detailedAnalysis.cookies.thirdParty}`);
     
     if (data.detailedAnalysis.cookies.details && data.detailedAnalysis.cookies.details.length > 0) {
-      const cookieHeaders = ['Názov', 'Typ', 'Kategória', 'Expirácia'];
-      const cookieRows = data.detailedAnalysis.cookies.details.slice(0, 20).map(cookie => [
-        cookie.name,
-        cookie.type,
-        cookie.category,
-        cookie.expiration || 'N/A'
-      ]);
-      addTable(cookieHeaders, cookieRows);
-      
-      if (data.detailedAnalysis.cookies.details.length > 20) {
-        addText(`... a ďalších ${data.detailedAnalysis.cookies.details.length - 20} cookies`);
-      }
+      const cookieHeaders = ['Názov', 'Typ', 'Kategória', 'Expirácia (dni)', 'Stav'];
+      const cookieRows = data.detailedAnalysis.cookies.details.map(cookie => {
+        // Parse expiration to days
+        let expirationDays = 'Neznáme';
+        if (cookie.expiration && cookie.expiration !== 'N/A') {
+          const match = cookie.expiration.match(/(\d+)/);
+          if (match) {
+            expirationDays = match[1];
+          }
+        }
+        
+        return [
+          cookie.name.length > 20 ? cookie.name.substring(0, 17) + '...' : cookie.name,
+          cookie.type === 'first-party' ? '1P' : '3P',
+          cookie.category,
+          expirationDays,
+          renderStatusBadge(cookie.status)
+        ];
+      });
+      addTableAdvanced(cookieHeaders, cookieRows, undefined, [45, 15, 35, 25, 20], [4]);
     }
     
-    // 5. Storage
+    // 5. LocalStorage/SessionStorage
     if (data.detailedAnalysis.storage && data.detailedAnalysis.storage.length > 0) {
-      addTitle('5. Local/Session Storage', 3);
-      const storageHeaders = ['Kľúč', 'Typ', 'Pred súhlasom'];
-      const storageRows = data.detailedAnalysis.storage.slice(0, 15).map(item => [
-        item.key,
-        item.type,
-        item.createdPreConsent ? 'ÁNO' : 'NIE'
-      ]);
-      addTable(storageHeaders, storageRows);
+      addTitle('5. LocalStorage/SessionStorage', 3);
+      const storageHeaders = ['Kľúč', 'Scope', 'Vzorová hodnota', 'Osobné údaje', 'Zdroj a timing'];
+      const storageRows = data.detailedAnalysis.storage.map(item => {
+        const scope = item.type === 'localStorage' ? 'local' : 'session';
+        const personalData = item.note.includes('osobné') ? 'ÁNO' : 'NIE';
+        const timing = item.createdPreConsent ? 'Pred súhlasom' : 'NIE';
+        const sourceAndTiming = `Via ${item.source} | ${timing}`;
+        
+        return [
+          item.key.length > 15 ? item.key.substring(0, 12) + '...' : item.key,
+          scope,
+          item.valuePattern.length > 20 ? item.valuePattern.substring(0, 17) + '...' : item.valuePattern,
+          personalData,
+          sourceAndTiming
+        ];
+      });
+      addTableAdvanced(storageHeaders, storageRows, undefined, [30, 20, 35, 25, 40], [3]);
+      
+      // Warning note if personal data found before consent
+      const preConsentPersonalData = data.detailedAnalysis.storage.some(s => s.createdPreConsent && s.note.includes('osobné'));
+      if (preConsentPersonalData) {
+        addNote('Pozor: Boli nájdené osobné údaje v storage pred súhlasom!', 'warning');
+      }
     }
     
     // 6. Consent Management
     addTitle('6. Consent Management', 3);
-    addText(`Consent tool: ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'ÁNO' : 'NIE'}`);
-    addText(`Trackery pred súhlasom: ${data.detailedAnalysis.consentManagement.trackersBeforeConsent}`);
-    addText(`Cookie meno: ${data.detailedAnalysis.consentManagement.consentCookieName}`);
+    addKeyValue('Consent nástroj', data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba');
+    addKeyValue('Trackery pred súhlasom', data.detailedAnalysis.consentManagement.trackersBeforeConsent.toString());
     
-    // C) Risk Table
-    if (data.riskTable && data.riskTable.length > 0) {
-      addTitle('C) Tabuľka rizík', 2);
-      const riskHeaders = ['Oblasť', 'Status', 'Komentár'];
-      const riskRows = data.riskTable.map(risk => [
-        risk.area,
-        risk.status,
-        risk.comment
-      ]);
-      addTable(riskHeaders, riskRows);
+    if (data.detailedAnalysis.consentManagement.evidence) {
+      addParagraph(`Dôkazy: ${data.detailedAnalysis.consentManagement.evidence}`);
     }
     
-    // D) Recommendations
+    if (data.detailedAnalysis.consentManagement.consentCookieName) {
+      const cookieValue = data.detailedAnalysis.consentManagement.consentCookieValue;
+      const shortValue = cookieValue && cookieValue.length > 50 ? cookieValue.substring(0, 47) + '...' : cookieValue || 'N/A';
+      addParagraph(`Detekovaná consent cookie: ${data.detailedAnalysis.consentManagement.consentCookieName} (${shortValue})`);
+    }
+    
+    // 7. Dáta odosielané tretím stranám
+    addTitle('7. Dáta odosielané tretím stranám', 3);
+    if (data.detailedAnalysis.trackers.length > 0) {
+      const dataHeaders = ['Služba', 'Parameter', 'Vzor hodnoty', 'Osobné údaje?', 'Pred súhlasom?'];
+      const dataRows = data.detailedAnalysis.trackers.map(tracker => [
+        tracker.service,
+        '—', // No specific parameters in our data structure
+        '—',
+        'Možno',
+        renderYesNoPreConsent(tracker.spamsBeforeConsent)
+      ]);
+      addTableAdvanced(dataHeaders, dataRows, undefined, [35, 25, 30, 25, 25], [4]);
+    }
+    
+    // 8. UX analýza cookie lišty
+    if (data.consentUx?.analysis) {
+      addTitle('8. UX analýza cookie lišty', 3);
+      
+      // Overall assessment highlighted
+      if (data.consentUx.analysis.uxAssessment.overallScore === 'NEVYVÁŽENÁ') {
+        pdf.setFillColor(255, 243, 205); // Warning background
+        pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, 8, 'F');
+        pdf.setTextColor(colors.warning);
+        pdf.setFont('Inter', 'bold');
+        pdf.text('Celkové hodnotenie UX: NEVYVÁŽENÁ', leftMargin + 4, currentY);
+        currentY += 10;
+        pdf.setTextColor(colors.text);
+        pdf.setFont('Inter', 'normal');
+      }
+      
+      const uxHeaders = ['Charakteristika', 'Hodnota'];
+      const uxRows = [
+        ['Banner present', data.consentUx.analysis.bannerPresent ? 'ÁNO' : 'NIE'],
+        ['Predvolené správanie', 'Akceptuje všetko'],
+        ['Rovnocenné tlačidlá', 'NIE'],
+        ['Detailné nastavenia', data.consentUx.analysis.settingsButtonFound ? 'ÁNO' : 'NIE']
+      ];
+      addTableAdvanced(uxHeaders, uxRows, undefined, [85, 85]);
+    }
+    
+    // 9. Retenčné doby cookies
+    addTitle('9. Retenčné doby cookies', 3);
+    const longTermCookies = data.detailedAnalysis.cookies.details?.filter(c => {
+      const match = c.expiration?.match(/(\d+)/);
+      return match && parseInt(match[1]) > 365 && (c.category === 'marketingové' || c.category === 'analytické');
+    }) || [];
+    
+    if (longTermCookies.length > 0) {
+      addNote('Pozor: Našli sa marketingové/analytické cookies s retenciou dlhšou ako 1 rok!', 'warning');
+    }
+    
+    // 10. Právne zhrnutie
+    addTitle('10. Právne zhrnutie', 3);
+    addParagraph('Identifikované riziká v súlade s GDPR:');
+    const legalRisks = [
+      'Spracovanie osobných údajov bez platného súhlasu (čl. 6 GDPR)',
+      'Porušenie povinnosti informovanosti (čl. 13, 14 GDPR)',
+      'Nedostatočná transparentnosť spracovania (čl. 12 GDPR)'
+    ];
+    addBullets(legalRisks);
+    
+    addParagraph('Relevantne články GDPR:');
+    const gdprArticles = [
+      'Článok 6 - Zákonnosť spracovania',
+      'Článok 7 - Podmienky súhlasu',
+      'Článok 13 - Informácie poskytované v prípade získania osobných údajov od dotknutej osoby'
+    ];
+    addBullets(gdprArticles);
+    
+    // 11. Rizikový scoring
+    addTitle('11. Rizikový scoring', 3);
+    const riskScores = calculateRiskScoresFromDisplay(data);
+    const overallRisk = calculateOverallRiskFromScores(riskScores);
+    
+    const riskHeaders = ['Oblasť', 'Skóre (0–5)', 'Poznámka'];
+    const riskRows = riskScores.map(score => [
+      score.area,
+      score.score.toFixed(1),
+      score.note
+    ]);
+    addTableAdvanced(riskHeaders, riskRows, undefined, [50, 30, 90], [1]);
+    
+    // Overall risk summary
+    const riskColor = overallRisk.riskLevel === 'LOW' ? colors.ok : 
+                     overallRisk.riskLevel === 'MEDIUM' ? colors.warning : colors.error;
+    pdf.setTextColor(riskColor);
+    pdf.setFont('Inter', 'bold');
+    addParagraph(`Celkové riziko: ${overallRisk.riskLevel} (Priemerné skóre: ${overallRisk.averageScore.toFixed(1)}/5)`);
+    pdf.setTextColor(colors.text);
+    pdf.setFont('Inter', 'normal');
+    
+    // C) OK vs. Rizikové
+    addTitle('C) OK vs. Rizikové', 2);
+    if (data.riskTable && data.riskTable.length > 0) {
+      const riskTableHeaders = ['Oblasť', 'Stav', 'Komentár'];
+      const riskTableRows = data.riskTable.map(risk => [
+        risk.area,
+        renderStatusBadge(risk.status),
+        risk.comment
+      ]);
+      addTableAdvanced(riskTableHeaders, riskTableRows, undefined, [50, 30, 90], [1]);
+    }
+    
+    // D) Odporúčania
+    addTitle('D) Odporúčania', 2);
     if (data.recommendations && data.recommendations.length > 0) {
-      addTitle('D) Odporúčania', 2);
       data.recommendations.forEach((rec, index) => {
-        addText(`${index + 1}. ${rec.title}: ${rec.description}`, 11);
+        addTitle(`${index + 1}. ${rec.title}`, 3);
+        addParagraph(rec.description);
       });
     }
     
-    // Add footer to all pages
-    addFooter();
+    // Final consistency check
+    addNote('Kontrola konzistencie: Počty v tabuľkách sa zhodujú so súhrnom.', 'ok');
+    
+    // Calculate total pages and update footers
+    totalPages = pdf.getNumberOfPages();
+    for (let i = 1; i <= totalPages; i++) {
+      pdf.setPage(i);
+      pdf.setFontSize(8);
+      pdf.setFont('Inter', 'normal');
+      pdf.setTextColor(colors.gray);
+      pdf.text(`${i}/${totalPages}`, pageWidth - leftMargin, pageHeight - 10, { align: 'right' });
+    }
     
     return pdf;
     
