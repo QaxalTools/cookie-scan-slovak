@@ -7,8 +7,6 @@ import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
-import { autoCaptureConsent } from '@/utils/consentService';
-import { analyzeConsentScreenshot } from '@/utils/consentOcr';
 
 const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
@@ -99,56 +97,6 @@ const Index = () => {
         data.managementSummary.data_source = "Live analýza (server fetch)";
       }
       
-      // Automatic banner capture for live mode
-      if (isLiveMode) {
-        // Move to banner capture step
-        const bannerCaptureStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'banner_capture');
-        setCurrentStep(bannerCaptureStepIndex);
-        
-        try {
-          const captureResult = await autoCaptureConsent(input);
-          
-          if (captureResult.success && captureResult.screenshot) {
-            // Perform OCR analysis
-            const ocrResult = await analyzeConsentScreenshot(captureResult.screenshot);
-            
-            // Add consent UX data to audit results
-            data.consentUx = {
-              screenshot: captureResult.screenshot,
-              used: 'edge',
-              confidence: ocrResult.confidence,
-              text: ocrResult.text,
-              analysis: {
-                bannerPresent: ocrResult.analysis?.hasConsentBanner || false,
-                acceptButtonFound: (ocrResult.analysis?.buttons.accept?.length || 0) > 0,
-                rejectButtonFound: (ocrResult.analysis?.buttons.reject?.length || 0) > 0,
-                settingsButtonFound: (ocrResult.analysis?.buttons.settings?.length || 0) > 0,
-                uxAssessment: {
-                  balance: ocrResult.analysis?.evaluation.hasBalancedButtons ? 'Vyvážené' : 'Nevyvážené',
-                  clarity: ocrResult.analysis?.evaluation.hasDetailedSettings ? 'Jasné' : 'Nejasné',
-                  overallScore: ocrResult.analysis?.evaluation.uxAssessment === 'transparent' ? 'Transparentné' : 
-                               ocrResult.analysis?.evaluation.uxAssessment === 'unbalanced' ? 'Nevyvážené' : 'Chýba'
-                }
-              }
-            };
-            
-            toast({
-              title: "Banner zachytený automaticky",
-              description: "Cookie banner bol automaticky zachytený a analyzovaný.",
-            });
-          } else {
-            console.log('Automatic banner capture failed:', captureResult.error);
-            toast({
-              title: "Banner sa nepodarilo zachytiť",
-              description: "Automatické zachytenie banneru zlyhalo. Môžete to skúsiť manuálne.",
-              variant: "default",
-            });
-          }
-        } catch (error) {
-          console.error('Banner capture error:', error);
-          // Don't show error toast for automatic capture failure
-        }
-      }
       
       // Skip to verdict step
       const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');

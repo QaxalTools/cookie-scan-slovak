@@ -108,7 +108,7 @@ export async function simulateAudit(
   }
 ): Promise<AuditData> {
   const startTime = Date.now();
-  const totalSteps = 9;
+  const totalSteps = 8;
   
   // Helper function to update progress and add artificial delay
   const updateProgress = async (stepIndex: number) => {
@@ -126,7 +126,7 @@ export async function simulateAudit(
   const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress, renderData);
   
   // Final step: Generate results
-  await updateProgress(8);
+  await updateProgress(7);
   
   // Convert internal JSON to display format
   const auditData = convertToDisplayFormat(internalJson, input);
