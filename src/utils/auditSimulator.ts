@@ -1,5 +1,4 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
-import { getDomainProfile } from './domainProfiles';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -142,24 +141,6 @@ async function generateInternalAuditJson(
     finalUrl = normalizeUrl(input);
     const domain = getDomain(finalUrl);
     
-    // Check if we have a domain profile for realistic data
-    const domainProfile = getDomainProfile(domain);
-    if (domainProfile) {
-      // Use domain-specific profile for accurate simulation
-      await updateProgress?.(1);
-      await updateProgress?.(2);
-      await updateProgress?.(3);
-      await updateProgress?.(4);
-      await updateProgress?.(5);
-      await updateProgress?.(6);
-      
-      return {
-        final_url: finalUrl,
-        https: { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true },
-        ...domainProfile
-      } as InternalAuditJson;
-    }
-    
     // Fallback to basic simulation
     htmlContent = generateSimulatedHtml(domain);
   } else {
@@ -184,7 +165,8 @@ async function generateInternalAuditJson(
   const beacons = extractBeacons(htmlContent);
   
   await updateProgress?.(4); // Cookies
-  const cookies = generateCookiesFromServices(thirdParties, beacons, !isHtml);
+  const baseDomain = getDomain(finalUrl);
+  const cookies = generateCookiesFromServices(thirdParties, beacons, baseDomain, !isHtml);
   
   await updateProgress?.(5); // Storage
   const storage = extractStorage(htmlContent);
@@ -333,12 +315,12 @@ function extractBeacons(html: string): Array<{ host: string; sample_url: string;
   return beacons;
 }
 
-function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, baseDomain: string, isSimulation: boolean = false): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
   const cookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
   
   // Helper function to map cookies to their domain source
   const getDomainForCookie = (cookieName: string, party: '1P' | '3P'): string => {
-    if (party === '1P') return 'futbaltour.sk';
+    if (party === '1P') return baseDomain;
     
     // Map 3P cookies to their domains
     const thirdPartyMappings: Record<string, string> = {
