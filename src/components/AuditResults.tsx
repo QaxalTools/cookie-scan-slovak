@@ -395,14 +395,14 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                           <td className="p-2 font-mono text-xs">{cookie.name}</td>
                           <td className="p-2 font-mono text-xs">{cookie.domain}</td>
                           <td className="p-2">
-                            <Badge className={`text-white text-xs ${cookie.type === 'first-party' ? 'bg-green-600' : 'bg-orange-500'}`}>
+                            <Badge className={`text-xs ${cookie.type === 'first-party' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-orange-100 text-orange-800 border border-orange-200'}`}>
                               {cookie.type === 'first-party' ? '1P' : '3P'}
                             </Badge>
                           </td>
                           <td className="p-2">{cookie.category}</td>
                           <td className="p-2 text-xs">{cookie.expiration}</td>
                           <td className="p-2">
-                            <Badge className={`text-white text-xs ${getStatusBgColor(cookie.status)}`}>
+                            <Badge className={`text-xs ${cookie.status === 'ok' ? 'bg-green-100 text-green-800 border border-green-200' : cookie.status === 'warning' ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-red-100 text-red-800 border border-red-200'}`}>
                               {cookie.status.toUpperCase()}
                             </Badge>
                           </td>
