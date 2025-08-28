@@ -88,8 +88,7 @@ Deno.serve(async (req: Request) => {
     
     try {
       const healthResponse = await fetch(`https://production-sfo.browserless.io/json/version?token=${browserlessApiKey}`, {
-        method: 'GET',
-        timeout: 10000
+        method: 'GET'
       });
       
       healthStatus = healthResponse.ok ? 'healthy' : 'unhealthy';
@@ -621,16 +620,16 @@ export default async ({ page, context }) => {
     console.log('🌐 Calling Browserless API...');
     await logToDatabase('info', '🌐 Calling Browserless API', { url });
 
-    // Call Browserless API with production endpoint and token in query string
+    // Call Browserless API with production endpoint and timeout as header
     const browserlessResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'x-browserless-timeout': '180000', // 3 minutes timeout for multi-scenario
       },
       body: JSON.stringify({
         code: browserlessFunction,
-        context: { url },
-        timeout: 180000, // 3 minutes timeout for multi-scenario
+        context: { url }
       }),
     });
 
