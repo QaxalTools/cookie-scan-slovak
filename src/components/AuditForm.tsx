@@ -111,9 +111,8 @@ export const AuditForm = ({ onSubmit, isLoading }: AuditFormProps) => {
           
           <Button
             type="submit"
-            variant="gradient"
             size="lg"
-            className="w-full"
+            className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-3 text-lg"
             disabled={isLoading || (!url && !htmlCode) || !email}
           >
             {isLoading ? "Analyzujem..." : "Spustiť audit"}

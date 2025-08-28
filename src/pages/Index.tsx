@@ -61,12 +61,12 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="container mx-auto py-8 px-4">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold mb-4 bg-gradient-primary bg-clip-text text-transparent">
+      <div className="container mx-auto py-12 px-4">
+        <div className="text-center mb-12">
+          <h1 className="text-5xl font-bold mb-6 text-primary">
             GDPR Cookie Audit Tool
           </h1>
-          <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
+          <p className="text-xl text-foreground/80 max-w-3xl mx-auto leading-relaxed">
             Profesionálny nástroj na audit súladu s GDPR a ePrivacy direktívou. 
             Analyzuje cookies, trackery a consent management na vašej webovej stránke.
           </p>
@@ -74,7 +74,7 @@ const Index = () => {
 
         <div className="max-w-4xl mx-auto">
           {!auditData && !showEmailDraft && (
-            <div className="max-w-md mx-auto">
+            <div className="max-w-lg mx-auto">
               <AuditForm onSubmit={handleAuditSubmit} isLoading={isLoading} />
             </div>
           )}
