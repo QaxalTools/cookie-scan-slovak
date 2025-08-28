@@ -21,6 +21,7 @@ interface RenderResponse {
   requests_pre?: any[];
   requests_post?: any[];
   finalUrl?: string;
+  mode?: 'live' | 'html' | 'simulation';
   error?: string;
 }
 
@@ -81,6 +82,12 @@ serve(async (req) => {
         const requests_pre = [];
         const requests_post = [];
 
+        // Set viewport from context
+        await page.setViewport({
+          width: context?.viewport?.width || 1920,
+          height: context?.viewport?.height || 1080,
+        });
+
         // Set browser locale and user agent for Slovak websites
         await page.setExtraHTTPHeaders({ 
           'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8,cs;q=0.7' 
@@ -100,9 +107,9 @@ serve(async (req) => {
           request.continue();
         });
 
-        // Navigate to the page with increased timeout
-        console.log('Navigating to:', '${url}');
-        await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 45000 });
+        // Navigate to the page with increased timeout using context URL
+        console.log('Navigating to:', context.url);
+        await page.goto(context.url, { waitUntil: 'networkidle2', timeout: 45000 });
         
         // Wait for initial load with extended time
         await page.waitForTimeout(5000);
@@ -234,13 +241,10 @@ serve(async (req) => {
       },
       body: JSON.stringify({
         code: browserlessScript,
-        context: {},
-        viewport: {
-          width: viewport.width,
-          height: viewport.height,
-        },
-        options: {
-          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        context: {
+          url: url,
+          delay: delay,
+          viewport: viewport
         }
       }),
     });
@@ -256,6 +260,7 @@ serve(async (req) => {
 
     const response: RenderResponse = {
       success: true,
+      mode: 'live',
       renderedHTML_pre: result.renderedHTML_pre,
       renderedHTML_post: result.renderedHTML_post,
       cookies_pre: result.cookies_pre || [],
