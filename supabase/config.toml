@@ -1,1 +1,4 @@
 project_id = "mwmgbosttdqsfrjfkfny"
+
+[functions.render-and-inspect]
+verify_jwt = false

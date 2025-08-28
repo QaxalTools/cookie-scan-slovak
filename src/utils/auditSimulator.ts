@@ -117,12 +117,14 @@ export async function performLiveAudit(
     }
 
     // For URL input, use Edge Function for real analysis
-    console.log('🌐 Calling live analysis for URL:', input);
+    // Normalize URL to ensure https://
+    const normalizedUrl = input.startsWith('http') ? input : `https://${input}`;
+    console.log('🌐 Calling live analysis for URL:', normalizedUrl);
     await updateProgress(0);
     await updateProgress(1);
 
     const { data, error } = await supabase.functions.invoke('render-and-inspect', {
-      body: { url: input }
+      body: { url: normalizedUrl }
     });
 
     await updateProgress(3);

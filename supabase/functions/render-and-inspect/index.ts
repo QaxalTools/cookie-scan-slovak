@@ -1,4 +1,4 @@
-export default async (req: Request) => {
+Deno.serve(async (req: Request) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -453,4 +453,4 @@ export default async ({ page, context }) => {
       status: 200 // Return 200 so frontend can handle gracefully
     });
   }
-};
+});
