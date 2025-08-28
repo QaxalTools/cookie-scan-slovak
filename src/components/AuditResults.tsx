@@ -43,12 +43,16 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   return (
     <div className="space-y-6">
-      {/* Manažérsky sumár */}
+      {/* A) Manažérsky sumár */}
       <Card className="shadow-medium">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Shield className="h-5 w-5" />
-            Manažérsky sumár
+            A) Manažérsky sumár
+            <Badge variant={data.managementSummary.verdict === 'súlad' ? 'secondary' : 
+                          data.managementSummary.verdict === 'čiastočný súlad' ? 'outline' : 'destructive'}>
+              {data.managementSummary.verdict.toUpperCase()}
+            </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -56,103 +60,169 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             <div className="p-4 rounded-lg bg-gradient-accent">
               <h3 className="font-semibold mb-2">Celkové hodnotenie</h3>
               <p className="text-muted-foreground">
-                {data.summary.overall}
+                {data.managementSummary.overall}
               </p>
             </div>
             <div className="p-4 rounded-lg border border-border">
-              <h3 className="font-semibold mb-2">Identifikované riziká</h3>
+              <h3 className="font-semibold mb-2">{data.managementSummary.verdict === 'súlad' ? 'Pozitívne zistenia' : 'Identifikované riziká'}</h3>
               <p className="text-muted-foreground">
-                {data.summary.risks}
+                {data.managementSummary.risks}
               </p>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Detailná analýza */}
-      <div className="grid gap-4 md:grid-cols-2">
-        {/* HTTPS */}
-        <Card className="shadow-soft">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              {getStatusIcon(data.https.status)}
-              HTTPS Zabezpečenie
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between">
-              <span>{data.https.description}</span>
-              {getStatusBadge(data.https.status)}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Cookies */}
-        <Card className="shadow-soft">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Cookie className="h-5 w-5" />
-              Cookies ({data.cookies.total})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="flex justify-between">
-              <span>Technické:</span>
-              <Badge variant="secondary">{data.cookies.technical}</Badge>
-            </div>
-            <div className="flex justify-between">
-              <span>Analytické:</span>
-              <Badge variant="secondary">{data.cookies.analytical}</Badge>
-            </div>
-            <div className="flex justify-between">
-              <span>Marketingové:</span>
-              <Badge variant="secondary">{data.cookies.marketing}</Badge>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Trackery */}
-        <Card className="shadow-soft">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Eye className="h-5 w-5" />
-              Trackery & Pixely
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {data.trackers.map((tracker, index) => (
-                <div key={index} className="flex items-center justify-between">
-                  <span className="text-sm">{tracker.name}</span>
-                  {getStatusBadge(tracker.status)}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Tretie strany */}
-        <Card className="shadow-soft">
-          <CardHeader>
-            <CardTitle className="text-lg">Tretie strany</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {data.thirdParties.map((party, index) => (
-                <div key={index} className="flex items-center justify-between">
-                  <span className="text-sm">{party.domain}</span>
-                  <Badge variant="outline">{party.requests}</Badge>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Tabuľka rizík */}
+      {/* B) Detailná analýza */}
       <Card className="shadow-medium">
         <CardHeader>
-          <CardTitle>Prehľad rizík a odporúčaní</CardTitle>
+          <CardTitle>B) Detailná analýza</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* 1. HTTPS */}
+          <div>
+            <h3 className="font-semibold mb-2 flex items-center gap-2">
+              {getStatusIcon(data.detailedAnalysis.https.status)}
+              1. HTTPS zabezpečenie
+            </h3>
+            <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+              <span>{data.detailedAnalysis.https.comment}</span>
+              {getStatusBadge(data.detailedAnalysis.https.status)}
+            </div>
+          </div>
+
+          {/* 2. Tretie strany */}
+          <div>
+            <h3 className="font-semibold mb-2">2. Tretie strany ({data.detailedAnalysis.thirdParties.total})</h3>
+            <div className="space-y-2">
+              {data.detailedAnalysis.thirdParties.list.map((party, index) => (
+                <div key={index} className="flex items-center justify-between p-2 bg-muted/30 rounded">
+                  <span className="text-sm">{party.domain}</span>
+                  <Badge variant="outline">{party.requests} požiadaviek</Badge>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 3. Trackery/Beacony */}
+          <div>
+            <h3 className="font-semibold mb-2">3. Trackery a web-beacony</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Služba</th>
+                    <th className="text-left p-2">Host</th>
+                    <th className="text-left p-2">Dôkaz (URL/parametre)</th>
+                    <th className="text-left p-2">Stav</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.detailedAnalysis.trackers.map((tracker, index) => (
+                    <tr key={index} className="border-b">
+                      <td className="p-2">{tracker.service}</td>
+                      <td className="p-2 text-xs text-muted-foreground">{tracker.host}</td>
+                      <td className="p-2 text-xs font-mono bg-muted/50 rounded px-1">{tracker.evidence}</td>
+                      <td className="p-2">{getStatusBadge(tracker.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* 4. Cookies */}
+          <div>
+            <h3 className="font-semibold mb-2">4. Cookies ({data.detailedAnalysis.cookies.total})</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Názov</th>
+                    <th className="text-left p-2">1P/3P</th>
+                    <th className="text-left p-2">Typ</th>
+                    <th className="text-left p-2">Expirácia</th>
+                    <th className="text-left p-2">Stav</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.detailedAnalysis.cookies.details.map((cookie, index) => (
+                    <tr key={index} className="border-b">
+                      <td className="p-2 font-mono text-xs">{cookie.name}</td>
+                      <td className="p-2">{cookie.type === 'first-party' ? '1P' : '3P'}</td>
+                      <td className="p-2">{cookie.category}</td>
+                      <td className="p-2">{cookie.expiration}</td>
+                      <td className="p-2">{getStatusBadge(cookie.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* 5. LocalStorage/SessionStorage */}
+          {data.detailedAnalysis.storage.length > 0 && (
+            <div>
+              <h3 className="font-semibold mb-2">5. LocalStorage/SessionStorage</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left p-2">Kľúč</th>
+                      <th className="text-left p-2">Vzor hodnôt</th>
+                      <th className="text-left p-2">Poznámka</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.detailedAnalysis.storage.map((storage, index) => (
+                      <tr key={index} className="border-b">
+                        <td className="p-2 font-mono text-xs">{storage.key}</td>
+                        <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
+                        <td className="p-2">{storage.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* 6. CMP a časovanie */}
+          <div>
+            <h3 className="font-semibold mb-2">6. Consent Management a časovanie</h3>
+            <div className="p-4 bg-muted/50 rounded-lg space-y-2">
+              <div className="flex items-center justify-between">
+                <span>Consent nástroj:</span>
+                <Badge variant={data.detailedAnalysis.consentManagement.hasConsentTool ? 'secondary' : 'destructive'}>
+                  {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Trackery pred súhlasom:</span>
+                <Badge variant={data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'destructive' : 'secondary'}>
+                  {data.detailedAnalysis.consentManagement.trackersBeforeConsent}
+                </Badge>
+              </div>
+              <div className="text-xs text-muted-foreground mt-2">
+                <strong>Dôkazy:</strong> {data.detailedAnalysis.consentManagement.evidence}
+              </div>
+            </div>
+          </div>
+
+          {/* 7. Právne zhrnutie */}
+          <div>
+            <h3 className="font-semibold mb-2">7. Právne zhrnutie</h3>
+            <div className="p-4 bg-gradient-accent rounded-lg">
+              <p className="text-sm">{data.detailedAnalysis.legalSummary}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* C) OK vs. Rizikové */}
+      <Card className="shadow-medium">
+        <CardHeader>
+          <CardTitle>C) OK vs. Rizikové</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
@@ -178,10 +248,10 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         </CardContent>
       </Card>
 
-      {/* Checklist odporúčaní */}
+      {/* D) Checklist odporúčaní */}
       <Card className="shadow-medium">
         <CardHeader>
-          <CardTitle>Checklist odporúčaní</CardTitle>
+          <CardTitle>D) Checklist odporúčaní</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
