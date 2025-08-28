@@ -27,7 +27,14 @@ import { useState, useCallback } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { createConsentCapture, validateApiKey } from '@/utils/consentCapture';
 import { analyzeConsentScreenshot, ConsentAnalysis } from '@/utils/consentOcr';
+import { 
+  autoCaptureConsent, 
+  checkEdgeFunctionAvailable, 
+  getStoredApiKey, 
+  setStoredApiKey 
+} from '@/utils/consentService';
 import { useToast } from '@/hooks/use-toast';
+import { useEffect } from 'react';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -45,8 +52,98 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
   const [captureProgress, setCaptureProgress] = useState(0);
   const [ocrAnalysis, setOcrAnalysis] = useState<ConsentAnalysis | null>(null);
   const [showCaptureDialog, setShowCaptureDialog] = useState(false);
+  const [isAutoCapturing, setIsAutoCapturing] = useState(false);
+  const [edgeFunctionAvailable, setEdgeFunctionAvailable] = useState<boolean | null>(null);
+  const [autoCaptureCompleted, setAutoCaptureCompleted] = useState(false);
   
   const { toast } = useToast();
+
+  // Auto-capture effect
+  useEffect(() => {
+    const initializeCapture = async () => {
+      // Check if edge function is available
+      const isEdgeAvailable = await checkEdgeFunctionAvailable();
+      setEdgeFunctionAvailable(isEdgeAvailable);
+      
+      // Load stored API key if edge function not available
+      if (!isEdgeAvailable) {
+        const storedKey = getStoredApiKey();
+        if (storedKey) {
+          setApiKey(storedKey);
+        }
+      }
+      
+      // Auto-trigger capture if we have URL and haven't completed yet
+      if (data.url && !autoCaptureCompleted && !isAutoCapturing) {
+        await handleAutoCapture();
+      }
+    };
+    
+    initializeCapture();
+  }, [data.url, autoCaptureCompleted]);
+
+  // Handle automatic capture
+  const handleAutoCapture = async () => {
+    if (isAutoCapturing || autoCaptureCompleted) return;
+    
+    setIsAutoCapturing(true);
+    
+    try {
+      const result = await autoCaptureConsent(data.url, {
+        delay: 3000,
+        viewport: { width: 1920, height: 1080 },
+        locale: 'sk-SK',
+      });
+      
+      if (result.success && result.screenshot) {
+        setScreenshot(result.screenshot);
+        setScreenshotPreview(result.screenshot);
+        setAutoCaptureCompleted(true);
+        
+        // Perform OCR analysis
+        const ocrResult = await analyzeConsentScreenshot(result.screenshot);
+        setOcrAnalysis(ocrResult.analysis);
+        
+        toast({
+          title: "Auto-Capture Complete",
+          description: `Cookie banner captured automatically (${result.used === 'edge' ? 'secure mode' : 'client mode'})`,
+          variant: "default"
+        });
+      } else {
+        console.log('Auto-capture result:', result);
+        if (result.error?.includes('API key required')) {
+          toast({
+            title: "API Key Required",
+            description: "Enter Browserless API key to enable automatic capture",
+            variant: "default"
+          });
+        } else {
+          toast({
+            title: "Auto-capture Failed",
+            description: result.error || 'Unknown error',
+            variant: "destructive"
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Auto-capture error:', error);
+      toast({
+        title: "Auto-capture Failed",
+        description: "Failed to automatically capture banner",
+        variant: "destructive"
+      });
+    } finally {
+      setIsAutoCapturing(false);
+    }
+  };
+
+  // Handle API key changes
+  const handleApiKeyChange = (value: string) => {
+    setApiKey(value);
+    if (value.trim()) {
+      setStoredApiKey(value.trim());
+    }
+  };
 
   // Consistency checks
   const performConsistencyChecks = () => {
@@ -111,6 +208,12 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
   };
 
   const handleSmartCapture = useCallback(async () => {
+    // If edge function available, no API key needed
+    if (edgeFunctionAvailable) {
+      await handleAutoCapture();
+      return;
+    }
+
     if (!apiKey || !validateApiKey(apiKey)) {
       toast({
         title: "Invalid API Key",
@@ -139,6 +242,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
       setCaptureProgress(50);
       setScreenshot(captureResult.screenshot);
+      setAutoCaptureCompleted(true);
       
       // Create preview URL for display
       const response = await fetch(captureResult.screenshot);
@@ -179,7 +283,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
       setIsCapturing(false);
       setCaptureProgress(0);
     }
-  }, [apiKey, data.url, toast]);
+  }, [apiKey, data.url, toast, edgeFunctionAvailable]);
 
   const handleDownloadPDF = () => {
     const printWindow = window.open('', '_blank');
@@ -932,73 +1036,87 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                                    Automatické zachytenie cookie lišty
                                  </DialogTitle>
                                </DialogHeader>
-                               <div className="space-y-4">
-                                 <Alert>
-                                   <AlertTriangle className="h-4 w-4" />
-                                   <AlertDescription>
-                                     Automatické zachytenie používa cloudovú službu na screenshot a OCR analýzu textu tlačidiel.
-                                   </AlertDescription>
-                                 </Alert>
-                                 
-                                 <div className="space-y-2">
-                                   <Label htmlFor="api-key">Browserless API Key</Label>
-                                   <Input
-                                     id="api-key"
-                                     type="password"
-                                     placeholder="Enter your Browserless.io API key"
-                                     value={apiKey}
-                                     onChange={(e) => setApiKey(e.target.value)}
-                                   />
-                                   <p className="text-xs text-muted-foreground">
-                                     Získajte bezplatný API kľúč na{' '}
-                                     <a 
-                                       href="https://browserless.io" 
-                                       target="_blank" 
-                                       rel="noopener noreferrer"
-                                       className="text-primary underline"
-                                     >
-                                       browserless.io
-                                     </a>
-                                   </p>
-                                 </div>
+                                <div className="space-y-4">
+                                  <Alert>
+                                    <AlertTriangle className="h-4 w-4" />
+                                    <AlertDescription>
+                                      Automatické zachytenie používa cloudovú službu na screenshot a OCR analýzu textu tlačidiel.
+                                    </AlertDescription>
+                                  </Alert>
+                                  
+                                  {edgeFunctionAvailable === null ? (
+                                    <p className="text-sm text-muted-foreground">
+                                      Kontrolujem dostupné metódy zachytenia...
+                                    </p>
+                                  ) : edgeFunctionAvailable ? (
+                                    <div className="space-y-2">
+                                      <p className="text-sm text-muted-foreground">
+                                        🔒 Bezpečný režim: Server-side zachytenie (API kľúč nie je potrebný)
+                                      </p>
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-2">
+                                      <Label htmlFor="api-key">Browserless API Key</Label>
+                                      <Input
+                                        id="api-key"
+                                        type="password"
+                                        placeholder="Enter your Browserless.io API key"
+                                        value={apiKey}
+                                        onChange={(e) => handleApiKeyChange(e.target.value)}
+                                      />
+                                      <p className="text-xs text-muted-foreground">
+                                        Získajte bezplatný API kľúč na{' '}
+                                        <a 
+                                          href="https://browserless.io" 
+                                          target="_blank" 
+                                          rel="noopener noreferrer"
+                                          className="text-primary underline"
+                                        >
+                                          browserless.io
+                                        </a>
+                                      </p>
+                                    </div>
+                                  )}
 
-                                 {isCapturing && (
-                                   <div className="space-y-2">
-                                     <div className="flex items-center gap-2">
-                                       <Loader2 className="h-4 w-4 animate-spin" />
-                                       <span className="text-sm">Spracovávam screenshot...</span>
-                                     </div>
-                                     <Progress value={captureProgress} className="w-full" />
-                                   </div>
-                                 )}
+                                  {(isCapturing || isAutoCapturing) && (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-2">
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        <span className="text-sm">
+                                          {isAutoCapturing ? 'Auto-zachytávam cookie lištu...' : 'Spracovávam screenshot...'}
+                                        </span>
+                                      </div>
+                                      {captureProgress > 0 && <Progress value={captureProgress} className="w-full" />}
+                                    </div>
+                                  )}
 
-                                 <div className="flex gap-2">
-                                   <Button
-                                     onClick={handleSmartCapture}
-                                     disabled={!apiKey || isCapturing}
-                                     className="flex-1"
-                                   >
-                                     {isCapturing ? (
-                                       <>
-                                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                         Zachytávam...
-                                       </>
-                                     ) : (
-                                       <>
-                                         <Camera className="h-4 w-4 mr-2" />
-                                         Zachytiť & Analyzovať
-                                       </>
-                                     )}
-                                   </Button>
-                                   <Button
-                                     variant="outline"
-                                     onClick={() => setShowCaptureDialog(false)}
-                                     disabled={isCapturing}
-                                   >
-                                     Zrušiť
-                                   </Button>
-                                 </div>
-                               </div>
+                                  <div className="flex gap-2">
+                                    <Button
+                                      onClick={handleSmartCapture}
+                                      disabled={(edgeFunctionAvailable === false && !apiKey) || isCapturing || isAutoCapturing}
+                                      className="flex-1"
+                                    >
+                                      {(isCapturing || isAutoCapturing) ? (
+                                        <>
+                                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                          Zachytávam...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Camera className="h-4 w-4 mr-2" />
+                                          Zachytiť & Analyzovať
+                                        </>
+                                      )}
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      onClick={() => setShowCaptureDialog(false)}
+                                      disabled={isCapturing || isAutoCapturing}
+                                    >
+                                      Zrušiť
+                                    </Button>
+                                  </div>
+                                </div>
                              </DialogContent>
                            </Dialog>
                            
