@@ -61,11 +61,15 @@ export function addQualityChecks(
   return managementSummary;
 }
 
-// Helper function to extract domain
+// Helper function to extract domain (unified with auditSimulator)
 function getDomain(url: string): string {
   try {
     const urlObj = new URL(url);
-    return urlObj.hostname.replace(/^www\./, '');
+    let hostname = urlObj.hostname.toLowerCase();
+    if (hostname.startsWith('www.')) {
+      hostname = hostname.substring(4);
+    }
+    return hostname;
   } catch {
     return 'unknown';
   }

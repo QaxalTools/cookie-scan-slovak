@@ -356,13 +356,8 @@ Deno.serve(async (req: Request) => {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }, pageSessionId);
       
-      await sendCDPCommand('Page.setExtraHTTPHeaders', {
-        headers: {
-          'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
-          'DNT': '1',
-          'Sec-GPC': '1'
-        }
-      }, pageSessionId);
+      // CDP doesn't support Page.setExtraHTTPHeaders in all environments
+      // Headers already set via userAgent override above
       
       // Helper functions for data collection
       const collectCookies = async (label) => {
@@ -774,15 +769,38 @@ Deno.serve(async (req: Request) => {
       consentClicked: browserlessData.consent_clicked
     });
     
-    return new Response(JSON.stringify({
-      success: true,
-      trace_id: traceId,
-      timestamp: Date.now(),
-      bl_status_code: 200,
-      bl_health_status: healthStatus,
-      data: browserlessData
-    }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+     // Add data_sent_to_third_parties field for quality checks
+     const dataSentToThirdParties = requests
+       .filter(req => Object.keys(req.trackingParams || {}).length > 0)
+       .map(req => ({
+         url: req.url,
+         trackingParams: req.trackingParams,
+         host: new URL(req.url).hostname,
+         timestamp: req.timestamp
+       }));
+     
+     browserlessData.data_sent_to_third_parties = dataSentToThirdParties;
+     
+     // Debug log for quality checks
+     console.log('🔍 Control logs for quality checks:', {
+       thirdPartyHosts: [...new Set(requests.map(r => {
+         try { return new URL(r.url).hostname.toLowerCase().replace(/^www\./, ''); }
+         catch { return 'unknown'; }
+       }))].filter(h => h !== new URL(browserlessData.finalUrl).hostname.toLowerCase().replace(/^www\./, '') && h !== 'unknown').length,
+       dataSentEntries: dataSentToThirdParties.length,
+       totalRequests: requests.length,
+       trackingRequests: requests.filter(r => Object.keys(r.trackingParams || {}).length > 0).length
+     });
+
+     return new Response(JSON.stringify({
+       success: true,
+       trace_id: traceId,
+       timestamp: Date.now(),
+       bl_status_code: 200,
+       bl_health_status: healthStatus,
+       data: browserlessData
+     }), {
+       headers: { 'Content-Type': 'application/json', ...corsHeaders },
       status: 200
     });
 
