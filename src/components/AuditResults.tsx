@@ -266,7 +266,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </Card>
           </div>
 
-          {/* 3. Trackers */}
+          {/* 3. Trackery a web-beacony */}
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-lg font-semibold">
               <Eye className="h-5 w-5" />
@@ -308,6 +308,36 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 </div>
               </CardContent>
             </Card>
+            
+            {/* Critical Error: Pre-consent trackers */}
+            {(() => {
+              const preConsentTrackers = data.detailedAnalysis.trackers.filter(t => t.spamsBeforeConsent);
+              return preConsentTrackers.length > 0 && (
+                <div className="border border-red-600 bg-red-50 text-red-800 rounded p-4 flex gap-2 items-start">
+                  <XCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="space-y-2">
+                    <div>
+                      <strong>Kritická chyba: Detegované pred‑súhlasové trackery ({preConsentTrackers.length})</strong>
+                    </div>
+                    <div className="text-sm">
+                      <div className="font-medium mb-1">Pred‑súhlasové trackery ({preConsentTrackers.length}):</div>
+                      <ul className="list-disc list-inside space-y-1">
+                        {preConsentTrackers.map((tracker, index) => (
+                          <li key={index}>
+                            <strong>{tracker.service}</strong> - {tracker.host}
+                            {tracker.evidence && (
+                              <div className="ml-4 text-xs font-mono bg-red-100 px-2 py-1 rounded mt-1">
+                                {tracker.evidence}
+                              </div>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* 4. Cookies */}
@@ -466,26 +496,11 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </Card>
           </div>
 
-          {/* 7. Legal Summary */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-lg font-semibold">
-              <Scale className="h-5 w-5" />
-              7. Právne zhrnutie
-            </div>
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">
-                  {data.detailedAnalysis.legalSummary}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* 8. UX Analysis */}
+          {/* 7. UX Analysis */}
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-lg font-semibold">
               <Monitor className="h-5 w-5" />
-              8. UX analýza cookie lišty
+              7. UX analýza cookie lišty
             </div>
             
             {data.consentUx ? (
@@ -579,13 +594,176 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               </Card>
             )}
           </div>
+
+          {/* 8. Retention Periods */}
+          {(() => {
+            // Helper function to parse retention days
+            const parseDays = (expiration: string): number | null => {
+              if (!expiration) return null;
+              const lowerExp = expiration.toLowerCase();
+              if (lowerExp.includes('session') || lowerExp.includes('relacia')) return null;
+              
+              const match = expiration.match(/(\d+)\s*(dní|dni|day|days)/i);
+              if (match) return parseInt(match[1]);
+              
+              const yearMatch = expiration.match(/(\d+)\s*(rok|year|rokov|years)/i);
+              if (yearMatch) return parseInt(yearMatch[1]) * 365;
+              
+              const monthMatch = expiration.match(/(\d+)\s*(mesiac|month|mesiace|months)/i);
+              if (monthMatch) return parseInt(monthMatch[1]) * 30;
+              
+              return null;
+            };
+
+            const longRetentionCookies = data.detailedAnalysis.cookies.details.filter(cookie => {
+              const isMarketingOrAnalytical = cookie.category === 'marketingové' || cookie.category === 'analytické';
+              const days = parseDays(cookie.expiration);
+              return isMarketingOrAnalytical && days !== null && days > 365;
+            });
+
+            return longRetentionCookies.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-lg font-semibold">
+                  <AlertTriangle className="h-5 w-5" />
+                  8. Retenčné doby cookies
+                </div>
+                
+                <div className="border border-orange-500 bg-orange-50 text-orange-800 rounded p-4 flex gap-2 items-start">
+                  <AlertTriangle className="h-5 w-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                  <div className="space-y-2">
+                    <div>
+                      <strong>Poznámka k retenčným dobám:</strong> {longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok. Odporúčame skrátiť na max. 12 mesiacov.
+                    </div>
+                    {longRetentionCookies.length <= 5 && (
+                      <div className="text-sm">
+                        <div className="font-medium mb-1">Cookies s dlhou retenciou:</div>
+                        <ul className="list-disc list-inside space-y-1">
+                          {longRetentionCookies.map((cookie, index) => (
+                            <li key={index} className="font-mono text-xs">
+                              {cookie.name} ({cookie.domain}) - {cookie.expiration}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* 9. Legal Summary */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Scale className="h-5 w-5" />
+              9. Právne zhrnutie
+            </div>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-sm text-muted-foreground">
+                  {data.detailedAnalysis.legalSummary}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 10. Risk Scoring */}
+          {(() => {
+            // Calculate risk scores (0-5)
+            const calculateRiskScores = () => {
+              const scores = [];
+              
+              // HTTPS
+              const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
+                               data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
+              scores.push({ area: 'HTTPS', score: httpsScore, note: data.detailedAnalysis.https.comment });
+              
+              // CMP
+              const hasConsentTool = data.detailedAnalysis.consentManagement.hasConsentTool;
+              const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent;
+              const cmpScore = !hasConsentTool ? 5 : (preConsentTrackers > 0 ? 4 : 1);
+              scores.push({ area: 'CMP', score: cmpScore, note: hasConsentTool ? 'Implementované' : 'Chýba' });
+              
+              // Cookies
+              const hasMarketingCookies = data.detailedAnalysis.cookies.details.some(c => c.category === 'marketingové');
+              const cookiesScore = hasMarketingCookies ? 4 : 1;
+              scores.push({ area: 'Cookies', score: cookiesScore, note: hasMarketingCookies ? 'Marketingové cookies prítomné' : 'Iba nevyhnutné' });
+              
+              // Storage
+              const hasPreConsentStorage = data.detailedAnalysis.storage?.some(s => s.createdPreConsent) || false;
+              const storageScore = hasPreConsentStorage ? 5 : 1;
+              scores.push({ area: 'Storage', score: storageScore, note: hasPreConsentStorage ? 'Pred-súhlasové storage' : 'OK' });
+              
+              // Trackers
+              const trackerCount = data.detailedAnalysis.trackers.length;
+              const trackersScore = trackerCount === 0 ? 0 : (trackerCount <= 2 ? 3 : 5);
+              scores.push({ area: 'Trackery', score: trackersScore, note: `${trackerCount} detegovaných` });
+              
+              // UX Banner
+              const hasBalanced = data.consentUx?.ocr?.evaluation?.hasBalancedButtons;
+              const uxScore = hasBalanced === false ? 4 : (data.consentUx ? 1 : 2);
+              scores.push({ area: 'UX lišta', score: uxScore, note: data.consentUx ? (hasBalanced ? 'Vyvážené' : 'Nevyvážené') : 'Nedostupné' });
+              
+              return scores;
+            };
+
+            const riskScores = calculateRiskScores();
+            const averageScore = riskScores.reduce((sum, s) => sum + s.score, 0) / riskScores.length;
+            const overallRisk = averageScore <= 1.5 ? 'NÍZKE' : (averageScore <= 3 ? 'STREDNÉ' : 'VYSOKÉ');
+            const overallRiskColor = averageScore <= 1.5 ? 'bg-green-600' : (averageScore <= 3 ? 'bg-orange-500' : 'bg-red-600');
+
+            return (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-lg font-semibold">
+                  <FileText className="h-5 w-5" />
+                  10. Rizikový scoring (0–5)
+                </div>
+                
+                <Card>
+                  <CardContent className="pt-4">
+                    <div className="overflow-x-auto mb-4">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b">
+                            <th className="text-left p-2">Oblasť</th>
+                            <th className="text-left p-2">Skóre (0–5)</th>
+                            <th className="text-left p-2">Poznámka</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riskScores.map((score, index) => (
+                            <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                              <td className="p-2 font-medium">{score.area}</td>
+                              <td className="p-2">
+                                <Badge className={`text-white ${score.score <= 1 ? 'bg-green-600' : score.score <= 3 ? 'bg-orange-500' : 'bg-red-600'}`}>
+                                  {score.score}/5
+                                </Badge>
+                              </td>
+                              <td className="p-2 text-muted-foreground">{score.note}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 pt-2 border-t">
+                      <span className="font-semibold">Celkové riziko:</span>
+                      <Badge className={`text-white ${overallRiskColor}`}>
+                        {overallRisk} ({averageScore.toFixed(1)}/5)
+                      </Badge>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
 
-      {/* C) Risk Table */}
+      {/* C) OK vs. Rizikové */}
       <Card>
         <CardHeader>
-          <CardTitle>C) Rizikové oblasti</CardTitle>
+          <CardTitle>C) OK vs. Rizikové</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
