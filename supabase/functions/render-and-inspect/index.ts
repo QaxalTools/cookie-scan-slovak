@@ -22,6 +22,8 @@ interface RenderResponse {
   responses_post?: any[];
   storage_pre?: any;
   storage_post?: any;
+  renderedHTML_pre?: string;
+  renderedHTML_post?: string;
   console_logs?: any[];
   finalUrl?: string;
   mode?: 'live' | 'html' | 'simulation';
@@ -69,7 +71,7 @@ serve(async (req) => {
 
     // Browserless script for two-phase capture
     const browserlessScript = `
-      ({ page, context }) => {
+      module.exports = async ({ page, context }) => {
         return new Promise(async (resolve) => {
           const results = {
             cookies_pre: [],
@@ -80,6 +82,8 @@ serve(async (req) => {
             responses_post: [],
             storage_pre: {},
             storage_post: {},
+            renderedHTML_pre: '',
+            renderedHTML_post: '',
             console_logs: [],
             finalUrl: ''
           };
@@ -170,11 +174,17 @@ serve(async (req) => {
           // Set up request and response interception for pre-consent
           await page.setRequestInterception(true);
           page.on('request', (request) => {
+            const url = new URL(request.url());
             requests_pre.push({
               url: request.url(),
               method: request.method(),
               headers: request.headers(),
-              resourceType: request.resourceType()
+              resourceType: request.resourceType(),
+              timestamp: Date.now(),
+              queryParams: Object.fromEntries(url.searchParams.entries()),
+              postData: request.postData() ? request.postData().substring(0, 1000) : null,
+              contentType: request.headers()['content-type'] || null,
+              isPreConsent: true
             });
             request.continue();
           });
@@ -194,12 +204,18 @@ serve(async (req) => {
           await page.goto(context.url, { waitUntil: 'networkidle2', timeout: 60000 });
           
           // Wait for initial load with extended time
-          await page.waitForTimeout(8000);
+          await page.waitForTimeout(5000);
 
-          // Capture storage data
+          // Capture storage data from all frames
           async function captureStorage() {
             try {
-              return await page.evaluate(() => {
+              const allStorage = {
+                localStorage: {},
+                sessionStorage: {}
+              };
+              
+              // Capture from main frame
+              const mainStorage = await page.evaluate(() => {
                 const localStorage = {};
                 const sessionStorage = {};
                 
@@ -207,7 +223,11 @@ serve(async (req) => {
                   for (let i = 0; i < window.localStorage.length; i++) {
                     const key = window.localStorage.key(i);
                     if (key) {
-                      localStorage[key] = window.localStorage.getItem(key);
+                      localStorage[key] = {
+                        value: window.localStorage.getItem(key),
+                        origin: window.location.origin,
+                        scope: 'main'
+                      };
                     }
                   }
                 } catch (e) {
@@ -218,7 +238,11 @@ serve(async (req) => {
                   for (let i = 0; i < window.sessionStorage.length; i++) {
                     const key = window.sessionStorage.key(i);
                     if (key) {
-                      sessionStorage[key] = window.sessionStorage.getItem(key);
+                      sessionStorage[key] = {
+                        value: window.sessionStorage.getItem(key),
+                        origin: window.location.origin,
+                        scope: 'main'
+                      };
                     }
                   }
                 } catch (e) {
@@ -227,6 +251,61 @@ serve(async (req) => {
                 
                 return { localStorage, sessionStorage };
               });
+              
+              Object.assign(allStorage.localStorage, mainStorage.localStorage);
+              Object.assign(allStorage.sessionStorage, mainStorage.sessionStorage);
+              
+              // Capture from iframes
+              const frames = page.frames();
+              for (const frame of frames) {
+                if (frame !== page.mainFrame()) {
+                  try {
+                    const frameStorage = await frame.evaluate(() => {
+                      const localStorage = {};
+                      const sessionStorage = {};
+                      
+                      try {
+                        for (let i = 0; i < window.localStorage.length; i++) {
+                          const key = window.localStorage.key(i);
+                          if (key) {
+                            localStorage[key] = {
+                              value: window.localStorage.getItem(key),
+                              origin: window.location.origin,
+                              scope: 'iframe'
+                            };
+                          }
+                        }
+                      } catch (e) {
+                        // Cross-origin iframe, skip
+                      }
+                      
+                      try {
+                        for (let i = 0; i < window.sessionStorage.length; i++) {
+                          const key = window.sessionStorage.key(i);
+                          if (key) {
+                            sessionStorage[key] = {
+                              value: window.sessionStorage.getItem(key),
+                              origin: window.location.origin,
+                              scope: 'iframe'
+                            };
+                          }
+                        }
+                      } catch (e) {
+                        // Cross-origin iframe, skip
+                      }
+                      
+                      return { localStorage, sessionStorage };
+                    });
+                    
+                    Object.assign(allStorage.localStorage, frameStorage.localStorage);
+                    Object.assign(allStorage.sessionStorage, frameStorage.sessionStorage);
+                  } catch (e) {
+                    // Cross-origin or other errors, skip this frame
+                  }
+                }
+              }
+              
+              return allStorage;
             } catch (e) {
               console.log('Error capturing storage:', e.message);
               return { localStorage: {}, sessionStorage: {} };
@@ -240,6 +319,7 @@ serve(async (req) => {
           results.requests_pre = [...requests_pre];
           results.responses_pre = [...responses_pre];
           results.storage_pre = await captureStorage();
+          results.renderedHTML_pre = await page.content();
 
         // Try to find and click consent button in main page and iframes
         console.log('Looking for consent accept button');
@@ -326,11 +406,17 @@ serve(async (req) => {
           page.removeAllListeners('response');
           
           page.on('request', (request) => {
+            const url = new URL(request.url());
             requests_post.push({
               url: request.url(),
               method: request.method(),
               headers: request.headers(),
-              resourceType: request.resourceType()
+              resourceType: request.resourceType(),
+              timestamp: Date.now(),
+              queryParams: Object.fromEntries(url.searchParams.entries()),
+              postData: request.postData() ? request.postData().substring(0, 1000) : null,
+              contentType: request.headers()['content-type'] || null,
+              isPreConsent: false
             });
             request.continue();
           });
@@ -346,7 +432,7 @@ serve(async (req) => {
           });
 
           // Wait for post-consent changes with extended time
-          await page.waitForTimeout(8000);
+          await page.waitForTimeout(5000);
           
           // Capture post-consent state
           console.log('Capturing post-consent state');
@@ -354,12 +440,14 @@ serve(async (req) => {
           results.requests_post = [...requests_post];
           results.responses_post = [...responses_post];
           results.storage_post = await captureStorage();
+          results.renderedHTML_post = await page.content();
         } else {
           console.log('No consent button found, using pre-consent state for both');
           results.cookies_post = results.cookies_pre;
           results.requests_post = results.requests_pre;
           results.responses_post = results.responses_pre;
           results.storage_post = results.storage_pre;
+          results.renderedHTML_post = results.renderedHTML_pre;
         }
 
         results.console_logs = console_logs;
@@ -405,6 +493,8 @@ serve(async (req) => {
       responses_post: result.responses_post || [],
       storage_pre: result.storage_pre || {},
       storage_post: result.storage_post || {},
+      renderedHTML_pre: result.renderedHTML_pre || '',
+      renderedHTML_post: result.renderedHTML_post || '',
       console_logs: result.console_logs || [],
       finalUrl: result.finalUrl
     };

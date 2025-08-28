@@ -97,6 +97,13 @@ export interface AuditData {
     createdPreConsent: boolean;
     note: string;
   }>;
+  dataTransfers?: Array<{
+    service: string;
+    parameter: string;
+    sampleValue: string;
+    containsPersonalData: boolean;
+    preConsent: boolean;
+  }>;
   consentManagement: {
     hasConsentTool: boolean;
     consentCookieName: string;

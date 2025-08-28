@@ -21,7 +21,8 @@ import {
   FileText,
   Monitor,
   Scale,
-  Loader2
+  Loader2,
+  Send
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -573,11 +574,87 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </Card>
           </div>
 
-          {/* 7. UX Analysis */}
+          {/* 7. Dáta odosielané tretím stranám */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Send className="h-5 w-5" />
+              7. Dáta odosielané tretím stranám
+            </div>
+            
+            {data.detailedAnalysis.dataTransfers && data.detailedAnalysis.dataTransfers.length > 0 ? (
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-2">Služba</th>
+                          <th className="text-left p-2">Parameter</th>
+                          <th className="text-left p-2">Vzor hodnoty</th>
+                          <th className="text-left p-2">Osobné údaje?</th>
+                          <th className="text-left p-2">Pred súhlasom?</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.detailedAnalysis.dataTransfers.map((transfer, index) => (
+                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                            <td className="p-2 font-medium">{transfer.service}</td>
+                            <td className="p-2 font-mono text-xs">{transfer.parameter}</td>
+                            <td className="p-2 font-mono text-xs">{transfer.sampleValue}</td>
+                            <td className="p-2">
+                              <Badge className={`text-white text-xs ${transfer.containsPersonalData ? 'bg-red-500' : 'bg-green-600'}`}>
+                                {transfer.containsPersonalData ? 'ÁNO' : 'NIE'}
+                              </Badge>
+                            </td>
+                            <td className="p-2">
+                              <Badge className={`text-white text-xs ${transfer.preConsent ? 'bg-red-500' : 'bg-green-600'}`}>
+                                {transfer.preConsent ? 'ÁNO' : 'NIE'}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  {(() => {
+                    const preConsentTransfers = data.detailedAnalysis.dataTransfers.filter(t => t.preConsent);
+                    return preConsentTransfers.length > 0 && (
+                      <div className="mt-4 border border-red-600 bg-red-50 text-red-800 rounded p-4 flex gap-2 items-start">
+                        <XCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                        <div>
+                          <div className="font-medium mb-1">Kritická chyba: Dáta sa odosielajú pred súhlasom!</div>
+                          <div className="text-sm">
+                            {preConsentTransfers.length} service(s) odosielalo dáta pred udelením súhlasu, čo porušuje GDPR/ePrivacy.
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent className="pt-4">
+                  <p className="text-sm text-muted-foreground">—</p>
+                  <div className="mt-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5 flex-shrink-0" />
+                      <div className="text-sm text-yellow-800">
+                        <strong>Poznámka:</strong> Neboli detegované žiadne parametre v request URL alebo JSON postData. Môže ísť o POST requesty s dátami v tele alebo o chybu v zbere dát.
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* 8. UX Analysis */}
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-lg font-semibold">
               <Monitor className="h-5 w-5" />
-              7. UX analýza cookie lišty
+              8. UX analýza cookie lišty
             </div>
             
             <Card>
@@ -589,7 +666,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </Card>
           </div>
 
-          {/* 8. Retention Periods */}
+          {/* 9. Retention Periods */}
           {(() => {
             // Helper function to parse retention days
             const parseDays = (expiration: string): number | null => {
@@ -619,7 +696,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-lg font-semibold">
                   <AlertTriangle className="h-5 w-5" />
-                  8. Retenčné doby cookies
+                  9. Retenčné doby cookies
                 </div>
                 
                 <Card>
@@ -674,11 +751,11 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             );
           })()}
 
-          {/* 9. Legal Summary */}
+          {/* 10. Legal Summary */}
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-lg font-semibold">
               <Scale className="h-5 w-5" />
-              9. Právne zhrnutie
+              10. Právne zhrnutie
             </div>
             <Card>
               <CardContent className="pt-4">

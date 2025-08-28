@@ -52,12 +52,16 @@ const Index = () => {
               preConsentData: {
                 html: data.renderedHTML_pre?.replace('<head>', `<head>${baseTag}`) || '',
                 cookies: data.cookies_pre || [],
-                requests: data.requests_pre || []
+                requests: data.requests_pre || [],
+                responses: data.responses_pre || [],
+                storage: data.storage_pre || {}
               },
               postConsentData: {
                 html: data.renderedHTML_post?.replace('<head>', `<head>${baseTag}`) || '',
                 cookies: data.cookies_post || [],
-                requests: data.requests_post || []
+                requests: data.requests_post || [],
+                responses: data.responses_post || [],
+                storage: data.storage_post || {}
               }
             };
             
