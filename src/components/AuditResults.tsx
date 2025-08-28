@@ -1,7 +1,7 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { SimulationBadge } from '@/components/SimulationBadge';
+
 import { 
   CheckCircle, 
   XCircle, 
@@ -360,7 +360,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-6 p-4">
-      <SimulationBadge />
       
       {/* Show consistency issues banner if any */}
       {consistencyIssues.length > 0 && (

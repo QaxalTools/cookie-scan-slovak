@@ -3,7 +3,7 @@ import { AuditForm } from '@/components/AuditForm';
 import { AuditResults } from '@/components/AuditResults';
 import { EmailDraft } from '@/components/EmailDraft';
 import { AnalysisProgress, DEFAULT_AUDIT_STEPS } from '@/components/AnalysisProgress';
-import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
+import { performLiveAudit, generateEmailDraft } from '@/utils/auditSimulator';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
 
@@ -23,9 +23,9 @@ const Index = () => {
     setClientEmail(email);
     
     try {
-      const minDuration = isHtml ? 2000 : 4000; // Shorter for HTML, longer for URL
+      const minDuration = isHtml ? 3000 : 8000; // HTML is faster, live URL analysis takes longer
       
-      const data = await simulateAudit(
+      const data = await performLiveAudit(
         input, 
         isHtml, 
         (stepIndex) => setCurrentStep(stepIndex),
@@ -67,8 +67,8 @@ const Index = () => {
             GDPR Cookie Audit Tool
           </h1>
           <p className="text-xl text-foreground/80 max-w-3xl mx-auto leading-relaxed">
-            Profesionálny nástroj na audit súladu s GDPR a ePrivacy direktívou. 
-            Analyzuje cookies, trackery a consent management na vašej webovej stránke.
+            Profesionálny live nástroj na audit súladu s GDPR a ePrivacy direktívou. 
+            Analyzuje cookies, trackery a consent management priamo na vašej webovej stránke.
           </p>
         </div>
 

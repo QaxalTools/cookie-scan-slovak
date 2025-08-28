@@ -1,4 +1,5 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -89,7 +90,7 @@ const PERSONAL_DATA_PATTERNS = [
   /snowplow/i, /sp_/i, /fbp/i, /fbc/i, /leady/i
 ];
 
-export async function simulateAudit(
+export async function performLiveAudit(
   input: string, 
   isHtml: boolean = false, 
   onProgress?: ProgressCallback,
@@ -98,34 +99,324 @@ export async function simulateAudit(
   const startTime = Date.now();
   const totalSteps = 8;
   
-  // Helper function to update progress and add artificial delay
+  // Helper function to update progress
   const updateProgress = async (stepIndex: number) => {
     onProgress?.(stepIndex, totalSteps);
-    
-    // Add realistic delays between steps
-    const stepDelay = isHtml ? 200 : 400;
-    await new Promise(resolve => setTimeout(resolve, stepDelay));
+    // Real analysis - no artificial delays needed
+    await new Promise(resolve => setTimeout(resolve, 100));
   };
 
-  // Step 1: Fetch/Parse
-  await updateProgress(0);
+  try {
+    // If HTML input, use existing logic for analysis
+    if (isHtml) {
+      console.log('📄 Processing HTML input directly');
+      await updateProgress(0);
+      const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
+      await updateProgress(7);
+      return convertToDisplayFormat(internalJson, input);
+    }
+
+    // For URL input, use Edge Function for real analysis
+    console.log('🌐 Calling live analysis for URL:', input);
+    await updateProgress(0);
+    await updateProgress(1);
+
+    const { data, error } = await supabase.functions.invoke('render-and-inspect', {
+      body: { url: input }
+    });
+
+    await updateProgress(3);
+
+    if (error) {
+      console.error('❌ Edge function error:', error);
+      throw new Error(`Analysis failed: ${error.message}`);
+    }
+
+    if (!data?.success) {
+      console.warn('⚠️ Edge function returned non-success, using fallback');
+      // Fall back to basic analysis
+      const internalJson = await generateInternalAuditJson(input, false, updateProgress);
+      await updateProgress(7);
+      return convertToDisplayFormat(internalJson, input);
+    }
+
+    console.log('✅ Live data received from Edge Function');
+    await updateProgress(5);
+
+    // Transform live data to internal format
+    const renderData = data.data;
+    const internalJson = await transformRenderDataToInternalJson(renderData, updateProgress);
+    
+    await updateProgress(7);
+    
+    // Convert to display format
+    const auditData = convertToDisplayFormat(internalJson, input);
+    
+    // Minimum duration for UX
+    const elapsed = Date.now() - startTime;
+    if (elapsed < minDurationMs) {
+      await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
+    }
+    
+    return auditData;
+
+  } catch (error) {
+    console.error('❌ Live analysis failed, falling back to basic analysis:', error);
+    
+    // Fallback to basic simulation
+    await updateProgress(4);
+    const internalJson = await generateInternalAuditJson(input, false, updateProgress);
+    await updateProgress(7);
+    
+    // Add error info to audit data
+    const auditData = convertToDisplayFormat(internalJson, input);
+    auditData.managementSummary.data_source = `Záložný režim (Live analýza zlyhala: ${error.message})`;
+    
+    return auditData;
+  }
+}
+
+async function transformRenderDataToInternalJson(
+  renderData: any,
+  updateProgress?: (stepIndex: number) => Promise<void>
+): Promise<InternalAuditJson> {
+  console.log('🔄 Transforming live data to internal format');
   
-  // Generate internal JSON structure with progress updates
-  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
+  await updateProgress?.(6);
+
+  // Extract data from renderData
+  const finalUrl = renderData.finalUrl || 'unknown';
+  const allRequests = [...(renderData.requests_pre || []), ...(renderData.requests_post || [])];
+  const allCookies = [...(renderData.cookies_pre || []), ...(renderData.cookies_post || [])];
   
-  // Final step: Generate results
-  await updateProgress(7);
+  // Build third parties from network requests
+  const thirdPartyHosts = new Set<string>();
+  const baseDomain = getDomain(finalUrl);
   
-  // Convert internal JSON to display format
-  const auditData = convertToDisplayFormat(internalJson, input);
+  allRequests.forEach((request: any) => {
+    try {
+      const host = getDomain(request.url);
+      if (host !== baseDomain && host !== 'unknown') {
+        thirdPartyHosts.add(host);
+      }
+    } catch (e) {
+      console.log('Error processing request URL:', e.message);
+    }
+  });
+
+  const thirdParties = Array.from(thirdPartyHosts).map(host => ({
+    host,
+    service: getServiceForHost(host)
+  }));
+
+  // Extract beacons from requests
+  const beacons = extractBeaconsFromRequests(allRequests);
+
+  // Transform cookies with proper classification
+  const cookies = transformCookies(allCookies, baseDomain);
+
+  // Transform storage
+  const storage = transformStorage(renderData.storage_pre, renderData.storage_post);
+
+  // Analyze CMP from cookies and data
+  const cmp = analyzeCMPFromLiveData(renderData, beacons, cookies);
+
+  // Determine verdict
+  const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, false);
+
+  return {
+    final_url: finalUrl,
+    https: { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true },
+    third_parties: thirdParties,
+    beacons: beacons,
+    cookies: cookies,
+    storage: storage,
+    cmp: cmp,
+    verdict: verdict,
+    reasons: reasons
+  };
+}
+
+function extractBeaconsFromRequests(requests: any[]): Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> {
+  const beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }> = [];
   
-  // Ensure minimum duration for credibility
-  const elapsed = Date.now() - startTime;
-  if (elapsed < minDurationMs) {
-    await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
+  // Patterns for known tracking endpoints
+  const beaconPatterns = [
+    { pattern: /facebook\.com\/tr/, service: 'Facebook Pixel' },
+    { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect/, service: 'Google Ads' },
+    { pattern: /region1\.google-analytics\.com\/g\/collect/, service: 'Google Analytics' },
+    { pattern: /google-analytics\.com.*collect/, service: 'Google Analytics' },
+    { pattern: /ct\.pinterest\.com\/v3/, service: 'Pinterest' },
+    { pattern: /ct\.pinterest\.com\/user/, service: 'Pinterest' },
+    { pattern: /t\.leady\.com\/L/, service: 'Leady' },
+    { pattern: /events\.getsitectrl\.com\/api\/v1\/events/, service: 'GetSiteControl' },
+    { pattern: /collector\.snowplow\.io.*\/i/, service: 'Snowplow' },
+    { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i/, service: 'Snowplow' },
+    { pattern: /clarity\.ms.*collect/, service: 'Microsoft Clarity' },
+    { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' },
+    { pattern: /px\.ads\.linkedin\.com.*collect/, service: 'LinkedIn Ads' },
+    { pattern: /snap\.licdn\.com.*li_fat_id/, service: 'LinkedIn Insights' },
+    { pattern: /analytics\.twitter\.com.*track/, service: 'Twitter Analytics' }
+  ];
+
+  requests.forEach((request: any) => {
+    const url = request.url || '';
+    const host = getDomain(url);
+    
+    // Check if this is a known beacon pattern
+    for (const pattern of beaconPatterns) {
+      if (pattern.pattern.test(url)) {
+        const params = Object.keys(request.query || {});
+        
+        // Add POST parameters if available
+        if (request.postDataParsed && typeof request.postDataParsed === 'object') {
+          params.push(...Object.keys(request.postDataParsed));
+        }
+        
+        beacons.push({
+          host: host,
+          sample_url: url.length > 100 ? url.substring(0, 100) + '...' : url,
+          params: params.slice(0, 10), // Limit to first 10 params
+          service: pattern.service,
+          pre_consent: request.isPreConsent || false
+        });
+        break;
+      }
+    }
+  });
+
+  return beacons;
+}
+
+function transformCookies(
+  cookies: any[], 
+  baseDomain: string
+): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {
+  const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
+  
+  cookies.forEach((cookie: any) => {
+    const cookieDomain = cookie.domain || baseDomain;
+    const isFirstParty = cookieDomain === baseDomain || cookieDomain.endsWith(`.${baseDomain}`);
+    
+    // Classify cookie type
+    let type: 'technical' | 'analytics' | 'marketing' = 'technical';
+    
+    if (COOKIE_PATTERNS.analytics.some(pattern => cookie.name.includes(pattern))) {
+      type = 'analytics';
+    } else if (COOKIE_PATTERNS.marketing.some(pattern => cookie.name.includes(pattern))) {
+      type = 'marketing';
+    }
+    
+    // Calculate expiry days
+    let expiryDays: number | null = null;
+    if (cookie.expires && cookie.expires > 0) {
+      const now = Date.now() / 1000;
+      expiryDays = Math.round((cookie.expires - now) / (24 * 60 * 60));
+    }
+    
+    transformedCookies.push({
+      name: cookie.name,
+      domain: cookieDomain,
+      party: isFirstParty ? '1P' : '3P',
+      type: type,
+      expiry_days: expiryDays
+    });
+  });
+
+  return transformedCookies;
+}
+
+function transformStorage(
+  storagePre: any, 
+  storagePost: any
+): Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> {
+  const storage: Array<{ scope: 'local' | 'session'; key: string; sample_value: string; contains_personal_data: boolean; source_party: '1P' | '3P'; created_pre_consent: boolean }> = [];
+  
+  // Process localStorage
+  const localStorage = storagePre?.localStorage || {};
+  Object.entries(localStorage).forEach(([key, value]: [string, any]) => {
+    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => 
+      pattern.test(key) || pattern.test(String(value))
+    );
+    
+    storage.push({
+      scope: 'local',
+      key: key,
+      sample_value: String(value).length > 50 ? String(value).substring(0, 50) + '...' : String(value),
+      contains_personal_data: containsPersonalData,
+      source_party: '1P', // Most localStorage is 1P
+      created_pre_consent: true // Assume pre-consent unless we have timing data
+    });
+  });
+  
+  // Process sessionStorage
+  const sessionStorage = storagePre?.sessionStorage || {};
+  Object.entries(sessionStorage).forEach(([key, value]: [string, any]) => {
+    const containsPersonalData = PERSONAL_DATA_PATTERNS.some(pattern => 
+      pattern.test(key) || pattern.test(String(value))
+    );
+    
+    storage.push({
+      scope: 'session',
+      key: key,
+      sample_value: String(value).length > 50 ? String(value).substring(0, 50) + '...' : String(value),
+      contains_personal_data: containsPersonalData,
+      source_party: '1P',
+      created_pre_consent: true
+    });
+  });
+
+  return storage;
+}
+
+function analyzeCMPFromLiveData(
+  renderData: any,
+  beacons: any[],
+  cookies: any[]
+): { present: boolean; cookie_name: string; raw_value: string; pre_consent_fires: boolean } {
+  let cmpPresent = false;
+  let cookieName = '';
+  let rawValue = '';
+  
+  // Check for CMP in detected data
+  if (renderData.cmp_detected) {
+    cmpPresent = true;
+    cookieName = renderData.cmp_cookie_name || 'CMP Cookie';
+    rawValue = renderData.cmp_cookie_value || '';
   }
   
-  return auditData;
+  // Also check cookies for CMP indicators
+  const cmpCookieNames = ['CookieScriptConsent', 'OptanonConsent', 'euconsent-v2', 'CookieConsent', 'tarteaucitron', 'cookieyes-consent'];
+  
+  if (!cmpPresent) {
+    const foundCMPCookie = cookies.find(cookie => 
+      cmpCookieNames.some(cmpName => 
+        cookie.name.toLowerCase().includes(cmpName.toLowerCase())
+      )
+    );
+    
+    if (foundCMPCookie) {
+      cmpPresent = true;
+      cookieName = foundCMPCookie.name;
+      rawValue = foundCMPCookie.value || '';
+    }
+  }
+  
+  // Check if trackers fire before consent
+  const preConsentFires = beacons.some(beacon => 
+    beacon.pre_consent && 
+    (beacon.service.includes('Facebook') || 
+     beacon.service.includes('Google') || 
+     beacon.service.includes('Pinterest') ||
+     beacon.service.includes('Leady'))
+  );
+
+  return {
+    present: cmpPresent,
+    cookie_name: cookieName,
+    raw_value: rawValue,
+    pre_consent_fires: preConsentFires
+  };
 }
 
 async function generateInternalAuditJson(
@@ -552,27 +843,11 @@ function determineVerdict(
     return { verdict: 'NON_COMPLIANT', reasons };
   }
 
-  // SIMULATION SAFEGUARDS: For simulated mode, lean towards INCOMPLETE rather than false compliance
-  if (isSimulation && (!thirdParties.length && !beacons.length && !cookies.length)) {
+  // FALLBACK SAFEGUARD: If very limited data detected, mark as incomplete
+  if (thirdParties.length === 0 && beacons.length === 0 && cookies.length <= 1) {
     return {
       verdict: 'INCOMPLETE',
-      reasons: ['Simulačný režim: Nedostatok dát pre spoľahlivý verdikt', 'Potrebná reálna analýza webovej stránky']
-    };
-  }
-  
-  // For basic simulations without evidence, default to INCOMPLETE
-  if (isSimulation && !beacons.length && cookies.length <= 1) {
-    return {
-      verdict: 'INCOMPLETE',
-      reasons: ['Simulačný režim: Nedostatočné dáta pre hodnotenie súladu', 'Odporúčame reálnu analýzu pre presný verdikt']
-    };
-  }
-
-  // SAFEGUARD D: Minimal sensitivity check - if very few 3P detected but should have more
-  if (thirdParties.length <= 1 && beacons.length === 0) {
-    return {
-      verdict: 'INCOMPLETE',
-      reasons: ['Obmedzený zber údajov - odporúčame profesionálnu analýzu']
+      reasons: ['Obmedzený zber údajov - stránka môže používať pokročilé ochrany alebo blokovanie']
     };
   }
 
@@ -598,7 +873,7 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
     verdict,
     overall: generateOverallSummary(internalJson),
     risks: generateRiskSummary(internalJson),
-    data_source: originalInput.startsWith('http') && !internalJson.third_parties.length ? 'Simulácia (obmedzené dáta)' : 'Analýza obsahu'
+    data_source: originalInput.startsWith('http') ? 'Live analýza (Browserless)' : 'HTML analýza'
   };
 
   // Convert detailed analysis

@@ -63,7 +63,7 @@ export const AuditForm = ({ onSubmit, isLoading }: AuditFormProps) => {
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Zadajte URL stránky na analýzu. Načítanie môže byť obmedzené CORS politikami.
+                  Zadajte URL stránky na analýzu. Reálna analýza môže trvať 15-30 sekúnd.
                 </p>
               </div>
             </TabsContent>
