@@ -1046,19 +1046,6 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
 // Helper functions
 function getDomain(url: string): string {
   try {
-    const parsedUrl = new URL(url);
-    let hostname = parsedUrl.hostname.toLowerCase();
-    if (hostname.startsWith('www.')) {
-      hostname = hostname.substring(4);
-    }
-    return hostname;
-  } catch (e) {
-    return 'unknown';
-  }
-}
-
-function getDomainOld(url: string): string {
-  try {
     return new URL(url).hostname;
   } catch {
     if (url.includes('.')) {
