@@ -657,6 +657,21 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                       <td className="p-2">{cookie.type === 'first-party' ? '1P' : '3P'}</td>
                       <td className="p-2">{cookie.category}</td>
                       <td className="p-2">{cookie.expiration}</td>
+                      <td className="p-2">
+                        <Badge variant="outline" className="text-xs">
+                          {(cookie as any).sources ? 
+                            Object.entries((cookie as any).sources)
+                              .filter(([_, active]) => active)
+                              .map(([source, _]) => source === 'jar' ? 'jar' : source === 'setCookie' ? 'set-cookie' : source)
+                              .join(' / ') 
+                            : 'jar'}
+                        </Badge>
+                      </td>
+                      <td className="p-2">
+                        <Badge variant={(cookie as any).persisted !== false ? 'default' : 'destructive'} className="text-xs">
+                          {(cookie as any).persisted !== false ? 'Áno' : 'Nie'}
+                        </Badge>
+                      </td>
                       <td className="p-2">{getStatusBadge(cookie.status)}</td>
                     </tr>
                   ))}

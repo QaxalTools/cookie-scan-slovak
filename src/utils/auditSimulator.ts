@@ -372,7 +372,7 @@ function transformCookies(
   cookies: any[], 
   baseDomain: string
 ): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null; sources?: any; persisted?: boolean }> {
-  const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> = [];
+  const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null; sources?: any; persisted?: boolean }> = [];
   
   cookies.forEach((cookie: any) => {
     const cookieDomain = getDomain(cookie.domain || baseDomain);
@@ -399,7 +399,9 @@ function transformCookies(
       domain: cookieDomain,
       party: isFirstParty ? '1P' : '3P',
       type: type,
-      expiry_days: expiryDays
+      expiry_days: expiryDays,
+      sources: cookie.sources || { jar: true, setCookie: false, document: false },
+      persisted: cookie.persisted !== false
     });
   });
 
@@ -987,7 +989,9 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
         category: cookie.type === 'technical' ? 'technické' as const : 
                  cookie.type === 'analytics' ? 'analytické' as const : 'marketingové' as const,
         expiration: cookie.expiry_days ? `${cookie.expiry_days} dní` : 'session',
-        status: cookie.type === 'marketing' ? 'error' as const : 'ok' as const
+        status: cookie.type === 'marketing' ? 'error' as const : 'ok' as const,
+        sources: cookie.sources || { jar: true, setCookie: false, document: false },
+        persisted: cookie.persisted !== false
       }))
     },
     storage: internalJson.storage.map(item => ({

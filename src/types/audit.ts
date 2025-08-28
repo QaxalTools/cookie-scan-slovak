@@ -30,6 +30,8 @@ export interface AuditSelfCheck {
       marketing?: { min?: number; p50?: number; p95?: number; max?: number };
     };
     trackers_with_params: number;
+    cookies_3p_persisted: number;
+    cookies_3p_attempted: number;
   };
 }
 
