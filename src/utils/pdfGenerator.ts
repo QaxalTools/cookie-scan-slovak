@@ -430,16 +430,27 @@ export const generatePDFReport = async (data: AuditData): Promise<jsPDF> => {
     
     // 7. Dáta odosielané tretím stranám
     addTitle('7. Dáta odosielané tretím stranám', 3);
-    if (data.detailedAnalysis.trackers.length > 0) {
+    if (data.detailedAnalysis.dataTransfers && data.detailedAnalysis.dataTransfers.length > 0) {
       const dataHeaders = ['Služba', 'Parameter', 'Vzor hodnoty', 'Osobné údaje?', 'Pred súhlasom?'];
-      const dataRows = data.detailedAnalysis.trackers.map(tracker => [
-        tracker.service,
-        '—', // No specific parameters in our data structure
-        '—',
-        'Možno',
-        renderYesNoPreConsent(tracker.spamsBeforeConsent)
+      const dataRows = data.detailedAnalysis.dataTransfers.map(transfer => [
+        transfer.service,
+        transfer.parameter,
+        transfer.sampleValue,
+        transfer.containsPersonalData ? 'Áno' : 'Nie',
+        transfer.preConsent ? 'Áno' : 'Nie'
       ]);
-      addTableAdvanced(dataHeaders, dataRows, undefined, [35, 25, 30, 25, 25], [4]);
+      addTableAdvanced(dataHeaders, dataRows, undefined, [35, 25, 30, 25, 25], [3, 4]);
+      
+      // Pred-súhlasové transfery
+      const preConsentTransfers = data.detailedAnalysis.dataTransfers.filter(t => t.preConsent);
+      if (preConsentTransfers.length > 0) {
+        addParagraph(`KRITICKÁ CHYBA: ${preConsentTransfers.length} service(s) odosielalo dáta pred súhlasom!`, 10, 'bold');
+        const transferBullets = preConsentTransfers.map(t => `${t.service}: ${t.parameter}=${t.sampleValue}`);
+        addBullets(transferBullets);
+      }
+    } else {
+      addParagraph('—');
+      addParagraph('Poznámka: Neboli detegované žiadne parametre v request URL alebo JSON postData. Môže ísť o POST requesty s dátami v tele alebo o chybu v zbere dát.', 10, 'normal');
     }
     
     // 8. UX analýza cookie lišty

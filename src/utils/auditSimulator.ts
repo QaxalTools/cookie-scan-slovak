@@ -276,10 +276,17 @@ async function generateInternalAuditJson(
   }
   
   await updateProgress?.(6); // Consent
-  const cmp = analyzeCMP(htmlContent, beacons, cookies, renderData?.postConsentData?.cookies);
+  const cmp = analyzeCMP(htmlContent, beacons, cookies, renderData?.postConsentData?.cookies || []);
   
   // Determine verdict with validation safeguards
-  const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
+  let { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, !isHtml);
+  
+  // Add INCOMPLETE checks
+  const incompleteChecks = performIncompleteChecks(thirdParties, beacons, cookies, storage, renderData);
+  if (incompleteChecks.hasInconsistencies) {
+    verdict = 'INCOMPLETE';
+    reasons = [...reasons, ...incompleteChecks.reasons];
+  }
 
   return {
     final_url: finalUrl,
@@ -857,14 +864,6 @@ function getDomain(url: string): string {
   }
 }
 
-function getServiceForHost(host: string): string {
-  for (const [pattern, service] of Object.entries(SERVICE_PATTERNS)) {
-    if (host.includes(pattern)) {
-      return service;
-    }
-  }
-  return 'Unknown Service';
-}
 
 function extractUrlParams(url: string): string[] {
   try {
@@ -1047,6 +1046,15 @@ function generateRecommendations(internalJson: InternalAuditJson): Array<{ title
 }
 
 // Enhanced data collection functions for render data
+function getServiceForHost(host: string): string {
+  for (const [pattern, service] of Object.entries(SERVICE_PATTERNS)) {
+    if (host.includes(pattern)) {
+      return service;
+    }
+  }
+  return 'Unknown Service';
+}
+
 function extractThirdPartiesFromRequests(requests: any[], baseDomain: string): Array<{ host: string; service: string }> {
   const hosts = new Set<string>();
   
@@ -1230,6 +1238,51 @@ function extractDataTransfersFromRequests(requests: any[]): Array<{ service: str
   });
   
   return transfers;
+}
+
+function performIncompleteChecks(thirdParties: any[], beacons: any[], cookies: any[], storage: any[], renderData?: any): { hasInconsistencies: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  let hasInconsistencies = false;
+  
+  // Cookie count validation
+  const firstParty = cookies.filter(c => c.party === '1P');
+  const thirdPartyCookies = cookies.filter(c => c.party === '3P');
+  const totalCookies = cookies.length;
+  
+  if (totalCookies !== firstParty.length + thirdPartyCookies.length) {
+    hasInconsistencies = true;
+    reasons.push(`Inconsistent cookie count: total=${totalCookies}, 1P=${firstParty.length}, 3P=${thirdPartyCookies.length}`);
+  }
+  
+  // Third party count validation 
+  const uniqueHosts = new Set(thirdParties.map(tp => tp.host)).size;
+  if (uniqueHosts !== thirdParties.length) {
+    hasInconsistencies = true;
+    reasons.push(`Duplicate third parties detected: ${thirdParties.length} entries vs ${uniqueHosts} unique hosts`);
+  }
+  
+  // Storage validation - if render data exists but storage is empty
+  if (renderData?.postConsentData?.storage && storage.length === 0) {
+    const hasStorageData = Object.keys(renderData.postConsentData.storage.localStorage || {}).length > 0 ||
+                          Object.keys(renderData.postConsentData.storage.sessionStorage || {}).length > 0;
+    if (hasStorageData) {
+      hasInconsistencies = true;
+      reasons.push('Storage data exists in render but not extracted properly');
+    }
+  }
+  
+  // Beacon validation - if requests exist but no tracking detected
+  if (renderData?.postConsentData?.requests?.length > 0 && beacons.length === 0) {
+    const trackingRequests = renderData.postConsentData.requests.filter((req: any) => 
+      /facebook|google|linkedin|pinterest|analytics|tracking/i.test(req.url)
+    );
+    if (trackingRequests.length > 0) {
+      hasInconsistencies = true;
+      reasons.push('Tracking requests detected but no beacons extracted');
+    }
+  }
+  
+  return { hasInconsistencies, reasons };
 }
 
 export function generateEmailDraft(auditData: AuditData, clientEmail: string): string {

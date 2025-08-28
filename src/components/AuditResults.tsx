@@ -147,7 +147,28 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   return (
     <div id="audit-report" className="space-y-8">
-      {/* Header */}
+        {/* INCOMPLETE Banner */}
+        {data._internal?.verdict === 'INCOMPLETE' && (
+          <div className="mb-6 border border-yellow-600 bg-yellow-50 text-yellow-800 rounded p-4 flex gap-2 items-start">
+            <AlertTriangle className="h-5 w-5 text-yellow-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <div className="font-medium mb-1">INCOMPLETE – zber alebo parsing neúplný</div>
+              <div className="text-sm">
+                Dáta môžu byť neúplné kvôli technickým obmedzeniam pri zbere z webstránky.
+                {data._internal?.reasons && data._internal.reasons.length > 0 && (
+                  <div className="mt-2">
+                    <strong>Dôvody:</strong>
+                    <ul className="list-disc list-inside mt-1">
+                      {data._internal.reasons.map((reason, i) => <li key={i}>{reason}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Header */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">

@@ -71,7 +71,7 @@ serve(async (req) => {
 
     // Browserless script for two-phase capture
     const browserlessScript = `
-      module.exports = async ({ page, context }) => {
+      async ({ page, context }) => {
         return new Promise(async (resolve) => {
           const results = {
             cookies_pre: [],
@@ -454,7 +454,6 @@ serve(async (req) => {
         console.log('Render and inspect completed');
         resolve(results);
       });
-      }
     `;
 
     // Call Browserless API with token parameter
