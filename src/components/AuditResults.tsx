@@ -402,9 +402,9 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                           <td className="p-2">{cookie.category}</td>
                           <td className="p-2 text-xs">{cookie.expiration}</td>
                           <td className="p-2">
-                            <Badge className={`text-xs ${cookie.status === 'ok' ? 'bg-green-100 text-green-800 border border-green-200' : cookie.status === 'warning' ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-red-100 text-red-800 border border-red-200'}`}>
-                              {cookie.status.toUpperCase()}
-                            </Badge>
+                             <Badge className={`text-white text-xs ${getStatusBgColor(cookie.status)}`}>
+                               {cookie.status === 'error' ? 'PROBLÉM' : cookie.status.toUpperCase()}
+                             </Badge>
                           </td>
                         </tr>
                       ))}
