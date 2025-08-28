@@ -81,6 +81,13 @@ serve(async (req) => {
         const requests_pre = [];
         const requests_post = [];
 
+        // Set browser locale and user agent for Slovak websites
+        await page.setExtraHTTPHeaders({ 
+          'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8,cs;q=0.7' 
+        });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.emulateTimezone('Europe/Bratislava');
+
         // Set up request interception for pre-consent
         await page.setRequestInterception(true);
         page.on('request', (request) => {
@@ -93,12 +100,12 @@ serve(async (req) => {
           request.continue();
         });
 
-        // Navigate to the page
+        // Navigate to the page with increased timeout
         console.log('Navigating to:', '${url}');
-        await page.goto('${url}', { waitUntil: 'networkidle0', timeout: 30000 });
+        await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 45000 });
         
-        // Wait for initial load
-        await page.waitForTimeout(${delay});
+        // Wait for initial load with extended time
+        await page.waitForTimeout(5000);
 
         // Capture pre-consent state
         console.log('Capturing pre-consent state');
@@ -107,7 +114,7 @@ serve(async (req) => {
         results.cookies_pre = await page.cookies();
         results.requests_pre = [...requests_pre];
 
-        // Try to find and click consent button
+        // Try to find and click consent button in main page and iframes
         console.log('Looking for consent accept button');
         const consentSelectors = [
           'button[data-testid*="accept"]',
@@ -118,41 +125,67 @@ serve(async (req) => {
           'button:contains("Súhlas")',
           'button:contains("Accept")',
           'button:contains("Agree")',
+          'button:contains("Súhlasiť")',
+          'button:contains("Akceptovať")',
           '[data-cookiefirst-action="accept"]',
           '.accept-all',
           '#accept-all',
           '.cookie-accept',
-          '#cookie-accept'
+          '#cookie-accept',
+          '[class*="consent"][class*="accept"]',
+          '[id*="consent"][id*="accept"]'
         ];
 
-        let clicked = false;
-        for (const selector of consentSelectors) {
-          try {
-            if (selector.includes(':contains')) {
-              // Handle text-based selectors
-              const textToFind = selector.match(/contains\\("([^"]+)"\\)/)[1];
-              const buttons = await page.$$('button');
-              for (const button of buttons) {
-                const text = await button.evaluate(el => el.textContent?.trim().toLowerCase());
-                if (text && text.includes(textToFind.toLowerCase())) {
-                  console.log('Found consent button with text:', text);
-                  await button.click();
-                  clicked = true;
-                  break;
+        async function findAndClickInFrame(frameOrPage, frameName = 'main') {
+          console.log(\`Searching for consent buttons in \${frameName}\`);
+          
+          for (const selector of consentSelectors) {
+            try {
+              if (selector.includes(':contains')) {
+                // Handle text-based selectors
+                const textToFind = selector.match(/contains\\("([^"]+)"\\)/)[1];
+                const buttons = await frameOrPage.$$('button');
+                for (const button of buttons) {
+                  const text = await button.evaluate(el => el.textContent?.trim().toLowerCase());
+                  if (text && text.includes(textToFind.toLowerCase())) {
+                    console.log(\`Found consent button in \${frameName} with text: \${text}\`);
+                    await button.click();
+                    return true;
+                  }
+                }
+              } else {
+                const element = await frameOrPage.$(selector);
+                if (element) {
+                  console.log(\`Found consent button in \${frameName} with selector: \${selector}\`);
+                  await element.click();
+                  return true;
                 }
               }
-            } else {
-              const element = await page.$(selector);
-              if (element) {
-                console.log('Found consent button with selector:', selector);
-                await element.click();
-                clicked = true;
-                break;
+            } catch (error) {
+              // Continue to next selector
+            }
+          }
+          return false;
+        }
+
+        let clicked = false;
+        
+        // First try main page
+        clicked = await findAndClickInFrame(page, 'main page');
+        
+        // If not found, try all iframes
+        if (!clicked) {
+          const frames = page.frames();
+          for (const frame of frames) {
+            if (frame !== page.mainFrame()) {
+              try {
+                const frameUrl = frame.url();
+                clicked = await findAndClickInFrame(frame, \`iframe: \${frameUrl}\`);
+                if (clicked) break;
+              } catch (error) {
+                console.log('Error checking frame:', error.message);
               }
             }
-            if (clicked) break;
-          } catch (error) {
-            // Continue to next selector
           }
         }
 
@@ -173,8 +206,8 @@ serve(async (req) => {
             request.continue();
           });
 
-          // Wait for post-consent changes
-          await page.waitForTimeout(3000);
+          // Wait for post-consent changes with extended time
+          await page.waitForTimeout(5000);
           
           // Capture post-consent state
           console.log('Capturing post-consent state');
@@ -193,12 +226,11 @@ serve(async (req) => {
       };
     `;
 
-    // Call Browserless API
-    const browserlessResponse = await fetch('https://chrome.browserless.io/function', {
+    // Call Browserless API with token parameter
+    const browserlessResponse = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${browserlessApiKey}`,
       },
       body: JSON.stringify({
         code: browserlessScript,
@@ -215,7 +247,7 @@ serve(async (req) => {
 
     if (!browserlessResponse.ok) {
       const errorText = await browserlessResponse.text();
-      console.error('Browserless API error:', errorText);
+      console.error(`Browserless API error - Status: ${browserlessResponse.status}, Response: ${errorText}`);
       throw new Error(`Browserless API error: ${browserlessResponse.status} - ${errorText}`);
     }
 
