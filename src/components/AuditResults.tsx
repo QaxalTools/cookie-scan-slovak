@@ -134,14 +134,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   <LiveBadge />
                 )}
               </CardTitle>
-              <p className="text-muted-foreground mt-2">
-                URL: <span className="font-mono text-sm">{data.url}</span>
-              </p>
-              {data.hasRedirect && (
-                <p className="text-muted-foreground text-sm">
-                  Final URL: <span className="font-mono">{data.finalUrl}</span>
-                </p>
-              )}
             </div>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={handleDownloadJSON}>
