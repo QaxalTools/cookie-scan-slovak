@@ -409,7 +409,9 @@ export default async ({ page, context }) => {
 
     return new Response(JSON.stringify({
       success: true,
-      data: renderData
+      data: renderData,
+      trace_id: crypto.randomUUID(),
+      timestamp: new Date().toISOString()
     }), {
       headers: { 
         'Content-Type': 'application/json',
@@ -418,11 +420,24 @@ export default async ({ page, context }) => {
     });
 
   } catch (error) {
-    console.error('❌ Error in render-and-inspect:', error.message);
+    const traceId = crypto.randomUUID();
+    const timestamp = new Date().toISOString();
+    
+    console.error(`❌ Error in render-and-inspect [${traceId}]:`, error.message);
+    console.error(`❌ Stack trace [${traceId}]:`, error.stack);
+    
+    // Get URL from outer scope properly
+    let requestUrl = 'unknown';
+    try {
+      const { url: parsedUrl } = await req.json();
+      requestUrl = parsedUrl || 'unknown';
+    } catch (parseError) {
+      console.error('❌ Failed to parse URL from request:', parseError.message);
+    }
     
     // Return a basic fallback response instead of failing completely
     const fallbackData = {
-      finalUrl: url || 'unknown',
+      finalUrl: requestUrl,
       cookies_pre: [],
       cookies_post: [],
       requests_pre: [],
@@ -438,13 +453,17 @@ export default async ({ page, context }) => {
       cmp_cookie_name: '',
       cmp_cookie_value: '',
       consent_clicked: false,
-      _error: error.message
+      _error: error.message,
+      _trace_id: traceId,
+      _timestamp: timestamp
     };
 
     return new Response(JSON.stringify({
       success: false,
       data: fallbackData,
-      error: error.message
+      error: error.message,
+      trace_id: traceId,
+      timestamp: timestamp
     }), {
       headers: { 
         'Content-Type': 'application/json',

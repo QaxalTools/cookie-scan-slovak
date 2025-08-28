@@ -20,6 +20,8 @@ interface AuditResultsProps {
 }
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  // Check if we're in fallback mode
+  const isFallbackMode = data.managementSummary.data_source?.includes('Záložný režim');
   // Consistency checks
   const performConsistencyChecks = () => {
     const checks = [];
@@ -360,6 +362,21 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-6 p-4">
+      
+      {/* Fallback mode warning */}
+      {isFallbackMode && (
+        <Card className="border-orange-200 bg-orange-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-orange-700">
+              <AlertTriangle className="h-5 w-5" />
+              <span className="font-medium">Debug: Fallback mode aktivovaný</span>
+            </div>
+            <p className="text-sm text-orange-600 mt-2">
+              {data.managementSummary.data_source}
+            </p>
+          </CardContent>
+        </Card>
+      )}
       
       {/* Show consistency issues banner if any */}
       {consistencyIssues.length > 0 && (

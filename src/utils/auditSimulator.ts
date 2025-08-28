@@ -119,30 +119,54 @@ export async function performLiveAudit(
     // For URL input, use Edge Function for real analysis
     // Normalize URL to ensure https://
     const normalizedUrl = input.startsWith('http') ? input : `https://${input}`;
-    console.log('🌐 Calling live analysis for URL:', normalizedUrl);
+    console.log('🌐 performLiveAudit: Starting live analysis for URL:', normalizedUrl);
     await updateProgress(0);
     await updateProgress(1);
 
+    console.log('🌐 performLiveAudit: Invoking render-and-inspect edge function...');
     const { data, error } = await supabase.functions.invoke('render-and-inspect', {
       body: { url: normalizedUrl }
     });
 
     await updateProgress(3);
+    
+    console.log('🌐 performLiveAudit: Edge function response received:', {
+      hasData: !!data,
+      hasError: !!error,
+      success: data?.success,
+      errorMessage: error?.message || data?.error,
+      traceId: data?.trace_id,
+      timestamp: data?.timestamp
+    });
 
     if (error) {
-      console.error('❌ Edge function error:', error);
+      console.error('❌ performLiveAudit: Edge function error:', error);
       throw new Error(`Analysis failed: ${error.message}`);
     }
 
     if (!data?.success) {
-      console.warn('⚠️ Edge function returned non-success, using fallback');
+      console.warn('⚠️ performLiveAudit: Edge function returned non-success, using fallback. Error:', data?.error);
       // Fall back to basic analysis
       const internalJson = await generateInternalAuditJson(input, false, updateProgress);
       await updateProgress(7);
-      return convertToDisplayFormat(internalJson, input);
+      const fallbackData = convertToDisplayFormat(internalJson, input);
+      fallbackData.managementSummary.data_source = `Záložný režim (Edge function error: ${data?.error || 'Unknown error'})`;
+      return fallbackData;
     }
 
-    console.log('✅ Live data received from Edge Function');
+    console.log('✅ performLiveAudit: Live data received from Edge Function');
+    if (data.data) {
+      console.log('📊 performLiveAudit: Data stats:', {
+        finalUrl: data.data.finalUrl,
+        cookiesPre: data.data.cookies_pre?.length || 0,
+        cookiesPost: data.data.cookies_post?.length || 0,
+        requestsPre: data.data.requests_pre?.length || 0,
+        requestsPost: data.data.requests_post?.length || 0,
+        cmpDetected: data.data.cmp_detected,
+        consentClicked: data.data.consent_clicked,
+        hasError: !!data.data._error
+      });
+    }
     await updateProgress(5);
 
     // Transform live data to internal format
@@ -163,7 +187,7 @@ export async function performLiveAudit(
     return auditData;
 
   } catch (error) {
-    console.error('❌ Live analysis failed, falling back to basic analysis:', error);
+    console.error('❌ performLiveAudit: Live analysis failed, falling back to basic analysis:', error);
     
     // Fallback to basic simulation
     await updateProgress(4);
@@ -173,6 +197,8 @@ export async function performLiveAudit(
     // Add error info to audit data
     const auditData = convertToDisplayFormat(internalJson, input);
     auditData.managementSummary.data_source = `Záložný režim (Live analýza zlyhala: ${error.message})`;
+    
+    console.log('🔄 performLiveAudit: Fallback analysis completed, verdict:', auditData.managementSummary.verdict);
     
     return auditData;
   }
