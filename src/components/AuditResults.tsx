@@ -20,6 +20,104 @@ interface AuditResultsProps {
 }
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  const handleDownloadPDF = () => {
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>GDPR Audit Report</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+              h1, h2, h3 { color: #333; }
+              .header { text-align: center; margin-bottom: 30px; }
+              .section { margin-bottom: 25px; }
+              table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+              th { background-color: #f5f5f5; }
+              .status-ok { color: green; font-weight: bold; }
+              .status-warning { color: orange; font-weight: bold; }
+              .status-error { color: red; font-weight: bold; }
+              @media print { body { margin: 0; } }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>GDPR Cookie Audit Report</h1>
+              <p>Dátum: ${new Date().toLocaleDateString('sk-SK')}</p>
+            </div>
+            
+            <div class="section">
+              <h2>A) Manažérsky sumár</h2>
+              <p><strong>Verdikt:</strong> ${data.managementSummary.verdict.toUpperCase()}</p>
+              <p><strong>Celkové hodnotenie:</strong> ${data.managementSummary.overall}</p>
+              <p><strong>Riziká:</strong> ${data.managementSummary.risks}</p>
+              ${data.managementSummary.data_source ? `<p><strong>Zdroj dát:</strong> ${data.managementSummary.data_source}</p>` : ''}
+            </div>
+
+            <div class="section">
+              <h2>B) Detailná analýza</h2>
+              
+              <h3>1. HTTPS zabezpečenie</h3>
+              <p class="status-${data.detailedAnalysis.https.status}">${data.detailedAnalysis.https.comment}</p>
+              
+              <h3>2. Tretie strany (${data.detailedAnalysis.thirdParties.total})</h3>
+              <table>
+                <tr><th>Doména</th><th>Počet požiadaviek</th></tr>
+                ${data.detailedAnalysis.thirdParties.list.map(party => 
+                  `<tr><td>${party.domain}</td><td>${party.requests}</td></tr>`
+                ).join('')}
+              </table>
+              
+              <h3>3. Trackery a web-beacony</h3>
+              <table>
+                <tr><th>Služba</th><th>Host</th><th>Dôkaz</th><th>Stav</th></tr>
+                ${data.detailedAnalysis.trackers.map(tracker =>
+                  `<tr><td>${tracker.service}</td><td>${tracker.host}</td><td>${tracker.evidence}</td><td class="status-${tracker.status}">${tracker.status.toUpperCase()}</td></tr>`
+                ).join('')}
+              </table>
+              
+              <h3>4. Cookies (${data.detailedAnalysis.cookies.total})</h3>
+              <table>
+                <tr><th>Názov</th><th>Typ</th><th>Kategória</th><th>Expirácia</th><th>Stav</th></tr>
+                ${data.detailedAnalysis.cookies.details.map(cookie =>
+                  `<tr><td>${cookie.name}</td><td>${cookie.type === 'first-party' ? '1P' : '3P'}</td><td>${cookie.category}</td><td>${cookie.expiration}</td><td class="status-${cookie.status}">${cookie.status.toUpperCase()}</td></tr>`
+                ).join('')}
+              </table>
+              
+              <h3>6. Consent Management</h3>
+              <p><strong>Consent nástroj:</strong> ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}</p>
+              <p><strong>Trackery pred súhlasom:</strong> ${data.detailedAnalysis.consentManagement.trackersBeforeConsent}</p>
+              <p><strong>Dôkazy:</strong> ${data.detailedAnalysis.consentManagement.evidence}</p>
+              
+              <h3>7. Právne zhrnutie</h3>
+              <p>${data.detailedAnalysis.legalSummary}</p>
+            </div>
+
+            <div class="section">
+              <h2>C) OK vs. Rizikové</h2>
+              <table>
+                <tr><th>Oblasť</th><th>Stav</th><th>Komentár</th></tr>
+                ${data.riskTable.map(risk =>
+                  `<tr><td>${risk.area}</td><td class="status-${risk.status}">${risk.status.toUpperCase()}</td><td>${risk.comment}</td></tr>`
+                ).join('')}
+              </table>
+            </div>
+
+            <div class="section">
+              <h2>D) Odporúčania</h2>
+              ${data.recommendations.map(rec =>
+                `<div style="margin-bottom: 15px;"><h4>${rec.title}</h4><p>${rec.description}</p></div>`
+              ).join('')}
+            </div>
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.print();
+    }
+  };
+
   const getStatusIcon = (status: 'ok' | 'warning' | 'error') => {
     switch (status) {
       case 'ok':
@@ -294,7 +392,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
           <Mail className="h-4 w-4" />
           Vygenerovať email pre klienta
         </Button>
-        <Button variant="outline" className="flex items-center gap-2">
+        <Button onClick={handleDownloadPDF} variant="outline" className="flex items-center gap-2">
           <Download className="h-4 w-4" />
           Stiahnuť PDF správu
         </Button>
