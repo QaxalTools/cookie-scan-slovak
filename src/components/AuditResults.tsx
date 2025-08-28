@@ -167,34 +167,128 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
           <CardTitle>A) Manažérsky sumár</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold">Verdikt:</span>
-              <Badge className={`text-white ${getVerdictColor(data.managementSummary.verdict)}`}>
-                {data.managementSummary.verdict.toUpperCase()}
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-semibold">Rizikové skóre:</span>
-              <Badge className={`text-white ${getRiskScoreColor(data.managementSummary.riskScore)}`}>
-                {data.managementSummary.riskScore}/100
-              </Badge>
-            </div>
-          </div>
-          <div>
-            <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
-            <p className="text-sm text-muted-foreground">{data.managementSummary.overall}</p>
-          </div>
-          <div>
-            <h4 className="font-semibold mb-2">Riziká</h4>
-            <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
-          </div>
-          {data.managementSummary.data_source && (
-            <div>
-              <h4 className="font-semibold mb-2">Zdroj dát</h4>
-              <p className="text-sm text-muted-foreground">{data.managementSummary.data_source}</p>
-            </div>
-          )}
+          {(() => {
+            // Calculate risk scores (0-5) for management summary
+            const calculateRiskScores = () => {
+              const scores = [];
+              
+              // HTTPS
+              const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
+                               data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
+              let httpsNote = data.detailedAnalysis.https.status === 'ok' ? 'SSL certifikát je platný a stránka je bezpečne šifrovaná' :
+                             data.detailedAnalysis.https.status === 'warning' ? 'SSL certifikát má problémy - overenie zlyhalo alebo exspiruje' :
+                             'Stránka nepoužíva HTTPS šifrovanie - KRITICKÝ bezpečnostný problém';
+              scores.push({ area: 'HTTPS', score: httpsScore, note: httpsNote });
+              
+              // CMP
+              const hasConsentTool = data.detailedAnalysis.consentManagement.hasConsentTool;
+              const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent;
+              const cmpScore = !hasConsentTool ? 5 : (preConsentTrackers > 0 ? 4 : 1);
+              let cmpNote = !hasConsentTool ? 'Chýba Consent Management Platform - porušenie GDPR článku 7' :
+                           (preConsentTrackers > 0 ? `CMP implementované, ale ${preConsentTrackers} trackerov začína pred súhlasom - porušenie GDPR` :
+                           'CMP správne implementované a kontroluje súhlas pred načítaním trackerov');
+              scores.push({ area: 'CMP', score: cmpScore, note: cmpNote });
+              
+              // Cookies
+              const hasMarketingCookies = data.detailedAnalysis.cookies.details.some(c => c.category === 'marketingové');
+              const cookiesScore = hasMarketingCookies ? 4 : 1;
+              let cookiesNote = hasMarketingCookies ? 'Detegované marketingové cookies - vyžadujú výslovný súhlas podľa GDPR článku 6' :
+                               'Iba nevyhnutné cookies - v súlade s ePrivacy direktívou';
+              scores.push({ area: 'Cookies', score: cookiesScore, note: cookiesNote });
+              
+              // Storage
+              const hasPreConsentStorage = data.detailedAnalysis.storage?.some(s => s.createdPreConsent) || false;
+              const storageScore = hasPreConsentStorage ? 5 : 1;
+              let storageNote = hasPreConsentStorage ? 'localStorage/sessionStorage sa zapisuje pred súhlasom - porušenie GDPR' :
+                               'Lokálne úložisko sa nepoužíva bez súhlasu - v súlade s GDPR';
+              scores.push({ area: 'Storage', score: storageScore, note: storageNote });
+              
+              // Trackers
+              const trackerCount = data.detailedAnalysis.trackers.length;
+              const trackersScore = trackerCount === 0 ? 0 : (trackerCount <= 2 ? 3 : 5);
+              let trackersNote = trackerCount === 0 ? 'Žiadne trackery detegované - výborný súlad s ochranou súkromia' :
+                                (trackerCount <= 2 ? `${trackerCount} trackery detegované - stredné riziko pre súkromie návštevníkov` :
+                                `${trackerCount} trackerov detegovaných - vysoké riziko pre súkromie a potenciálne GDPR pokuty`);
+              scores.push({ area: 'Trackery', score: trackersScore, note: trackersNote });
+              
+              // UX Banner (technical assessment only)
+              const hasCmp = data.detailedAnalysis.consentManagement.hasConsentTool;
+              const uxScore = hasCmp ? 1 : 3;
+              let uxNote = hasCmp ? 'Technická kontrola cookie lišty prebehla úspešne' :
+                          'Chýba cookie lišta - porušenie transparency požiadaviek GDPR článku 12';
+              scores.push({ area: 'UX lišta', score: uxScore, note: uxNote });
+              
+              return scores;
+            };
+
+            const riskScores = calculateRiskScores();
+            const averageScore = riskScores.reduce((sum, s) => sum + s.score, 0) / riskScores.length;
+            const overallRisk = averageScore <= 1.5 ? 'NÍZKE' : (averageScore <= 3 ? 'STREDNÉ' : 'VYSOKÉ');
+            const overallRiskColor = averageScore <= 1.5 ? 'bg-green-600' : (averageScore <= 3 ? 'bg-orange-500' : 'bg-red-600');
+            const riskScoreOutOf100 = Math.round((averageScore / 5) * 100);
+
+            return (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold">Verdikt:</span>
+                    <Badge className={`text-white ${getVerdictColor(data.managementSummary.verdict)}`}>
+                      {data.managementSummary.verdict.toUpperCase()}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold">Celkové riziko:</span>
+                    <Badge className={`text-white ${overallRiskColor}`}>
+                      {overallRisk} ({riskScoreOutOf100}/100)
+                    </Badge>
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold mb-3">Rizikový scoring (0–5)</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-2">Oblasť</th>
+                          <th className="text-left p-2">Skóre</th>
+                          <th className="text-left p-2">Vysvetlenie</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {riskScores.map((score, index) => (
+                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                            <td className="p-2 font-medium">{score.area}</td>
+                            <td className="p-2">
+                              <Badge className={`text-white ${score.score <= 1 ? 'bg-green-600' : score.score <= 3 ? 'bg-orange-500' : 'bg-red-600'}`}>
+                                {score.score}/5
+                              </Badge>
+                            </td>
+                            <td className="p-2 text-muted-foreground text-xs">{score.note}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
+                  <p className="text-sm text-muted-foreground">{data.managementSummary.overall}</p>
+                </div>
+                <div>
+                  <h4 className="font-semibold mb-2">Riziká</h4>
+                  <p className="text-sm text-muted-foreground">{data.managementSummary.risks}</p>
+                </div>
+                {data.managementSummary.data_source && (
+                  <div>
+                    <h4 className="font-semibold mb-2">Zdroj dát</h4>
+                    <p className="text-sm text-muted-foreground">{data.managementSummary.data_source}</p>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </CardContent>
       </Card>
 
@@ -612,96 +706,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             </Card>
           </div>
 
-          {/* 10. Risk Scoring */}
-          {(() => {
-            // Calculate risk scores (0-5)
-            const calculateRiskScores = () => {
-              const scores = [];
-              
-              // HTTPS
-              const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
-                               data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
-              scores.push({ area: 'HTTPS', score: httpsScore, note: data.detailedAnalysis.https.comment });
-              
-              // CMP
-              const hasConsentTool = data.detailedAnalysis.consentManagement.hasConsentTool;
-              const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent;
-              const cmpScore = !hasConsentTool ? 5 : (preConsentTrackers > 0 ? 4 : 1);
-              scores.push({ area: 'CMP', score: cmpScore, note: hasConsentTool ? 'Implementované' : 'Chýba' });
-              
-              // Cookies
-              const hasMarketingCookies = data.detailedAnalysis.cookies.details.some(c => c.category === 'marketingové');
-              const cookiesScore = hasMarketingCookies ? 4 : 1;
-              scores.push({ area: 'Cookies', score: cookiesScore, note: hasMarketingCookies ? 'Marketingové cookies prítomné' : 'Iba nevyhnutné' });
-              
-              // Storage
-              const hasPreConsentStorage = data.detailedAnalysis.storage?.some(s => s.createdPreConsent) || false;
-              const storageScore = hasPreConsentStorage ? 5 : 1;
-              scores.push({ area: 'Storage', score: storageScore, note: hasPreConsentStorage ? 'Pred-súhlasové storage' : 'OK' });
-              
-              // Trackers
-              const trackerCount = data.detailedAnalysis.trackers.length;
-              const trackersScore = trackerCount === 0 ? 0 : (trackerCount <= 2 ? 3 : 5);
-              scores.push({ area: 'Trackery', score: trackersScore, note: `${trackerCount} detegovaných` });
-              
-              // UX Banner (technical assessment only)
-              const hasCmp = data.detailedAnalysis.consentManagement.hasConsentTool;
-              const uxScore = hasCmp ? 1 : 3;
-              scores.push({ area: 'UX lišta', score: uxScore, note: hasCmp ? 'Technická kontrola' : 'Chýba CMP' });
-              
-              return scores;
-            };
-
-            const riskScores = calculateRiskScores();
-            const averageScore = riskScores.reduce((sum, s) => sum + s.score, 0) / riskScores.length;
-            const overallRisk = averageScore <= 1.5 ? 'NÍZKE' : (averageScore <= 3 ? 'STREDNÉ' : 'VYSOKÉ');
-            const overallRiskColor = averageScore <= 1.5 ? 'bg-green-600' : (averageScore <= 3 ? 'bg-orange-500' : 'bg-red-600');
-
-            return (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-lg font-semibold">
-                  <FileText className="h-5 w-5" />
-                  10. Rizikový scoring (0–5)
-                </div>
-                
-                <Card>
-                  <CardContent className="pt-4">
-                    <div className="overflow-x-auto mb-4">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b">
-                            <th className="text-left p-2">Oblasť</th>
-                            <th className="text-left p-2">Skóre (0–5)</th>
-                            <th className="text-left p-2">Poznámka</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {riskScores.map((score, index) => (
-                            <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
-                              <td className="p-2 font-medium">{score.area}</td>
-                              <td className="p-2">
-                                <Badge className={`text-white ${score.score <= 1 ? 'bg-green-600' : score.score <= 3 ? 'bg-orange-500' : 'bg-red-600'}`}>
-                                  {score.score}/5
-                                </Badge>
-                              </td>
-                              <td className="p-2 text-muted-foreground">{score.note}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    
-                    <div className="flex items-center gap-2 pt-2 border-t">
-                      <span className="font-semibold">Celkové riziko:</span>
-                      <Badge className={`text-white ${overallRiskColor}`}>
-                        {overallRisk} ({averageScore.toFixed(1)}/5)
-                      </Badge>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            );
-          })()}
         </CardContent>
       </Card>
 
