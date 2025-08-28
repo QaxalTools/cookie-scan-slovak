@@ -50,11 +50,28 @@ serve(async (req) => {
 
     // Check Browserless health
     console.log('🏥 Checking Browserless health...');
-    const healthResponse = await fetch(`https://chrome.browserless.io/health?token=${browserlessToken}`);
-    if (!healthResponse.ok) {
-      throw new Error(`Browserless health check failed: ${healthResponse.status}`);
+    let healthCheckPassed = false;
+    let healthStatus = 'unknown';
+    let healthStatusCode = 0;
+    
+    try {
+      const healthResponse = await fetch(`https://chrome.browserless.io/health?token=${browserlessToken}`);
+      healthStatusCode = healthResponse.status;
+      
+      if (healthResponse.ok) {
+        healthCheckPassed = true;
+        healthStatus = 'ok';
+        console.log('✅ Browserless health check passed');
+      } else {
+        healthStatus = 'failed';
+        console.log(`⚠️ Browserless health check failed with status ${healthResponse.status}, but continuing to WebSocket attempt...`);
+        await logToDatabase('warn', `Browserless health check failed: ${healthResponse.status}`, { status: healthResponse.status });
+      }
+    } catch (error) {
+      healthStatus = 'error';
+      console.log(`⚠️ Browserless health check error: ${error.message}, but continuing to WebSocket attempt...`);
+      await logToDatabase('warn', `Browserless health check error: ${error.message}`);
     }
-    console.log('✅ Browserless health check passed');
 
     // Main data collection object
     const browserlessData: any = {
@@ -197,7 +214,20 @@ serve(async (req) => {
 
         wsSocket.onerror = (error) => {
           clearTimeout(timeout);
-          reject(new Error(`WebSocket connection failed: ${error}`));
+          
+          // Check if this is an authentication error
+          if (error.toString().includes('401') || error.toString().includes('403')) {
+            reject(new Error('Invalid Browserless token - please check your BROWSERLESS_TOKEN configuration'));
+          } else {
+            reject(new Error(`WebSocket connection failed: ${error}`));
+          }
+        };
+        
+        wsSocket.onclose = (event) => {
+          if (event.code === 1008 || event.code === 1006) {
+            clearTimeout(timeout);
+            reject(new Error('Invalid Browserless token - authentication failed'));
+          }
         };
       });
 
@@ -820,6 +850,8 @@ serve(async (req) => {
       success: true,
       trace_id: traceId,
       execution_time_ms: Date.now() - startTime,
+      bl_status_code: healthStatusCode,
+      bl_health_status: healthStatus,
       data: browserlessData
     }), {
       status: 200,
@@ -849,10 +881,17 @@ serve(async (req) => {
       console.log('Failed to log error to database:', logError.message);
     }
 
+    // Determine if this is a Browserless token error
+    const isBrowserlessTokenError = error.message.includes('Invalid Browserless token') || 
+                                   error.message.includes('authentication failed') ||
+                                   error.message.includes('Browserless health check failed');
+    
     return new Response(JSON.stringify({
       success: false,
       trace_id: traceId,
       execution_time_ms: Date.now() - startTime,
+      bl_status_code: isBrowserlessTokenError ? (healthStatusCode || 403) : 0,
+      bl_health_status: isBrowserlessTokenError ? 'token_error' : 'unknown',
       error: error.message
     }), {
       status: 500,

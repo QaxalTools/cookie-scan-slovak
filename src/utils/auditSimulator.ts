@@ -164,6 +164,13 @@ export async function performLiveAudit(
         });
       }
       
+      // Handle specific Browserless token errors
+      if (data?.bl_status_code === 401 || data?.bl_status_code === 403) {
+        throw new Error('Neplatný Browserless token - kontaktujte administrátora pre aktualizáciu konfigurácie');
+      } else if (data?.bl_health_status === 'token_error') {
+        throw new Error('Chyba autentifikácie Browserless služby - skontrolujte nastavenia tokenu');
+      }
+      
       // Fall back to basic analysis
       const internalJson = await generateInternalAuditJson(input, false, updateProgress);
       await updateProgress(7);
