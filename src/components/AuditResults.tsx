@@ -538,33 +538,61 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               return isMarketingOrAnalytical && days !== null && days > 365;
             });
 
-            return longRetentionCookies.length > 0 && (
+            return (
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-lg font-semibold">
                   <AlertTriangle className="h-5 w-5" />
                   8. Retenčné doby cookies
                 </div>
                 
-                <div className="border border-orange-500 bg-orange-50 text-orange-800 rounded p-4 flex gap-2 items-start">
-                  <AlertTriangle className="h-5 w-5 text-orange-600 mt-0.5 flex-shrink-0" />
-                  <div className="space-y-2">
-                    <div>
-                      <strong>Poznámka k retenčným dobám:</strong> {longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok. Odporúčame skrátiť na max. 12 mesiacov.
+                <Card>
+                  <CardContent className="pt-4">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b">
+                            <th className="text-left p-2">Názov</th>
+                            <th className="text-left p-2">Doména</th>
+                            <th className="text-left p-2">Kategória</th>
+                            <th className="text-left p-2">Retenčná doba</th>
+                            <th className="text-left p-2">Stav</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {data.detailedAnalysis.cookies.details.map((cookie, index) => {
+                            const days = parseDays(cookie.expiration);
+                            const isLongRetention = (cookie.category === 'marketingové' || cookie.category === 'analytické') && days !== null && days > 365;
+                            
+                            return (
+                              <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                                <td className="p-2 font-mono text-xs">{cookie.name}</td>
+                                <td className="p-2 font-mono text-xs">{cookie.domain}</td>
+                                <td className="p-2">{cookie.category}</td>
+                                <td className="p-2 text-xs">{cookie.expiration}</td>
+                                <td className="p-2">
+                                  <Badge className={`text-white text-xs ${isLongRetention ? 'bg-orange-500' : 'bg-green-600'}`}>
+                                    {isLongRetention ? 'DLHÁ RETENCIE' : 'OK'}
+                                  </Badge>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
-                    {longRetentionCookies.length <= 5 && (
-                      <div className="text-sm">
-                        <div className="font-medium mb-1">Cookies s dlhou retenciou:</div>
-                        <ul className="list-disc list-inside space-y-1">
-                          {longRetentionCookies.map((cookie, index) => (
-                            <li key={index} className="font-mono text-xs">
-                              {cookie.name} ({cookie.domain}) - {cookie.expiration}
-                            </li>
-                          ))}
-                        </ul>
+                    
+                    {longRetentionCookies.length > 0 && (
+                      <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="h-4 w-4 text-orange-600 mt-0.5 flex-shrink-0" />
+                          <div className="text-sm text-orange-800">
+                            <strong>Poznámka:</strong> {longRetentionCookies.length} marketingových/analytických cookies má retenciu nad 1 rok. Odporúčame skrátiť na max. 12 mesiacov podľa GDPR.
+                          </div>
+                        </div>
                       </div>
                     )}
-                  </div>
-                </div>
+                  </CardContent>
+                </Card>
               </div>
             );
           })()}
