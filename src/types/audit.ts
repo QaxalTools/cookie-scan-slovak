@@ -52,6 +52,7 @@ export interface AuditData {
     verdict: 'súlad' | 'čiastočný súlad' | 'nesúlad' | 'neúplné dáta';
     overall: string;
     risks: string;
+    riskScore: number; // 0-100
     data_source?: string;
   };
 
@@ -165,6 +166,6 @@ export interface ConsentUxResult {
       hasDetailedSettings: boolean;
       uxAssessment: 'transparent' | 'unbalanced' | 'missing';
     };
-    confidence?: number;
   };
+  confidence?: number;
 }

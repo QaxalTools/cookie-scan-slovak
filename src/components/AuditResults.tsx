@@ -2,7 +2,6 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SimulationBadge } from '@/components/SimulationBadge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { 
   CheckCircle, 
   XCircle, 
@@ -12,41 +11,66 @@ import {
   Eye, 
   Mail,
   Download,
-  Camera
+  Camera,
+  Users,
+  Database,
+  Lock,
+  FileText,
+  Monitor,
+  Scale
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
-import { useState, useCallback } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { 
-  autoCaptureConsent, 
-  checkEdgeFunctionAvailable, 
-  getStoredApiKey, 
-  setStoredApiKey 
-} from '@/utils/consentService';
-import { useToast } from '@/hooks/use-toast';
-import { useEffect } from 'react';
 
 interface AuditResultsProps {
   data: AuditData;
   onGenerateEmail: () => void;
 }
 
+// Helper function to get consistent status colors
+const getStatusColor = (status: 'ok' | 'warning' | 'error'): string => {
+  switch (status) {
+    case 'ok': return 'text-green-600';
+    case 'warning': return 'text-orange-600';
+    case 'error': return 'text-red-600';
+    default: return 'text-gray-600';
+  }
+};
+
+const getStatusBgColor = (status: 'ok' | 'warning' | 'error'): string => {
+  switch (status) {
+    case 'ok': return 'bg-green-600';
+    case 'warning': return 'bg-orange-500';
+    case 'error': return 'bg-red-600';
+    default: return 'bg-gray-600';
+  }
+};
+
+const getStatusIcon = (status: 'ok' | 'warning' | 'error') => {
+  switch (status) {
+    case 'ok': return <CheckCircle className="h-4 w-4" />;
+    case 'warning': return <AlertTriangle className="h-4 w-4" />;
+    case 'error': return <XCircle className="h-4 w-4" />;
+    default: return <AlertTriangle className="h-4 w-4" />;
+  }
+};
+
+const getRiskScoreColor = (score: number): string => {
+  if (score <= 30) return 'bg-green-600';
+  if (score <= 60) return 'bg-orange-500';
+  return 'bg-red-600';
+};
+
+const getVerdictColor = (verdict: string): string => {
+  switch (verdict) {
+    case 'súlad': return 'bg-green-600';
+    case 'čiastočný súlad': return 'bg-orange-500';
+    case 'nesúlad': return 'bg-red-600';
+    default: return 'bg-gray-500';
+  }
+};
+
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
-  // State for manual capture dialog
-  const [showCaptureDialog, setShowCaptureDialog] = useState(false);
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [edgeFunctionAvailable, setEdgeFunctionAvailable] = useState<boolean | null>(null);
-  const { toast } = useToast();
-
-  useEffect(() => {
-    // Check edge function availability for manual capture button
-    const initializeCapture = async () => {
-      const isEdgeAvailable = await checkEdgeFunctionAvailable();
-      setEdgeFunctionAvailable(isEdgeAvailable);
-    };
-    initializeCapture();
-  }, []);
-
   // Consistency checks
   const performConsistencyChecks = () => {
     const checks = [];
@@ -86,41 +110,6 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
-
-  const handleSmartCapture = useCallback(async () => {
-    setIsCapturing(true);
-    
-    try {
-      const result = await autoCaptureConsent(data.url, {
-        delay: 3000,
-        viewport: { width: 1920, height: 1080 },
-        locale: 'sk-SK',
-      });
-      
-      if (result.success) {
-        toast({
-          title: "Capture Complete",
-          description: `Screenshot captured (${result.used === 'edge' ? 'secure mode' : 'client mode'})`,
-        });
-        setShowCaptureDialog(false);
-      } else {
-        toast({
-          title: "Capture Failed",
-          description: result.error || 'Unknown error',
-          variant: "destructive"
-        });
-      }
-    } catch (error) {
-      console.error('Capture error:', error);
-      toast({
-        title: "Capture Failed",
-        description: "Failed to capture banner",
-        variant: "destructive"
-      });
-    } finally {
-      setIsCapturing(false);
-    }
-  }, [data.url, toast]);
 
   return (
     <div className="space-y-8">
@@ -178,14 +167,19 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
           <CardTitle>A) Manažérsky sumár</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold">Verdikt:</span>
-            <Badge variant={
-              data.managementSummary.verdict === 'súlad' ? 'default' :
-              data.managementSummary.verdict === 'čiastočný súlad' ? 'secondary' : 'destructive'
-            }>
-              {data.managementSummary.verdict.toUpperCase()}
-            </Badge>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold">Verdikt:</span>
+              <Badge className={`text-white ${getVerdictColor(data.managementSummary.verdict)}`}>
+                {data.managementSummary.verdict.toUpperCase()}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold">Rizikové skóre:</span>
+              <Badge className={`text-white ${getRiskScoreColor(data.managementSummary.riskScore)}`}>
+                {data.managementSummary.riskScore}/100
+              </Badge>
+            </div>
           </div>
           <div>
             <h4 className="font-semibold mb-2">Celkové hodnotenie</h4>
@@ -209,369 +203,380 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         <CardHeader>
           <CardTitle>B) Detailná analýza</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent className="space-y-8">
           {/* 1. HTTPS */}
-          <div>
-            <h3 className="font-semibold mb-2">1. HTTPS zabezpečenie</h3>
-            <div className="flex items-center gap-2">
-              <Badge variant={data.detailedAnalysis.https.status === 'ok' ? 'default' : 'destructive'}>
-                {data.detailedAnalysis.https.status === 'ok' ? 'OK' : 'PROBLEM'}
-              </Badge>
-              <span className="text-sm text-muted-foreground">{data.detailedAnalysis.https.comment}</span>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Lock className="h-5 w-5" />
+              1. HTTPS zabezpečenie
             </div>
+            <Card className="border-l-4 border-l-transparent" style={{borderLeftColor: data.detailedAnalysis.https.status === 'ok' ? '#16a34a' : '#dc2626'}}>
+              <CardContent className="pt-4">
+                <div className="flex items-center gap-2">
+                  <div className={getStatusColor(data.detailedAnalysis.https.status)}>
+                    {getStatusIcon(data.detailedAnalysis.https.status)}
+                  </div>
+                  <Badge className={`text-white ${getStatusBgColor(data.detailedAnalysis.https.status)}`}>
+                    {data.detailedAnalysis.https.status === 'ok' ? 'OK' : 'PROBLÉM'}
+                  </Badge>
+                  <span className="text-sm text-muted-foreground">{data.detailedAnalysis.https.comment}</span>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* 2. Third Parties */}
-          <div>
-            <h3 className="font-semibold mb-2">2. Tretie strany ({data.detailedAnalysis.thirdParties.total})</h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left p-2">Doména</th>
-                    <th className="text-left p-2">Počet požiadaviek</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.detailedAnalysis.thirdParties.list.map((party, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="p-2 font-mono text-xs">{party.domain}</td>
-                      <td className="p-2">{party.requests}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Users className="h-5 w-5" />
+              2. Tretie strany
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="flex items-center gap-2">
+                    <Users className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-medium">Celkovo</span>
+                  </div>
+                  <div className="text-2xl font-bold">{data.detailedAnalysis.thirdParties.total}</div>
+                </CardContent>
+              </Card>
+            </div>
+            <Card>
+              <CardContent className="pt-4">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left p-2">Doména</th>
+                        <th className="text-left p-2">Počet požiadaviek</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.detailedAnalysis.thirdParties.list.map((party, index) => (
+                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                          <td className="p-2 font-mono text-xs">{party.domain}</td>
+                          <td className="p-2">{party.requests}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* 3. Trackers */}
-          <div>
-            <h3 className="font-semibold mb-2">3. Trackery a web-beacony</h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left p-2">Služba</th>
-                    <th className="text-left p-2">Host</th>
-                    <th className="text-left p-2">Dôkaz</th>
-                    <th className="text-left p-2">Pred súhlasom</th>
-                    <th className="text-left p-2">Stav</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.detailedAnalysis.trackers.map((tracker, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="p-2">{tracker.service}</td>
-                      <td className="p-2 font-mono text-xs">{tracker.host}</td>
-                      <td className="p-2 text-xs">{tracker.evidence}</td>
-                      <td className="p-2">
-                        <Badge variant={tracker.spamsBeforeConsent ? 'destructive' : 'default'} className="text-xs">
-                          {tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}
-                        </Badge>
-                      </td>
-                      <td className="p-2">
-                        <Badge variant={tracker.status === 'ok' ? 'default' : 'destructive'} className="text-xs">
-                          {tracker.status.toUpperCase()}
-                        </Badge>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Eye className="h-5 w-5" />
+              3. Trackery a web-beacony
             </div>
+            <Card>
+              <CardContent className="pt-4">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left p-2">Služba</th>
+                        <th className="text-left p-2">Host</th>
+                        <th className="text-left p-2">Dôkaz</th>
+                        <th className="text-left p-2">Pred súhlasom</th>
+                        <th className="text-left p-2">Stav</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.detailedAnalysis.trackers.map((tracker, index) => (
+                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                          <td className="p-2">{tracker.service}</td>
+                          <td className="p-2 font-mono text-xs">{tracker.host}</td>
+                          <td className="p-2 text-xs">{tracker.evidence}</td>
+                          <td className="p-2">
+                            <Badge className={`text-white text-xs ${tracker.spamsBeforeConsent ? 'bg-red-600' : 'bg-green-600'}`}>
+                              {tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}
+                            </Badge>
+                          </td>
+                          <td className="p-2">
+                            <Badge className={`text-white text-xs ${getStatusBgColor(tracker.status)}`}>
+                              {tracker.status.toUpperCase()}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* 4. Cookies */}
-          <div>
-            <h3 className="font-semibold mb-2">4. Cookies ({data.detailedAnalysis.cookies.total})</h3>
-            <div className="grid grid-cols-2 gap-4 mb-4">
-              <div className="p-3 bg-muted/50 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Cookie className="h-4 w-4" />
-                  <span className="text-sm font-medium">First-party</span>
-                </div>
-                <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.firstParty}</div>
-              </div>
-              <div className="p-3 bg-muted/50 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Cookie className="h-4 w-4" />
-                  <span className="text-sm font-medium">Third-party</span>
-                </div>
-                <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.thirdParty}</div>
-              </div>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Cookie className="h-5 w-5" />
+              4. Cookies ({data.detailedAnalysis.cookies.total})
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left p-2">Názov</th>
-                    <th className="text-left p-2">Doména</th>
-                    <th className="text-left p-2">Typ</th>
-                    <th className="text-left p-2">Kategória</th>
-                    <th className="text-left p-2">Expirácia</th>
-                    <th className="text-left p-2">Stav</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.detailedAnalysis.cookies.details.map((cookie, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="p-2 font-mono text-xs">{cookie.name}</td>
-                      <td className="p-2 font-mono text-xs">{cookie.domain}</td>
-                      <td className="p-2">
-                        <Badge variant={cookie.type === 'first-party' ? 'default' : 'secondary'} className="text-xs">
-                          {cookie.type === 'first-party' ? '1P' : '3P'}
-                        </Badge>
-                      </td>
-                      <td className="p-2">{cookie.category}</td>
-                      <td className="p-2 text-xs">{cookie.expiration}</td>
-                      <td className="p-2">
-                        <Badge variant={cookie.status === 'ok' ? 'default' : 'destructive'} className="text-xs">
-                          {cookie.status.toUpperCase()}
-                        </Badge>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="flex items-center gap-2">
+                    <Cookie className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-medium">Celkovo</span>
+                  </div>
+                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.total}</div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="flex items-center gap-2">
+                    <Cookie className="h-4 w-4 text-green-600" />
+                    <span className="text-sm font-medium">First-party</span>
+                  </div>
+                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.firstParty}</div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="flex items-center gap-2">
+                    <Cookie className="h-4 w-4 text-orange-600" />
+                    <span className="text-sm font-medium">Third-party</span>
+                  </div>
+                  <div className="text-2xl font-bold">{data.detailedAnalysis.cookies.thirdParty}</div>
+                </CardContent>
+              </Card>
             </div>
+            <Card>
+              <CardContent className="pt-4">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left p-2">Názov</th>
+                        <th className="text-left p-2">Doména</th>
+                        <th className="text-left p-2">Typ</th>
+                        <th className="text-left p-2">Kategória</th>
+                        <th className="text-left p-2">Expirácia</th>
+                        <th className="text-left p-2">Stav</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.detailedAnalysis.cookies.details.map((cookie, index) => (
+                        <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                          <td className="p-2 font-mono text-xs">{cookie.name}</td>
+                          <td className="p-2 font-mono text-xs">{cookie.domain}</td>
+                          <td className="p-2">
+                            <Badge className={`text-white text-xs ${cookie.type === 'first-party' ? 'bg-green-600' : 'bg-orange-500'}`}>
+                              {cookie.type === 'first-party' ? '1P' : '3P'}
+                            </Badge>
+                          </td>
+                          <td className="p-2">{cookie.category}</td>
+                          <td className="p-2 text-xs">{cookie.expiration}</td>
+                          <td className="p-2">
+                            <Badge className={`text-white text-xs ${getStatusBgColor(cookie.status)}`}>
+                              {cookie.status.toUpperCase()}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* 5. Storage */}
           {data.detailedAnalysis.storage && data.detailedAnalysis.storage.length > 0 && (
-            <div>
-              <h3 className="font-semibold mb-2">5. LocalStorage/SessionStorage</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="text-left p-2">Kľúč</th>
-                      <th className="text-left p-2">Typ</th>
-                      <th className="text-left p-2">Vzor hodnôt</th>
-                      <th className="text-left p-2">Zdroj</th>
-                      <th className="text-left p-2">Vznik pred súhlasom</th>
-                      <th className="text-left p-2">Poznámka</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.detailedAnalysis.storage.map((storage, index) => (
-                      <tr key={index} className="border-b">
-                        <td className="p-2 font-mono text-xs">{storage.key}</td>
-                        <td className="p-2">{storage.type}</td>
-                        <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
-                        <td className="p-2">{storage.source}</td>
-                        <td className="p-2">
-                          <Badge variant={storage.createdPreConsent ? 'destructive' : 'secondary'} className="text-xs">
-                            {storage.createdPreConsent ? 'ÁNO' : 'NIE'}
-                          </Badge>
-                        </td>
-                        <td className="p-2">{storage.note}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-lg font-semibold">
+                <Database className="h-5 w-5" />
+                5. LocalStorage/SessionStorage
               </div>
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-2">Kľúč</th>
+                          <th className="text-left p-2">Typ</th>
+                          <th className="text-left p-2">Vzor hodnôt</th>
+                          <th className="text-left p-2">Zdroj</th>
+                          <th className="text-left p-2">Vznik pred súhlasom</th>
+                          <th className="text-left p-2">Poznámka</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.detailedAnalysis.storage.map((storage, index) => (
+                          <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                            <td className="p-2 font-mono text-xs">{storage.key}</td>
+                            <td className="p-2">{storage.type}</td>
+                            <td className="p-2 font-mono text-xs bg-muted/50 rounded px-1">{storage.valuePattern}</td>
+                            <td className="p-2">{storage.source}</td>
+                            <td className="p-2">
+                              <Badge className={`text-white text-xs ${storage.createdPreConsent ? 'bg-red-600' : 'bg-green-600'}`}>
+                                {storage.createdPreConsent ? 'ÁNO' : 'NIE'}
+                              </Badge>
+                            </td>
+                            <td className="p-2">{storage.note}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
           )}
 
           {/* 6. Consent Management */}
-          <div>
-            <h3 className="font-semibold mb-2">6. Consent Management a časovanie</h3>
-            <div className="p-4 bg-muted/50 rounded-lg space-y-2">
-              <div className="flex items-center justify-between">
-                <span>Consent nástroj:</span>
-                <Badge variant={data.detailedAnalysis.consentManagement.hasConsentTool ? 'secondary' : 'destructive'}>
-                  {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
-                </Badge>
-              </div>
-              {data.detailedAnalysis.consentManagement.consentCookieName && (
-                <div className="flex items-center justify-between">
-                  <span>Detegovaný consent cookie:</span>
-                  <span className="font-mono text-xs bg-muted rounded px-2 py-1">
-                    {data.detailedAnalysis.consentManagement.consentCookieName}
-                  </span>
-                </div>
-              )}
-              <div className="flex items-center justify-between">
-                <span>Trackery pred súhlasom:</span>
-                <Badge variant={data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'destructive' : 'secondary'}>
-                  {data.detailedAnalysis.consentManagement.trackersBeforeConsent}
-                </Badge>
-              </div>
-              <div className="text-xs text-muted-foreground mt-2">
-                <strong>Dôkazy:</strong> {data.detailedAnalysis.consentManagement.evidence}
-              </div>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Shield className="h-5 w-5" />
+              6. Consent Management a časovanie
             </div>
-          </div>
-
-          {/* 8. UX analýza cookie lišty */}
-          <div>
-            <h3 className="font-semibold mb-2">8. UX analýza cookie lišty</h3>
-            
-            {data.consentUx ? (
-              <div className="space-y-4">
-                {/* Pre-captured screenshot and OCR analysis */}
-                <div className="p-4 bg-muted/50 rounded-lg">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Camera className="h-4 w-4 text-primary" />
-                    <span className="text-sm font-medium">Screenshot a analýza</span>
-                    <Badge variant="secondary" className="text-xs">
-                      {data.consentUx.used === 'edge' ? 'Bezpečný režim' : 'Klientsky režim'}
+            <Card>
+              <CardContent className="pt-4">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span>Consent nástroj:</span>
+                    <Badge className={`text-white ${data.detailedAnalysis.consentManagement.hasConsentTool ? 'bg-green-600' : 'bg-red-600'}`}>
+                      {data.detailedAnalysis.consentManagement.hasConsentTool ? 'Implementovaný' : 'Chýba'}
                     </Badge>
                   </div>
-                  
-                  {data.consentUx.screenshot && (
-                    <div className="mb-3">
-                      <img 
-                        src={data.consentUx.screenshot} 
-                        alt="Cookie banner screenshot" 
-                        className="w-full max-w-lg mx-auto rounded border"
-                      />
+                  {data.detailedAnalysis.consentManagement.consentCookieName && (
+                    <div className="flex items-center justify-between">
+                      <span>Detegovaný consent cookie:</span>
+                      <span className="font-mono text-xs bg-muted rounded px-2 py-1">
+                        {data.detailedAnalysis.consentManagement.consentCookieName}
+                      </span>
                     </div>
                   )}
-                  
-                  {data.consentUx.ocr ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Eye className="h-4 w-4 text-primary" />
-                        <span className="text-sm font-medium">OCR Analýza</span>
-                        <Badge 
-                          variant={data.consentUx.ocr.evaluation.uxAssessment === 'transparent' ? 'default' : 
-                                  data.consentUx.ocr.evaluation.uxAssessment === 'unbalanced' ? 'secondary' : 'destructive'}
-                          className="text-xs"
-                        >
-                          {data.consentUx.ocr.evaluation.uxAssessment === 'transparent' ? 'Transparentná' :
-                           data.consentUx.ocr.evaluation.uxAssessment === 'unbalanced' ? 'Nevyvážená' : 'Problematická'}
-                        </Badge>
-                      </div>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div className="p-3 bg-background rounded border">
-                          <h4 className="font-semibold text-sm mb-1 text-green-600">Accept tlačidlá</h4>
-                          <div className="text-lg font-bold">{data.consentUx.ocr.buttons.accept.length}</div>
-                          {data.consentUx.ocr.buttons.accept.length > 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.accept.slice(0, 2).join(', ')}
-                            </div>
-                          )}
-                        </div>
-                        <div className="p-3 bg-background rounded border">
-                          <h4 className="font-semibold text-sm mb-1 text-red-600">Reject tlačidlá</h4>
-                          <div className="text-lg font-bold">{data.consentUx.ocr.buttons.reject.length}</div>
-                          {data.consentUx.ocr.buttons.reject.length > 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.reject.slice(0, 2).join(', ')}
-                            </div>
-                          )}
-                        </div>
-                        <div className="p-3 bg-background rounded border">
-                          <h4 className="font-semibold text-sm mb-1 text-amber-600">Settings tlačidlá</h4>
-                          <div className="text-lg font-bold">{data.consentUx.ocr.buttons.settings.length}</div>
-                          {data.consentUx.ocr.buttons.settings.length > 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {data.consentUx.ocr.buttons.settings.slice(0, 2).join(', ')}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-3 bg-background rounded border">
-                          <h4 className="font-semibold text-sm mb-1">Rovnocenné tlačidlá</h4>
-                          <Badge variant={data.consentUx.ocr.evaluation.hasBalancedButtons ? 'secondary' : 'destructive'}>
-                            {data.consentUx.ocr.evaluation.hasBalancedButtons ? 'Áno' : 'Nie'}
-                          </Badge>
-                        </div>
-                        <div className="p-3 bg-background rounded border">
-                          <h4 className="font-semibold text-sm mb-1">Detailné nastavenia</h4>
-                          <Badge variant={data.consentUx.ocr.evaluation.hasDetailedSettings ? 'secondary' : 'destructive'}>
-                            {data.consentUx.ocr.evaluation.hasDetailedSettings ? 'Áno' : 'Nie'}
-                          </Badge>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      Screenshot bol zachytený, ale OCR analýza zlyhala.
-                    </p>
-                  )}
+                  <div className="flex items-center justify-between">
+                    <span>Trackery pred súhlasom:</span>
+                    <Badge className={`text-white ${data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0 ? 'bg-red-600' : 'bg-green-600'}`}>
+                      {data.detailedAnalysis.consentManagement.trackersBeforeConsent}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-2">
+                    <strong>Dôkazy:</strong> {data.detailedAnalysis.consentManagement.evidence}
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {/* Fallback: Basic analysis without screenshot */}
-                {(() => {
-                  const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
-                  const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0;
-                  
-                  const isPresent = hasCMP;
-                  const defaultBehavior = preConsentTrackers ? 'Opt-in (nevyžaduje súhlas)' : 'Opt-out (blokuje trackery)';
-                  const balancedButtons = preConsentTrackers ? 'Nie (nevyvážená)' : 'Áno (pravdepodobné)';
-                  const detailedSettings = data._internal?.cmp?.present ? 'Áno (detekovaný CMP nástroj)' : 'Neznáme';
-                  
-                  let assessment = 'Chýba';
-                  if (hasCMP) {
-                    assessment = preConsentTrackers ? 'Nevyvážená' : 'Transparentná';
-                  }
-                  
-                  return (
-                    <div className="space-y-4">
-                      <Alert>
-                        <AlertTriangle className="h-4 w-4" />
-                        <AlertDescription>
-                          UX analýza cookie lišty bola vynechaná. Analýza je založená na technických indikátoroch.
-                        </AlertDescription>
-                      </Alert>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-3 bg-muted/50 rounded-lg">
-                          <h4 className="font-semibold text-sm mb-1">Prítomnosť cookie lišty</h4>
-                          <Badge variant={isPresent ? 'secondary' : 'destructive'}>
-                            {isPresent ? 'Áno' : 'Nie'}
-                          </Badge>
-                        </div>
-                        <div className="p-3 bg-muted/50 rounded-lg">
-                          <h4 className="font-semibold text-sm mb-1">Predvolené správanie</h4>
-                          <span className="text-sm">{defaultBehavior}</span>
-                        </div>
-                        <div className="p-3 bg-muted/50 rounded-lg">
-                          <h4 className="font-semibold text-sm mb-1">Rovnocenné tlačidlá</h4>
-                          <span className="text-sm">{balancedButtons}</span>
-                        </div>
-                        <div className="p-3 bg-muted/50 rounded-lg">
-                          <h4 className="font-semibold text-sm mb-1">Detailné nastavenia</h4>
-                          <span className="text-sm">{detailedSettings}</span>
-                        </div>
-                      </div>
-                      <div className="p-4 bg-gradient-to-r from-primary/10 to-secondary/10 rounded-lg">
-                        <h4 className="font-semibold mb-2">Celkové hodnotenie UX</h4>
-                        <Badge variant={assessment === 'Transparentná' ? 'secondary' : 
-                                       assessment === 'Nevyvážená' ? 'outline' : 'destructive'} 
-                               className="mb-2">
-                          {assessment}
-                        </Badge>
-                        <p className="text-sm text-muted-foreground">
-                          {assessment === 'Chýba' && 'Cookie lišta nie je implementovaná.'}
-                          {assessment === 'Nevyvážená' && 'CMP nástroj je prítomný, ale neblokuje trackery pred súhlasom.'}
-                          {assessment === 'Transparentná' && 'CMP nástroj správne blokuje trackery až po súhlase používateľa.'}
-                        </p>
-                      </div>
-                      
-                      {/* Optional manual capture */}
-                      <div className="text-center">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setShowCaptureDialog(true)}
-                          className="text-xs"
-                        >
-                          <Camera className="h-3 w-3 mr-1" />
-                          Doplniť screenshot
-                        </Button>
-                      </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 7. Legal Summary */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Scale className="h-5 w-5" />
+              7. Právne zhrnutie
+            </div>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-sm text-muted-foreground">
+                  {data.detailedAnalysis.legalSummary}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 8. UX Analysis */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <Monitor className="h-5 w-5" />
+              8. UX analýza cookie lišty
+            </div>
+            
+            {data.consentUx ? (
+              <Card>
+                <CardContent className="pt-4">
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Camera className="h-4 w-4 text-primary" />
+                      <span className="text-sm font-medium">Screenshot a analýza</span>
+                      <Badge variant="secondary" className="text-xs">
+                        {data.consentUx.used === 'edge' ? 'Bezpečný režim' : 'Klientsky režim'}
+                      </Badge>
                     </div>
-                  );
-                })()}
-              </div>
+                    
+                    {data.consentUx.screenshot && (
+                      <div className="mb-4">
+                        <img 
+                          src={data.consentUx.screenshot} 
+                          alt="Cookie banner screenshot" 
+                          className="max-w-full h-auto border rounded-lg shadow-sm"
+                        />
+                      </div>
+                    )}
+                    
+                    {data.consentUx.ocr && (
+                      <div className="space-y-3">
+                        <h4 className="font-semibold">Technické indikátory OCR analýzy:</h4>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div>
+                            <span className="text-sm font-medium">Accept tlačidlá:</span>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              {data.consentUx.ocr.buttons.accept.length > 0 
+                                ? data.consentUx.ocr.buttons.accept.join(', ')
+                                : 'Nenájdené'
+                              }
+                            </div>
+                          </div>
+                          <div>
+                            <span className="text-sm font-medium">Reject tlačidlá:</span>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              {data.consentUx.ocr.buttons.reject.length > 0 
+                                ? data.consentUx.ocr.buttons.reject.join(', ')
+                                : 'Nenájdené'
+                              }
+                            </div>
+                          </div>
+                          <div>
+                            <span className="text-sm font-medium">Settings tlačidlá:</span>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              {data.consentUx.ocr.buttons.settings.length > 0 
+                                ? data.consentUx.ocr.buttons.settings.join(', ')
+                                : 'Nenájdené'
+                              }
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="flex items-center justify-between">
+                            <span>Vyvážené tlačidlá:</span>
+                            <Badge className={`text-white ${data.consentUx.ocr.evaluation.hasBalancedButtons ? 'bg-green-600' : 'bg-red-600'}`}>
+                              {data.consentUx.ocr.evaluation.hasBalancedButtons ? 'ÁNO' : 'NIE'}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Detailné nastavenia:</span>
+                            <Badge className={`text-white ${data.consentUx.ocr.evaluation.hasDetailedSettings ? 'bg-green-600' : 'bg-red-600'}`}>
+                              {data.consentUx.ocr.evaluation.hasDetailedSettings ? 'ÁNO' : 'NIE'}
+                            </Badge>
+                          </div>
+                        </div>
+                        
+                        {data.consentUx.confidence && (
+                          <div className="text-xs text-muted-foreground">
+                            Spoľahlivosť OCR: {Math.round(data.consentUx.confidence * 100)}%
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent className="pt-4">
+                  <p className="text-sm text-muted-foreground">
+                    UX analýza cookie lišty bola vynechaná počas auditu.
+                  </p>
+                </CardContent>
+              </Card>
             )}
           </div>
         </CardContent>
@@ -594,16 +599,17 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               </thead>
               <tbody>
                 {data.riskTable.map((risk, index) => (
-                  <tr key={index} className="border-b">
-                    <td className="p-2">{risk.area}</td>
+                  <tr key={index} className={`border-b ${index % 2 === 0 ? 'bg-muted/20' : ''}`}>
+                    <td className="p-2 font-medium">{risk.area}</td>
                     <td className="p-2">
-                      {risk.status === 'ok' ? (
-                        <CheckCircle className="h-4 w-4 text-green-600" />
-                      ) : risk.status === 'warning' ? (
-                        <AlertTriangle className="h-4 w-4 text-yellow-600" />
-                      ) : (
-                        <XCircle className="h-4 w-4 text-red-600" />
-                      )}
+                      <div className="flex items-center gap-2">
+                        <div className={getStatusColor(risk.status)}>
+                          {getStatusIcon(risk.status)}
+                        </div>
+                        <Badge className={`text-white ${getStatusBgColor(risk.status)}`}>
+                          {risk.status.toUpperCase()}
+                        </Badge>
+                      </div>
                     </td>
                     <td className="p-2 text-muted-foreground">{risk.comment}</td>
                   </tr>
@@ -622,51 +628,16 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         <CardContent>
           <div className="space-y-4">
             {data.recommendations.map((rec, index) => (
-              <div key={index} className="p-4 border-l-4 border-primary bg-primary/5">
-                <h4 className="font-semibold">{rec.title}</h4>
-                <p className="text-sm text-muted-foreground mt-1">{rec.description}</p>
-              </div>
+              <Card key={index} className="border-l-4 border-l-primary">
+                <CardContent className="pt-4">
+                  <h4 className="font-semibold mb-2">{rec.title}</h4>
+                  <p className="text-sm text-muted-foreground">{rec.description}</p>
+                </CardContent>
+              </Card>
             ))}
           </div>
         </CardContent>
       </Card>
-
-      {/* Manual Capture Dialog */}
-      <Dialog open={showCaptureDialog} onOpenChange={setShowCaptureDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Camera className="h-5 w-5" />
-              Manuálne zachytenie cookie lišty
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <Alert>
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>
-                Táto funkcia vykoná nový screenshot cookie lišty a OCR analýzu.
-              </AlertDescription>
-            </Alert>
-            
-            <div className="flex gap-2">
-              <Button
-                onClick={handleSmartCapture}
-                disabled={isCapturing}
-                className="flex-1"
-              >
-                {isCapturing ? 'Zachytávam...' : 'Zachytiť'}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => setShowCaptureDialog(false)}
-                disabled={isCapturing}
-              >
-                Zrušiť
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };

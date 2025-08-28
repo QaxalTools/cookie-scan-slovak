@@ -129,6 +129,41 @@ export async function simulateAudit(
   return auditData;
 }
 
+function generateRiskScore(internalJson: InternalAuditJson): number {
+  let score = 0;
+  
+  // HTTPS issues: +20
+  if (!internalJson.https.supports) {
+    score += 20;
+  }
+  
+  // Pre-consent beacons: +25 each, max +50
+  const preConsentBeacons = internalJson.beacons.filter(b => b.pre_consent).length;
+  score += Math.min(preConsentBeacons * 25, 50);
+  
+  // Marketing cookies: +20 if present
+  const marketingCookies = internalJson.cookies.filter(c => c.type === 'marketing').length;
+  if (marketingCookies > 0) {
+    score += 20;
+  }
+  
+  // Too many third parties (>5): +10
+  if (internalJson.third_parties.length > 5) {
+    score += 10;
+  }
+  
+  // Storage with personal data created pre-consent: +20
+  const personalStoragePreConsent = internalJson.storage.filter(s => 
+    s.contains_personal_data && s.created_pre_consent
+  ).length;
+  if (personalStoragePreConsent > 0) {
+    score += 20;
+  }
+  
+  // Ensure score is bounded between 0-100
+  return Math.min(Math.max(score, 0), 100);
+}
+
 async function generateInternalAuditJson(
   input: string, 
   isHtml: boolean, 
@@ -616,6 +651,7 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
     verdict,
     overall: generateOverallSummary(internalJson),
     risks: generateRiskSummary(internalJson),
+    riskScore: generateRiskScore(internalJson),
     data_source: originalInput.startsWith('http') && !internalJson.third_parties.length ? 'Simulácia (obmedzené dáta)' : 'Analýza obsahu'
   };
 
