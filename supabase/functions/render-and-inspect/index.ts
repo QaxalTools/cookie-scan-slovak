@@ -119,6 +119,9 @@ Deno.serve(async (req: Request) => {
 export default async ({ page, context }) => {
   console.log('🔍 Starting multi-scenario analysis for:', context.url);
   
+  // Custom sleep function for Puppeteer compatibility
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  
   // Initialize three scenario results
   const scenarios = {
     baseline: null,
@@ -137,15 +140,23 @@ export default async ({ page, context }) => {
     'Sec-GPC': '1'
   });
   
-  // Set timezone to Slovakia
-  await page.emulateTimezone('Europe/Bratislava');
+  // Set timezone to Slovakia (Puppeteer-safe)
+  try {
+    await page.emulateTimezone('Europe/Bratislava');
+  } catch (e) {
+    console.log('⚠️ Timezone emulation not available:', e.message);
+  }
   
-  // Remove webdriver detection
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-  });
+  // Remove webdriver detection (Puppeteer-safe)
+  try {
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    });
+  } catch (e) {
+    console.log('⚠️ evaluateOnNewDocument not available:', e.message);
+  }
 
   // Helper: Create isolated context for each scenario
   const createIsolatedContext = async () => {
@@ -178,18 +189,23 @@ export default async ({ page, context }) => {
         'Sec-GPC': '1'
       });
       
-      // Timezone (Playwright/Puppeteer compatible)
+      // Timezone (Puppeteer-safe)
       try {
         await newPage.emulateTimezone('Europe/Bratislava');
       } catch (e) {
-        console.log('⚠️ Timezone emulation not supported');
+        console.log('⚠️ Timezone emulation not supported:', e.message);
       }
       
-      await newPage.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      });
+      // WebDriver detection removal (Puppeteer-safe)
+      try {
+        await newPage.evaluateOnNewDocument(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+          Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
+          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        });
+      } catch (e) {
+        console.log('⚠️ evaluateOnNewDocument not available:', e.message);
+      }
       
       // Bypass service workers (Puppeteer only)
       try {
@@ -197,7 +213,7 @@ export default async ({ page, context }) => {
           await newPage.setBypassServiceWorker(true);
         }
       } catch (e) {
-        console.log('⚠️ Service worker bypass not available');
+        console.log('⚠️ Service worker bypass not available:', e.message);
       }
       
       return { context: newContext, page: newPage };
@@ -524,7 +540,7 @@ export default async ({ page, context }) => {
         } catch (fallbackError) {
           // Basic goto if networkidle is not supported
           await scenarioPage.goto(context.url, { timeout: 90000 });
-          await scenarioPage.waitForTimeout(5000); // Basic wait
+          await sleep(5000); // Basic wait using custom sleep function
         }
       }
 
@@ -538,7 +554,7 @@ export default async ({ page, context }) => {
       console.log(\`📊 [\${scenarioName}] Phase 1: \${data.cookies_phase1.length} cookies\`);
       
       // Wait for network idle
-      await scenarioPage.waitForTimeout(3000);
+      await sleep(3000);
       
       // PHASE 2: After network idle
       data.cookies_phase2 = await getAllCookies();
@@ -635,7 +651,7 @@ export default async ({ page, context }) => {
       }
 
       // Extra idle wait (especially important after consent action)
-      await scenarioPage.waitForTimeout(cmpAction !== 'none' ? 8000 : 5000);
+      await sleep(cmpAction !== 'none' ? 8000 : 5000);
       
       // PHASE 3: After extra idle + action
       data.cookies_phase3 = await getAllCookies();
@@ -817,20 +833,24 @@ export default async ({ page, context }) => {
       duration_ms: duration
     });
 
-    // Log failed run to database
-    await supabase.from('audit_runs').insert({
-      trace_id: traceId,
-      input_url: url,
-      status: 'failed',
-      error_message: error.message,
-      duration_ms: duration,
-      bl_status_code: healthDetails?.status_code || null,
-      bl_health_status: healthStatus,
-      meta: {
-        error_details: error.stack,
-        health_check: healthDetails
-      }
-    });
+    // Log failed run to database (with safe error handling)
+    try {
+      await supabase.from('audit_runs').insert({
+        trace_id: traceId,
+        input_url: url,
+        status: 'failed',
+        error_message: error.message,
+        duration_ms: duration,
+        bl_status_code: healthDetails?.status_code || null,
+        bl_health_status: healthStatus,
+        meta: {
+          error_details: error.stack,
+          health_check: healthDetails
+        }
+      });
+    } catch (dbError) {
+      console.error('Failed to log error to database:', dbError.message);
+    }
     
     const requestUrl = url || 'unknown';
     
