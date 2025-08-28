@@ -69,9 +69,9 @@ serve(async (req) => {
 
     console.log(`Starting render and inspect for: ${url}`);
 
-    // Browserless script for comprehensive CDP-based capture
+    // Browserless script for comprehensive CDP-based capture (ESM export)
     const browserlessScript = `
-      module.exports = async ({ page, context }) => {
+      export default async ({ page, context }) => {
         console.log('Starting comprehensive CDP-based data collection');
         
         const results = {
@@ -453,8 +453,8 @@ serve(async (req) => {
           console.log('Phase 2: Post-network-idle capture');
           const cookies_phase2 = await getAllCookies();
           
-          // Phase 3: After extra idle
-          await page.waitForTimeout(2000);
+          // Phase 3: After extra idle (increase wait time)
+          await page.waitForTimeout(5000);
           console.log('Phase 3: Final capture');
           const cookies_phase3 = await getAllCookies();
           
@@ -569,7 +569,7 @@ serve(async (req) => {
           console.log('Post-consent Phase 2: Network idle capture');
           const postCookies_phase2 = await getAllCookies();
           
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(5000);
           console.log('Post-consent Phase 3: Final capture');
           const postCookies_phase3 = await getAllCookies();
           
@@ -654,9 +654,45 @@ serve(async (req) => {
 
   } catch (error) {
     console.error('Error in render-and-inspect function:', error);
+    
+    // Enhanced error handling with fallback retry
+    if (error.message.includes('module is not defined')) {
+      console.log('Detected module export error, attempting fallback with CommonJS');
+      
+      // Try fallback with CommonJS syntax
+      const fallbackScript = browserlessScript.replace('export default async', 'module.exports = async');
+      
+      try {
+        const fallbackResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: fallbackScript,
+            context: { url, viewport, delay }
+          })
+        });
+        
+        if (fallbackResponse.ok) {
+          const fallbackData = await fallbackResponse.json();
+          console.log('Fallback successful');
+          return new Response(JSON.stringify({
+            success: true,
+            mode: 'live',
+            ...fallbackData
+          }), {
+            status: 200,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError);
+      }
+    }
+    
     return new Response(JSON.stringify({ 
       success: false, 
-      error: error.message 
+      error: `Function error: ${error.message}`,
+      details: error.toString()
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
