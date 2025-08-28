@@ -116,6 +116,18 @@ export const DEFAULT_AUDIT_STEPS: ProgressStep[] = [
     status: 'pending'
   },
   {
+    id: 'capture',
+    title: 'Zachytávam cookie lištu',
+    description: 'Robím screenshot pre UX analýzu',
+    status: 'pending'
+  },
+  {
+    id: 'ocr',
+    title: 'OCR analýza cookie lišty',
+    description: 'Analyzujem tlačidlá a UX dizajn',
+    status: 'pending'
+  },
+  {
     id: 'verdict',
     title: 'Generujem výsledok',
     description: 'Vyhodnocujem súlad a vytváram report',

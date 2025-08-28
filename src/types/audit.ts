@@ -143,6 +143,28 @@ export interface AuditData {
     requests: number;
   }>;
 
+  // Consent UX Analysis (optional - added during audit)
+  consentUx?: ConsentUxResult;
+
   // Internal JSON for consistency
   _internal: InternalAuditJson;
+}
+
+export interface ConsentUxResult {
+  screenshot?: string; // data URL base64
+  used?: 'edge' | 'client';
+  ocr?: {
+    hasConsentBanner: boolean;
+    buttons: {
+      accept: string[];
+      reject: string[];
+      settings: string[];
+    };
+    evaluation: {
+      hasBalancedButtons: boolean;
+      hasDetailedSettings: boolean;
+      uxAssessment: 'transparent' | 'unbalanced' | 'missing';
+    };
+    confidence?: number;
+  };
 }

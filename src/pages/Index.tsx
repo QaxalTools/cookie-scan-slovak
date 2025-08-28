@@ -2,8 +2,11 @@ import { useState } from 'react';
 import { AuditForm } from '@/components/AuditForm';
 import { AuditResults } from '@/components/AuditResults';
 import { EmailDraft } from '@/components/EmailDraft';
+import { ConsentUploadDialog } from '@/components/ConsentUploadDialog';
 import { AnalysisProgress, DEFAULT_AUDIT_STEPS } from '@/components/AnalysisProgress';
 import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
+import { autoCaptureConsent } from '@/utils/consentService';
+import { analyzeConsentScreenshot } from '@/utils/consentOcr';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
 
@@ -14,6 +17,8 @@ const Index = () => {
   const [clientEmail, setClientEmail] = useState('');
   const [showProgress, setShowProgress] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [pendingAuditData, setPendingAuditData] = useState<AuditData | null>(null);
   const { toast } = useToast();
 
   const handleAuditSubmit = async (input: string, email: string, isHtml: boolean) => {
@@ -23,8 +28,9 @@ const Index = () => {
     setClientEmail(email);
     
     try {
-      const minDuration = isHtml ? 2000 : 4000; // Shorter for HTML, longer for URL
+      const minDuration = isHtml ? 2000 : 4000;
       
+      // Run main audit simulation
       const data = await simulateAudit(
         input, 
         isHtml, 
@@ -32,22 +38,135 @@ const Index = () => {
         minDuration
       );
       
-      setAuditData(data);
-      setShowProgress(false);
+      // If HTML input, skip capture/OCR steps
+      if (isHtml) {
+        // Skip to verdict
+        const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
+        setCurrentStep(verdictStepIndex);
+        
+        setTimeout(() => {
+          setAuditData(data);
+          setShowProgress(false);
+          toast({
+            title: "Audit dokončený",
+            description: "Analýza HTML kódu bola úspešne dokončená",
+          });
+          setIsLoading(false);
+        }, 1000);
+        return;
+      }
       
-      toast({
-        title: "Audit dokončený",
-        description: "Analýza webovej stránky bola úspešne dokončená",
-      });
+      // For URL input, proceed with capture and OCR
+      await handleCaptureAndOCR(data);
+      
     } catch (error) {
       setShowProgress(false);
+      setIsLoading(false);
       toast({
         title: "Chyba",
         description: "Nepodarilo sa vykonať audit webovej stránky",
         variant: "destructive",
       });
-    } finally {
-      setIsLoading(false);
+    }
+  };
+
+  const handleCaptureAndOCR = async (data: AuditData) => {
+    try {
+      // Step to capture
+      const captureStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'capture');
+      setCurrentStep(captureStepIndex);
+      
+      // Attempt auto-capture
+      const captureResult = await autoCaptureConsent(data.finalUrl || data.url, {
+        delay: 4000,
+        viewport: { width: 1920, height: 1080 },
+        locale: 'sk-SK',
+      });
+      
+      if (captureResult.success && captureResult.screenshot) {
+        // Step to OCR
+        const ocrStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'ocr');
+        setCurrentStep(ocrStepIndex);
+        
+        // Perform OCR analysis
+        const ocrResult = await analyzeConsentScreenshot(captureResult.screenshot);
+        
+        // Add consent UX data to audit results
+        data.consentUx = {
+          screenshot: captureResult.screenshot,
+          used: captureResult.used,
+          ocr: ocrResult.success ? ocrResult.analysis : undefined
+        };
+        
+        // Complete audit
+        const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
+        setCurrentStep(verdictStepIndex);
+        
+        setTimeout(() => {
+          setAuditData(data);
+          setShowProgress(false);
+          setIsLoading(false);
+          toast({
+            title: "Audit dokončený",
+            description: `Analýza dokončená so screenshotom (${captureResult.used === 'edge' ? 'bezpečný režim' : 'klientsky režim'})`,
+          });
+        }, 1000);
+        
+      } else {
+        // Capture failed - show upload dialog
+        setPendingAuditData(data);
+        setShowUploadDialog(true);
+      }
+      
+    } catch (error) {
+      console.error('Capture/OCR error:', error);
+      // Fallback to upload dialog
+      setPendingAuditData(data);
+      setShowUploadDialog(true);
+    }
+  };
+
+  const handleUpload = (screenshot: string, ocrAnalysis: any) => {
+    if (pendingAuditData) {
+      pendingAuditData.consentUx = {
+        screenshot,
+        used: 'client',
+        ocr: ocrAnalysis
+      };
+      
+      // Complete audit
+      const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
+      setCurrentStep(verdictStepIndex);
+      
+      setTimeout(() => {
+        setAuditData(pendingAuditData);
+        setShowProgress(false);
+        setIsLoading(false);
+        setPendingAuditData(null);
+        toast({
+          title: "Audit dokončený",
+          description: "Analýza dokončená s nahraným screenshotom",
+        });
+      }, 1000);
+    }
+  };
+
+  const handleSkip = () => {
+    if (pendingAuditData) {
+      // Complete audit without consent UX
+      const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
+      setCurrentStep(verdictStepIndex);
+      
+      setTimeout(() => {
+        setAuditData(pendingAuditData);
+        setShowProgress(false);
+        setIsLoading(false);
+        setPendingAuditData(null);
+        toast({
+          title: "Audit dokončený",
+          description: "UX analýza cookie lišty bola vynechaná",
+        });
+      }, 1000);
     }
   };
 
@@ -95,6 +214,13 @@ const Index = () => {
           steps={DEFAULT_AUDIT_STEPS}
           currentStepIndex={currentStep}
           isVisible={showProgress}
+        />
+
+        <ConsentUploadDialog
+          isOpen={showUploadDialog}
+          onClose={() => setShowUploadDialog(false)}
+          onUpload={handleUpload}
+          onSkip={handleSkip}
         />
       </div>
     </div>
