@@ -2,6 +2,10 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SimulationBadge } from '@/components/SimulationBadge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Progress } from '@/components/ui/progress';
 import { 
   CheckCircle, 
   XCircle, 
@@ -13,11 +17,17 @@ import {
   Download,
   Upload,
   X,
-  Image
+  Image,
+  Camera,
+  Loader2,
+  Zap
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { createConsentCapture, validateApiKey } from '@/utils/consentCapture';
+import { analyzeConsentScreenshot, ConsentAnalysis } from '@/utils/consentOcr';
+import { useToast } from '@/hooks/use-toast';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -28,6 +38,15 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
   // Screenshot state
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+  
+  // Auto-capture state
+  const [apiKey, setApiKey] = useState<string>('');
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [captureProgress, setCaptureProgress] = useState(0);
+  const [ocrAnalysis, setOcrAnalysis] = useState<ConsentAnalysis | null>(null);
+  const [showCaptureDialog, setShowCaptureDialog] = useState(false);
+  
+  const { toast } = useToast();
 
   // Consistency checks
   const performConsistencyChecks = () => {
@@ -84,11 +103,83 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   const removeScreenshot = () => {
     setScreenshot(null);
+    setOcrAnalysis(null);
     if (screenshotPreview) {
       URL.revokeObjectURL(screenshotPreview);
       setScreenshotPreview(null);
     }
   };
+
+  const handleSmartCapture = useCallback(async () => {
+    if (!apiKey || !validateApiKey(apiKey)) {
+      toast({
+        title: "Invalid API Key",
+        description: "Please enter a valid Browserless API key",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsCapturing(true);
+    setCaptureProgress(0);
+
+    try {
+      // Step 1: Capture screenshot
+      setCaptureProgress(25);
+      const captureService = createConsentCapture(apiKey);
+      const captureResult = await captureService.captureConsentBanner({
+        url: data.url,
+        delay: 4000, // Wait for consent banners to load
+        locale: 'sk-SK'
+      });
+
+      if (!captureResult.success || !captureResult.screenshot) {
+        throw new Error(captureResult.error || 'Screenshot capture failed');
+      }
+
+      setCaptureProgress(50);
+      setScreenshot(captureResult.screenshot);
+      
+      // Create preview URL for display
+      const response = await fetch(captureResult.screenshot);
+      const blob = await response.blob();
+      setScreenshotPreview(URL.createObjectURL(blob));
+
+      // Step 2: Perform OCR analysis
+      setCaptureProgress(75);
+      const ocrResult = await analyzeConsentScreenshot(captureResult.screenshot);
+
+      if (ocrResult.success && ocrResult.analysis) {
+        setOcrAnalysis(ocrResult.analysis);
+        toast({
+          title: "Analysis Complete",
+          description: `Found ${ocrResult.analysis.buttons.accept.length + ocrResult.analysis.buttons.reject.length + ocrResult.analysis.buttons.settings.length} button types`,
+          variant: "default"
+        });
+      } else {
+        console.warn('OCR analysis failed or low confidence:', ocrResult.error);
+        toast({
+          title: "Screenshot Captured",
+          description: "Screenshot captured but text analysis failed. Manual review recommended.",
+          variant: "default"
+        });
+      }
+
+      setCaptureProgress(100);
+      setShowCaptureDialog(false);
+
+    } catch (error) {
+      console.error('Smart capture failed:', error);
+      toast({
+        title: "Capture Failed",
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+        variant: "destructive"
+      });
+    } finally {
+      setIsCapturing(false);
+      setCaptureProgress(0);
+    }
+  }, [apiKey, data.url, toast]);
 
   const handleDownloadPDF = () => {
     const printWindow = window.open('', '_blank');
@@ -252,14 +343,29 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               ${(() => {
                 const hasCMP = data.detailedAnalysis.consentManagement.hasConsentTool;
                 const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent > 0;
-                const isPresent = hasCMP;
-                const defaultBehavior = preConsentTrackers ? 'Opt-in (nevyžaduje súhlas)' : 'Opt-out (blokuje trackery)';
-                const balancedButtons = preConsentTrackers ? 'Nie (nevyvážená)' : 'Áno (pravdepodobné)';
-                const detailedSettings = data._internal?.cmp?.present ? 'Áno (detekovaný CMP nástroj)' : 'Neznáme';
-                let assessment = 'Chýba';
-                if (hasCMP) {
-                  assessment = preConsentTrackers ? 'Nevyvážená' : 'Transparentná';
+                
+                // Use OCR analysis if available, otherwise fall back to existing heuristics
+                let isPresent, balancedButtons, detailedSettings, assessment;
+                
+                if (ocrAnalysis) {
+                  isPresent = ocrAnalysis.hasConsentBanner;
+                  balancedButtons = ocrAnalysis.evaluation.hasBalancedButtons ? 'Áno (detekované OCR)' : 'Nie (nevyvážené OCR)';
+                  detailedSettings = ocrAnalysis.evaluation.hasDetailedSettings ? 'Áno (detekované OCR)' : 'Nie (nenájdené OCR)';
+                  assessment = ocrAnalysis.evaluation.uxAssessment === 'transparent' ? 'Transparentná' :
+                              ocrAnalysis.evaluation.uxAssessment === 'unbalanced' ? 'Nevyvážená' : 'Chýba';
+                } else {
+                  // Fallback to existing logic
+                  isPresent = hasCMP;
+                  balancedButtons = preConsentTrackers ? 'Nie (nevyvážená)' : 'Áno (pravdepodobné)';
+                  detailedSettings = data._internal?.cmp?.present ? 'Áno (detekovaný CMP nástroj)' : 'Neznáme';
+                  assessment = 'Chýba';
+                  if (hasCMP) {
+                    assessment = preConsentTrackers ? 'Nevyvážená' : 'Transparentná';
+                  }
                 }
+                
+                const defaultBehavior = preConsentTrackers ? 'Opt-in (nevyžaduje súhlas)' : 'Opt-out (blokuje trackery)';
+                
                 return `
                 <table>
                   <tr><th>Charakteristika</th><th>Hodnota</th></tr>
@@ -269,6 +375,14 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   <tr><td>Detailné nastavenia</td><td>${detailedSettings}</td></tr>
                 </table>
                 <p><strong>Celkové hodnotenie UX:</strong> <span class="status-${assessment === 'Transparentná' ? 'ok' : assessment === 'Nevyvážená' ? 'warning' : 'error'}">${assessment.toUpperCase()}</span></p>
+                ${ocrAnalysis && ocrAnalysis.buttons ? `
+                <p><strong>OCR Zistenia:</strong></p>
+                <ul style="font-size: 12px; margin: 10px 0;">
+                  ${ocrAnalysis.buttons.accept.length > 0 ? `<li><strong>Accept tlačidlá:</strong> ${ocrAnalysis.buttons.accept.join(', ')}</li>` : ''}
+                  ${ocrAnalysis.buttons.reject.length > 0 ? `<li><strong>Reject tlačidlá:</strong> ${ocrAnalysis.buttons.reject.join(', ')}</li>` : ''}
+                  ${ocrAnalysis.buttons.settings.length > 0 ? `<li><strong>Settings tlačidlá:</strong> ${ocrAnalysis.buttons.settings.join(', ')}</li>` : ''}
+                </ul>
+                ` : ''}
                 ${screenshot ? `<img src="${screenshot}" alt="Cookie banner screenshot" class="screenshot" />` : ''}
                 `;
               })()}
@@ -792,56 +906,202 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     </p>
                   </div>
                   
-                  {/* Screenshot Upload Section */}
-                  <div className="mt-4 p-4 border-2 border-dashed border-muted-foreground/30 rounded-lg">
-                    <h4 className="font-semibold mb-3 flex items-center gap-2">
-                      <Image className="h-4 w-4" />
-                      Screenshot cookie lišty (voliteľné)
-                    </h4>
-                    
-                    {!screenshotPreview ? (
-                      <div className="text-center">
-                        <label htmlFor="screenshot-upload" className="cursor-pointer">
-                          <div className="flex flex-col items-center gap-2 p-6 hover:bg-muted/50 rounded-lg transition-colors">
-                            <Upload className="h-8 w-8 text-muted-foreground" />
-                            <p className="text-sm text-muted-foreground">
-                              Nahrajte screenshot cookie lišty pre lepšiu UX analýzu
-                            </p>
-                            <Button variant="outline" type="button" className="mt-2">
-                              Vybrať súbor
-                            </Button>
-                          </div>
-                        </label>
-                        <input
-                          id="screenshot-upload"
-                          type="file"
-                          accept="image/*"
-                          onChange={handleScreenshotUpload}
-                          className="hidden"
-                        />
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="relative">
-                          <img 
-                            src={screenshotPreview} 
-                            alt="Cookie banner screenshot" 
-                            className="w-full max-w-md mx-auto rounded-lg border"
-                          />
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={removeScreenshot}
-                            className="absolute top-2 right-2"
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                        <p className="text-xs text-muted-foreground text-center">
-                          Screenshot bude zahrnutý v PDF reporte pre detailnú UX analýzu.
-                        </p>
-                      </div>
-                    )}
+                   {/* Smart Capture and Screenshot Upload Section */}
+                   <div className="mt-4 p-4 border-2 border-dashed border-muted-foreground/30 rounded-lg">
+                     <h4 className="font-semibold mb-3 flex items-center gap-2">
+                       <Image className="h-4 w-4" />
+                       Screenshot cookie lišty (voliteľné)
+                     </h4>
+                     
+                     {!screenshotPreview ? (
+                       <div className="space-y-4">
+                         {/* Smart Capture Button */}
+                         <div className="flex items-center gap-2 justify-center">
+                           <Dialog open={showCaptureDialog} onOpenChange={setShowCaptureDialog}>
+                             <DialogTrigger asChild>
+                               <Button variant="default" size="sm" className="flex items-center gap-2">
+                                 <Zap className="h-4 w-4" />
+                                 Smart Capture
+                                 <Badge variant="secondary" className="text-xs ml-1">Auto</Badge>
+                               </Button>
+                             </DialogTrigger>
+                             <DialogContent className="sm:max-w-md">
+                               <DialogHeader>
+                                 <DialogTitle className="flex items-center gap-2">
+                                   <Camera className="h-5 w-5" />
+                                   Automatické zachytenie cookie lišty
+                                 </DialogTitle>
+                               </DialogHeader>
+                               <div className="space-y-4">
+                                 <Alert>
+                                   <AlertTriangle className="h-4 w-4" />
+                                   <AlertDescription>
+                                     Automatické zachytenie používa cloudovú službu na screenshot a OCR analýzu textu tlačidiel.
+                                   </AlertDescription>
+                                 </Alert>
+                                 
+                                 <div className="space-y-2">
+                                   <Label htmlFor="api-key">Browserless API Key</Label>
+                                   <Input
+                                     id="api-key"
+                                     type="password"
+                                     placeholder="Enter your Browserless.io API key"
+                                     value={apiKey}
+                                     onChange={(e) => setApiKey(e.target.value)}
+                                   />
+                                   <p className="text-xs text-muted-foreground">
+                                     Získajte bezplatný API kľúč na{' '}
+                                     <a 
+                                       href="https://browserless.io" 
+                                       target="_blank" 
+                                       rel="noopener noreferrer"
+                                       className="text-primary underline"
+                                     >
+                                       browserless.io
+                                     </a>
+                                   </p>
+                                 </div>
+
+                                 {isCapturing && (
+                                   <div className="space-y-2">
+                                     <div className="flex items-center gap-2">
+                                       <Loader2 className="h-4 w-4 animate-spin" />
+                                       <span className="text-sm">Spracovávam screenshot...</span>
+                                     </div>
+                                     <Progress value={captureProgress} className="w-full" />
+                                   </div>
+                                 )}
+
+                                 <div className="flex gap-2">
+                                   <Button
+                                     onClick={handleSmartCapture}
+                                     disabled={!apiKey || isCapturing}
+                                     className="flex-1"
+                                   >
+                                     {isCapturing ? (
+                                       <>
+                                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                         Zachytávam...
+                                       </>
+                                     ) : (
+                                       <>
+                                         <Camera className="h-4 w-4 mr-2" />
+                                         Zachytiť & Analyzovať
+                                       </>
+                                     )}
+                                   </Button>
+                                   <Button
+                                     variant="outline"
+                                     onClick={() => setShowCaptureDialog(false)}
+                                     disabled={isCapturing}
+                                   >
+                                     Zrušiť
+                                   </Button>
+                                 </div>
+                               </div>
+                             </DialogContent>
+                           </Dialog>
+                           
+                           <span className="text-sm text-muted-foreground">alebo</span>
+                           
+                           <Button
+                             variant="outline"
+                             size="sm"
+                             onClick={() => document.getElementById('screenshot-upload')?.click()}
+                           >
+                             <Upload className="h-4 w-4 mr-2" />
+                             Nahrať súbor
+                           </Button>
+                         </div>
+
+                         {/* Manual upload area */}
+                         <div className="text-center">
+                           <label htmlFor="screenshot-upload" className="cursor-pointer">
+                             <div className="flex flex-col items-center gap-2 p-6 hover:bg-muted/50 rounded-lg transition-colors">
+                               <Image className="h-8 w-8 text-muted-foreground" />
+                               <p className="text-sm text-muted-foreground">
+                                 Manuálne nahranie screenshot súboru cookie lišty
+                               </p>
+                             </div>
+                           </label>
+                           <input
+                             id="screenshot-upload"
+                             type="file"
+                             accept="image/*"
+                             onChange={handleScreenshotUpload}
+                             className="hidden"
+                           />
+                         </div>
+                       </div>
+                     ) : (
+                       <div className="space-y-3">
+                         {/* OCR Analysis Results */}
+                         {ocrAnalysis && (
+                           <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                             <div className="flex items-center gap-2">
+                               <Eye className="h-4 w-4 text-primary" />
+                               <span className="text-sm font-medium">OCR Analýza</span>
+                               <Badge 
+                                 variant={ocrAnalysis.evaluation.uxAssessment === 'transparent' ? 'default' : 
+                                         ocrAnalysis.evaluation.uxAssessment === 'unbalanced' ? 'secondary' : 'destructive'}
+                                 className="text-xs"
+                               >
+                                 {ocrAnalysis.evaluation.uxAssessment === 'transparent' ? 'Transparentná' :
+                                  ocrAnalysis.evaluation.uxAssessment === 'unbalanced' ? 'Nevyvážená' : 'Problematická'}
+                               </Badge>
+                             </div>
+                             
+                             <div className="grid grid-cols-3 gap-2 text-xs">
+                               <div>
+                                 <span className="font-medium text-success">Accept:</span>
+                                 <span className="ml-1">{ocrAnalysis.buttons.accept.length}</span>
+                               </div>
+                               <div>
+                                 <span className="font-medium text-destructive">Reject:</span>
+                                 <span className="ml-1">{ocrAnalysis.buttons.reject.length}</span>
+                               </div>
+                               <div>
+                                 <span className="font-medium text-warning">Settings:</span>
+                                 <span className="ml-1">{ocrAnalysis.buttons.settings.length}</span>
+                               </div>
+                             </div>
+                             
+                             {(ocrAnalysis.buttons.accept.length > 0 || ocrAnalysis.buttons.reject.length > 0 || ocrAnalysis.buttons.settings.length > 0) && (
+                               <div className="text-xs space-y-1">
+                                 {ocrAnalysis.buttons.accept.length > 0 && (
+                                   <div><strong>Accept:</strong> {ocrAnalysis.buttons.accept.slice(0, 3).join(', ')}</div>
+                                 )}
+                                 {ocrAnalysis.buttons.reject.length > 0 && (
+                                   <div><strong>Reject:</strong> {ocrAnalysis.buttons.reject.slice(0, 3).join(', ')}</div>
+                                 )}
+                                 {ocrAnalysis.buttons.settings.length > 0 && (
+                                   <div><strong>Settings:</strong> {ocrAnalysis.buttons.settings.slice(0, 3).join(', ')}</div>
+                                 )}
+                               </div>
+                             )}
+                           </div>
+                         )}
+                         
+                         <div className="relative">
+                           <img 
+                             src={screenshotPreview} 
+                             alt="Cookie banner screenshot" 
+                             className="w-full max-w-md mx-auto rounded-lg border"
+                           />
+                           <Button
+                             variant="destructive"
+                             size="sm"
+                             onClick={removeScreenshot}
+                             className="absolute top-2 right-2"
+                           >
+                             <X className="h-4 w-4" />
+                           </Button>
+                         </div>
+                         <p className="text-xs text-muted-foreground text-center">
+                           Screenshot bude zahrnutý v PDF reporte pre detailnú UX analýzu.
+                         </p>
+                       </div>
+                     )}
                     
                     {!screenshot && !screenshotPreview && (
                       <Alert className="mt-3">
