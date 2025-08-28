@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AuditForm } from '@/components/AuditForm';
 import { AuditResults } from '@/components/AuditResults';
 import { EmailDraft } from '@/components/EmailDraft';
+import { AnalysisProgress, DEFAULT_AUDIT_STEPS } from '@/components/AnalysisProgress';
 import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
@@ -11,20 +12,35 @@ const Index = () => {
   const [auditData, setAuditData] = useState<AuditData | null>(null);
   const [showEmailDraft, setShowEmailDraft] = useState(false);
   const [clientEmail, setClientEmail] = useState('');
+  const [showProgress, setShowProgress] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
   const { toast } = useToast();
 
   const handleAuditSubmit = async (input: string, email: string, isHtml: boolean) => {
     setIsLoading(true);
+    setShowProgress(true);
+    setCurrentStep(0);
     setClientEmail(email);
     
     try {
-      const data = await simulateAudit(input, isHtml);
+      const minDuration = isHtml ? 2000 : 4000; // Shorter for HTML, longer for URL
+      
+      const data = await simulateAudit(
+        input, 
+        isHtml, 
+        (stepIndex) => setCurrentStep(stepIndex),
+        minDuration
+      );
+      
       setAuditData(data);
+      setShowProgress(false);
+      
       toast({
         title: "Audit dokončený",
         description: "Analýza webovej stránky bola úspešne dokončená",
       });
     } catch (error) {
+      setShowProgress(false);
       toast({
         title: "Chyba",
         description: "Nepodarilo sa vykonať audit webovej stránky",
@@ -74,6 +90,12 @@ const Index = () => {
             />
           )}
         </div>
+
+        <AnalysisProgress 
+          steps={DEFAULT_AUDIT_STEPS}
+          currentStepIndex={currentStep}
+          isVisible={showProgress}
+        />
       </div>
     </div>
   );

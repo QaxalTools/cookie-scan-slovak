@@ -1,6 +1,7 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { SimulationBadge } from '@/components/SimulationBadge';
 import { 
   CheckCircle, 
   XCircle, 
@@ -43,6 +44,16 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
 
   return (
     <div className="space-y-6">
+      <div className="text-center mb-6">
+        <div className="flex items-center justify-center gap-3 mb-2">
+          <h2 className="text-2xl font-bold">Výsledky auditu</h2>
+          <SimulationBadge />
+        </div>
+        <p className="text-muted-foreground">
+          Komplexná analýza GDPR a ePrivacy súladu
+        </p>
+      </div>
+
       {/* A) Manažérsky sumár */}
       <Card className="shadow-medium">
         <CardHeader>

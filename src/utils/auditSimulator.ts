@@ -1,5 +1,9 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
 
+export interface ProgressCallback {
+  (stepIndex: number, totalSteps: number): void;
+}
+
 // Known service mappings for deterministic detection
 const SERVICE_PATTERNS = {
   'facebook.com': 'Facebook Pixel',
@@ -68,15 +72,50 @@ const PERSONAL_DATA_PATTERNS = [
   /email/i, /phone/i, /identifier/i, /tracking/i
 ];
 
-export async function simulateAudit(input: string, isHtml: boolean = false): Promise<AuditData> {
-  // Generate internal JSON structure for consistency
-  const internalJson = await generateInternalAuditJson(input, isHtml);
+export async function simulateAudit(
+  input: string, 
+  isHtml: boolean = false, 
+  onProgress?: ProgressCallback,
+  minDurationMs: number = 3000
+): Promise<AuditData> {
+  const startTime = Date.now();
+  const totalSteps = 8;
+  
+  // Helper function to update progress and add artificial delay
+  const updateProgress = async (stepIndex: number) => {
+    onProgress?.(stepIndex, totalSteps);
+    
+    // Add realistic delays between steps
+    const stepDelay = isHtml ? 200 : 400;
+    await new Promise(resolve => setTimeout(resolve, stepDelay));
+  };
+
+  // Step 1: Fetch/Parse
+  await updateProgress(0);
+  
+  // Generate internal JSON structure with progress updates
+  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
+  
+  // Final step: Generate results
+  await updateProgress(7);
   
   // Convert internal JSON to display format
-  return convertToDisplayFormat(internalJson, input);
+  const auditData = convertToDisplayFormat(internalJson, input);
+  
+  // Ensure minimum duration for credibility
+  const elapsed = Date.now() - startTime;
+  if (elapsed < minDurationMs) {
+    await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
+  }
+  
+  return auditData;
 }
 
-async function generateInternalAuditJson(input: string, isHtml: boolean): Promise<InternalAuditJson> {
+async function generateInternalAuditJson(
+  input: string, 
+  isHtml: boolean, 
+  updateProgress?: (stepIndex: number) => Promise<void>
+): Promise<InternalAuditJson> {
   let htmlContent = input;
   let finalUrl = input;
 
@@ -97,19 +136,23 @@ async function generateInternalAuditJson(input: string, isHtml: boolean): Promis
     }
   }
 
-  // Analyze third parties from HTML
+  // Analyze third parties from HTML with progress updates
+  await updateProgress?.(1); // HTTPS check
+  const https = { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true };
+  
+  await updateProgress?.(2); // Third parties
   const thirdParties = extractThirdParties(htmlContent, finalUrl);
   
-  // Analyze beacons/trackers
+  await updateProgress?.(3); // Trackers
   const beacons = extractBeacons(htmlContent);
   
-  // Analyze cookies (simulated based on detected services)
+  await updateProgress?.(4); // Cookies
   const cookies = generateCookiesFromServices(thirdParties, beacons);
   
-  // Analyze storage
+  await updateProgress?.(5); // Storage
   const storage = extractStorage(htmlContent);
   
-  // Analyze CMP
+  await updateProgress?.(6); // Consent
   const cmp = analyzeCMP(htmlContent, beacons);
   
   // Determine verdict with validation safeguards
@@ -117,10 +160,7 @@ async function generateInternalAuditJson(input: string, isHtml: boolean): Promis
 
   return {
     final_url: finalUrl,
-    https: {
-      supports: finalUrl.startsWith('https://'),
-      redirects_http_to_https: true // Assume modern sites redirect
-    },
+    https,
     third_parties: thirdParties,
     beacons: beacons,
     cookies: cookies,
@@ -409,6 +449,15 @@ function determineVerdict(
 ): { verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE'; reasons: string[] } {
   const reasons: string[] = [];
 
+  // SIMULATION SAFEGUARDS: For simulated mode, lean towards INCOMPLETE rather than false compliance
+  // This prevents false confidence in compliance status
+  if (!thirdParties.length && !beacons.length && !cookies.length) {
+    return {
+      verdict: 'INCOMPLETE',
+      reasons: ['Simulačný režim: Nedostatok dát pre spoľahlivý verdikt', 'Potrebná reálna analýza webovej stránky']
+    };
+  }
+
   // Validation safeguards (Poistky A-D)
   
   // Poistka A - Data consistency
@@ -434,6 +483,11 @@ function determineVerdict(
   // Poistka D - CMP ineffectiveness
   if (cmp.present && cmp.pre_consent_fires) {
     reasons.push('CMP neblokuje trackery pred súhlasom');
+  }
+
+  // SIMULATION ENHANCED SAFEGUARDS: Add uncertainty for simulation
+  if (thirdParties.length > 2 || beacons.length > 1) {
+    reasons.push('Simulačný režim: Komplexná stránka vyžaduje detailnú analýzu');
   }
 
   // Determine final verdict
