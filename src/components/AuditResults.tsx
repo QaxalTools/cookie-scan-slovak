@@ -123,7 +123,7 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
   const handleDownloadPDF = async () => {
     setIsGeneratingPDF(true);
     try {
-      const pdf = generatePDFReport(data);
+      const pdf = await generatePDFReport(data);
       const dateStr = new Date().toISOString().split('T')[0];
       pdf.save(`gdpr-audit-report-${dateStr}.pdf`);
       

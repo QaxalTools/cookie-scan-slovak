@@ -5,7 +5,7 @@ import { calculateRiskScoresFromDisplay, calculateOverallRiskFromScores } from '
 // Add Unicode font support for Slovak diacritics
 import 'jspdf/dist/polyfills.es.js';
 
-export const generatePDFReport = (data: AuditData): jsPDF => {
+export const generatePDFReport = async (data: AuditData): Promise<jsPDF> => {
   const pdf = new jsPDF('p', 'mm', 'a4');
   let currentY = 30;
   const leftMargin = 20;
@@ -27,26 +27,12 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     border: '#e5e7eb'
   };
 
-  // Load Inter font for Slovak diacritics support
-  const loadFonts = async () => {
+  // Simplified font setup - use helvetica for reliability
+  const setupFonts = () => {
     try {
-      const [regularFont, boldFont] = await Promise.all([
-        fetch('/fonts/Inter-Regular.woff2').then(res => res.arrayBuffer()),
-        fetch('/fonts/Inter-Bold.woff2').then(res => res.arrayBuffer())
-      ]);
-      
-      // Convert ArrayBuffer to base64 string for jsPDF
-      const regularBase64 = btoa(String.fromCharCode(...new Uint8Array(regularFont)));
-      const boldBase64 = btoa(String.fromCharCode(...new Uint8Array(boldFont)));
-      
-      pdf.addFileToVFS('Inter-Regular.woff2', regularBase64);
-      pdf.addFileToVFS('Inter-Bold.woff2', boldBase64);
-      pdf.addFont('Inter-Regular.woff2', 'Inter', 'normal');
-      pdf.addFont('Inter-Bold.woff2', 'Inter', 'bold');
-      pdf.setFont('Inter', 'normal');
-    } catch (error) {
-      console.warn('Failed to load Inter font, using default:', error);
       pdf.setFont('helvetica', 'normal');
+    } catch (error) {
+      console.warn('Font setup error:', error);
     }
   };
   
@@ -57,8 +43,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     
     // Date on the left
     pdf.setFontSize(8);
-    pdf.setFont('Inter', 'normal');
-    pdf.setTextColor(colors.gray);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor(107, 114, 128); // colors.gray converted to RGB
     pdf.text(dateStr, leftMargin, 15);
     
     // Title in center
@@ -73,8 +59,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
   // Footer with page numbers
   const addFooter = () => {
     pdf.setFontSize(8);
-    pdf.setFont('Inter', 'normal');
-    pdf.setTextColor(colors.gray);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor(107, 114, 128); // colors.gray
     pdf.text(`${pageNumber}/${totalPages}`, pageWidth - leftMargin, pageHeight - 10, { align: 'right' });
   };
   
@@ -99,8 +85,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     addPageIfNeeded(fontSize + spacing);
     
     pdf.setFontSize(fontSize);
-    pdf.setFont('Inter', 'bold');
-    pdf.setTextColor(colors.text);
+    pdf.setFont('helvetica', 'bold');
+    pdf.setTextColor(17, 24, 39); // colors.text
     
     if (level === 1) {
       // Main title centered
@@ -114,8 +100,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
 
   const addParagraph = (text: string, fontSize: number = 10, fontWeight: 'normal' | 'bold' = 'normal') => {
     pdf.setFontSize(fontSize);
-    pdf.setFont('Inter', fontWeight);
-    pdf.setTextColor(colors.text);
+    pdf.setFont('helvetica', fontWeight);
+    pdf.setTextColor(17, 24, 39); // colors.text
     
     const maxWidth = rightMargin - leftMargin;
     const lines = pdf.splitTextToSize(text, maxWidth);
@@ -133,8 +119,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
 
   const addKeyValue = (label: string, value: string) => {
     pdf.setFontSize(10);
-    pdf.setFont('Inter', 'normal');
-    pdf.setTextColor(colors.text);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor(17, 24, 39); // colors.text
     
     addPageIfNeeded(lineHeight + 2);
     
@@ -179,8 +165,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     
     // Header text
     pdf.setFontSize(9);
-    pdf.setFont('Inter', 'bold');
-    pdf.setTextColor(colors.text);
+    pdf.setFont('helvetica', 'bold');
+    pdf.setTextColor(17, 24, 39); // colors.text
     
     let currentX = leftMargin;
     headers.forEach((header, i) => {
@@ -199,23 +185,23 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
       pdf.rect(leftMargin, currentY - 2, tableWidth, rowHeight, 'F');
       
       pdf.setFontSize(8);
-      pdf.setFont('Inter', 'normal');
+      pdf.setFont('helvetica', 'normal');
       
       currentX = leftMargin;
       row.forEach((cell, cellIndex) => {
         // Color cells based on status
         if (statusColumns && statusColumns.includes(cellIndex)) {
           if (cell === 'OK' || cell === 'NIE') {
-            pdf.setTextColor(colors.ok);
+            pdf.setTextColor(22, 163, 74); // colors.ok
           } else if (cell === 'WARNING') {
-            pdf.setTextColor(colors.warning);
+            pdf.setTextColor(245, 158, 11); // colors.warning
           } else if (cell === 'ERROR' || cell === 'ÁNO') {
-            pdf.setTextColor(colors.error);
+            pdf.setTextColor(239, 68, 68); // colors.error
           } else {
-            pdf.setTextColor(colors.text);
+            pdf.setTextColor(17, 24, 39); // colors.text
           }
         } else {
-          pdf.setTextColor(colors.text);
+          pdf.setTextColor(17, 24, 39); // colors.text
         }
         
         // Truncate long text
@@ -249,7 +235,7 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
 
   const addNote = (text: string, type: 'warning' | 'ok' = 'warning') => {
     const bgColor = type === 'warning' ? [255, 243, 205] : [220, 252, 231];
-    const textColor = type === 'warning' ? colors.warning : colors.ok;
+    const textColor = type === 'warning' ? [245, 158, 11] : [22, 163, 74];
     
     const maxWidth = rightMargin - leftMargin - 8;
     const lines = pdf.splitTextToSize(text, maxWidth);
@@ -263,8 +249,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     
     // Text
     pdf.setFontSize(9);
-    pdf.setFont('Inter', 'normal');
-    pdf.setTextColor(textColor);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor(textColor[0], textColor[1], textColor[2]);
     
     lines.forEach((line: string) => {
       pdf.text(line, leftMargin + 4, currentY);
@@ -278,8 +264,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     items.forEach(item => {
       addPageIfNeeded(lineHeight + 2);
       pdf.setFontSize(9);
-      pdf.setFont('Inter', 'normal');
-      pdf.setTextColor(colors.text);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor(17, 24, 39); // colors.text
       pdf.text(`• ${item}`, leftMargin + 5, currentY);
       currentY += lineHeight + 2;
     });
@@ -288,8 +274,8 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
 
   // Generate PDF content
   try {
-    // Load fonts first
-    loadFonts();
+    // Setup fonts
+    setupFonts();
     
     // Add initial header
     addHeader();
@@ -304,10 +290,10 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     
     // Verdict with colored badge
     pdf.setFontSize(11);
-    pdf.setFont('Inter', 'bold');
-    const verdictColor = data.managementSummary.verdict === 'súlad' ? colors.ok : 
-                        data.managementSummary.verdict === 'čiastočný súlad' ? colors.warning : colors.error;
-    pdf.setTextColor(verdictColor);
+    pdf.setFont('helvetica', 'bold');
+    const verdictColor = data.managementSummary.verdict === 'súlad' ? [22, 163, 74] : 
+                        data.managementSummary.verdict === 'čiastočný súlad' ? [245, 158, 11] : [239, 68, 68];
+    pdf.setTextColor(verdictColor[0], verdictColor[1], verdictColor[2]);
     pdf.text(`Verdikt: ${data.managementSummary.verdict.toUpperCase()}`, leftMargin, currentY);
     currentY += 8;
     
@@ -326,13 +312,13 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
     // 1. HTTPS
     addTitle('1. HTTPS zabezpečenie', 3);
     if (data.detailedAnalysis.https.status === 'ok') {
-      pdf.setTextColor(colors.ok);
+      pdf.setTextColor(22, 163, 74); // colors.ok
       addParagraph('HTTPS je správne nakonfigurované', 10, 'normal');
     } else {
-      pdf.setTextColor(colors.error);
+      pdf.setTextColor(239, 68, 68); // colors.error
       addParagraph(data.detailedAnalysis.https.comment, 10, 'normal');
     }
-    pdf.setTextColor(colors.text);
+    pdf.setTextColor(17, 24, 39); // colors.text
     currentY += 3;
     
     // 2. Tretie strany
