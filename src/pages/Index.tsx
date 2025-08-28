@@ -30,10 +30,10 @@ const Index = () => {
       let isLiveMode = false;
       let finalUrl = input;
 
-      // For URL inputs, try to fetch real HTML using Edge Function
+      // For URL inputs, try to render and inspect with two-phase capture
       if (!isHtml) {
         try {
-          const { data, error } = await supabase.functions.invoke('fetch-html', {
+          const { data, error } = await supabase.functions.invoke('render-and-inspect', {
             body: { url: input },
           });
 
@@ -41,20 +41,34 @@ const Index = () => {
             throw error;
           }
 
-          if (data?.success && data?.html) {
+          if (data?.success && data?.renderedHTML_post) {
             // Inject base tag to ensure correct domain identification
             const baseTag = `<base href="${data.finalUrl || input}">`;
-            auditInput = data.html.replace('<head>', `<head>${baseTag}`);
+            auditInput = data.renderedHTML_post.replace('<head>', `<head>${baseTag}`);
             isHtml = true;
             isLiveMode = true;
             finalUrl = data.finalUrl || input;
+            
+            // Store render data for audit
+            (window as any).renderData = {
+              preConsentData: {
+                html: data.renderedHTML_pre?.replace('<head>', `<head>${baseTag}`) || '',
+                cookies: data.cookies_pre || [],
+                requests: data.requests_pre || []
+              },
+              postConsentData: {
+                html: data.renderedHTML_post?.replace('<head>', `<head>${baseTag}`) || '',
+                cookies: data.cookies_post || [],
+                requests: data.requests_post || []
+              }
+            };
             
             toast({
               title: "Live analýza spustená",
               description: "Načítavame reálne dáta z webstránky...",
             });
           } else {
-            throw new Error(data?.error || 'Failed to fetch HTML');
+            throw new Error(data?.error || 'Failed to render and inspect');
           }
         } catch (fetchError) {
           console.log('Live fetch failed, falling back to simulation:', fetchError);
@@ -68,12 +82,13 @@ const Index = () => {
 
       const minDuration = isHtml ? 2000 : 4000;
       
-      // Run main audit simulation
+      // Run main audit simulation with render data if available
       const data = await simulateAudit(
         auditInput, 
         isHtml, 
         (stepIndex) => setCurrentStep(stepIndex),
-        minDuration
+        minDuration,
+        (window as any).renderData
       );
       
       // Update audit data with live mode information

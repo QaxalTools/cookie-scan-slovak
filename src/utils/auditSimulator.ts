@@ -93,7 +93,19 @@ export async function simulateAudit(
   input: string, 
   isHtml: boolean = false, 
   onProgress?: ProgressCallback,
-  minDurationMs: number = 3000
+  minDurationMs: number = 3000,
+  renderData?: {
+    preConsentData?: {
+      html: string;
+      cookies: any[];
+      requests: any[];
+    };
+    postConsentData?: {
+      html: string;
+      cookies: any[];
+      requests: any[];
+    };
+  }
 ): Promise<AuditData> {
   const startTime = Date.now();
   const totalSteps = 9;
@@ -111,7 +123,7 @@ export async function simulateAudit(
   await updateProgress(0);
   
   // Generate internal JSON structure with progress updates
-  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
+  const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress, renderData);
   
   // Final step: Generate results
   await updateProgress(8);
@@ -165,8 +177,20 @@ function generateRiskScore(internalJson: InternalAuditJson): number {
 
 async function generateInternalAuditJson(
   input: string, 
-  isHtml: boolean, 
-  updateProgress?: (stepIndex: number) => Promise<void>
+  isHtml: boolean,
+  updateProgress?: (stepIndex: number) => Promise<void>,
+  renderData?: {
+    preConsentData?: {
+      html: string;
+      cookies: any[];
+      requests: any[];
+    };
+    postConsentData?: {
+      html: string;
+      cookies: any[];
+      requests: any[];
+    };
+  }
 ): Promise<InternalAuditJson> {
   let htmlContent = input;
   let finalUrl = input;
@@ -200,7 +224,25 @@ async function generateInternalAuditJson(
   const beacons = extractBeacons(htmlContent);
   
   await updateProgress?.(4); // Cookies
-  const cookies = generateCookiesFromServices(thirdParties, beacons, !isHtml, getDomain(finalUrl));
+  // Generate cookies from both browser data and simulation
+  let cookies = generateCookiesFromServices(thirdParties, beacons, !isHtml, getDomain(finalUrl));
+  
+  // If we have render data, merge with browser cookies
+  if (renderData?.postConsentData?.cookies) {
+    const browserCookies = renderData.postConsentData.cookies.map(cookie => ({
+      name: cookie.name,
+      domain: cookie.domain,
+      party: cookie.domain === getDomain(finalUrl) ? '1P' as const : '3P' as const,
+      type: categorizeCookieFromName(cookie.name),
+      expiry_days: cookie.expires ? Math.round((new Date(cookie.expires).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null
+    }));
+    
+    // Merge browser cookies with simulated ones (browser cookies take precedence)
+    const cookieMap = new Map();
+    cookies.forEach(cookie => cookieMap.set(`${cookie.name}-${cookie.domain}`, cookie));
+    browserCookies.forEach(cookie => cookieMap.set(`${cookie.name}-${cookie.domain}`, cookie));
+    cookies = Array.from(cookieMap.values());
+  }
   
   await updateProgress?.(5); // Storage
   const storage = extractStorage(htmlContent);
@@ -347,6 +389,28 @@ function extractBeacons(html: string): Array<{ host: string; sample_url: string;
   }
 
   return beacons;
+}
+
+function categorizeCookieFromName(cookieName: string): 'technical' | 'analytics' | 'marketing' {
+  const lowerName = cookieName.toLowerCase();
+  
+  // Marketing cookies
+  if (lowerName.includes('fbp') || lowerName.includes('fbc') || lowerName.includes('_gcl') || 
+      lowerName.includes('gclid') || lowerName.includes('_ga') || lowerName.includes('_gid') ||
+      lowerName.includes('_gat') || lowerName.includes('utm_') || lowerName.includes('_fbp') ||
+      lowerName.includes('_fbc') || lowerName.includes('gads') || lowerName.includes('doubleclick')) {
+    return 'marketing';
+  }
+  
+  // Analytics cookies
+  if (lowerName.includes('analytics') || lowerName.includes('_ga') || lowerName.includes('_gid') ||
+      lowerName.includes('_gat') || lowerName.includes('_gtm') || lowerName.includes('hotjar') ||
+      lowerName.includes('_hjid') || lowerName.includes('_hjSession')) {
+    return 'analytics';
+  }
+  
+  // Default to technical
+  return 'technical';
 }
 
 function generateCookiesFromServices(thirdParties: Array<{ host: string; service: string }>, beacons: Array<{ host: string; sample_url: string; params: string[]; service: string; pre_consent: boolean }>, isSimulation: boolean = false, actualDomain?: string): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null }> {

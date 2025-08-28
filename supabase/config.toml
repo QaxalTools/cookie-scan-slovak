@@ -5,3 +5,6 @@ verify_jwt = true
 
 [functions.capture-consent-banner]
 verify_jwt = true
+
+[functions.render-and-inspect]
+verify_jwt = true
