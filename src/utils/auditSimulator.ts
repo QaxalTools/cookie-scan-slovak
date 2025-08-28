@@ -471,7 +471,7 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
   const detailedAnalysis = {
     https: {
       status: internalJson.https.supports ? 'ok' as const : 'warning' as const,
-      description: internalJson.https.supports ? 'HTTPS je správne nakonfigurované' : 'HTTPS nie je nakonfigurované'
+      comment: internalJson.https.supports ? 'HTTPS je správne nakonfigurované' : 'HTTPS nie je nakonfigurované'
     },
     thirdParties: {
       total: internalJson.third_parties.length,
@@ -532,7 +532,10 @@ function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: 
       overall: managementSummary.overall,
       risks: managementSummary.risks
     },
-    https: detailedAnalysis.https,
+    https: {
+      status: detailedAnalysis.https.status,
+      description: detailedAnalysis.https.comment
+    },
     cookies: {
       total: internalJson.cookies.length,
       technical: internalJson.cookies.filter(c => c.type === 'technical').length,
