@@ -9,27 +9,39 @@ export interface ProgressCallback {
 const SERVICE_PATTERNS = {
   'facebook.com': 'Facebook Pixel',
   'connect.facebook.net': 'Facebook SDK',
+  'static.xx.fbcdn.net': 'Facebook CDN',
   'google-analytics.com': 'Google Analytics',
+  'region1.google-analytics.com': 'Google Analytics 4',
   'googletagmanager.com': 'Google Tag Manager',
   'googlesyndication.com': 'Google Ads',
+  'pagead2.googlesyndication.com': 'Google Ads Syndication',
   'googleadservices.com': 'Google Ads',
   'doubleclick.net': 'Google DoubleClick',
   'linkedin.com': 'LinkedIn Insights',
+  'px.ads.linkedin.com': 'LinkedIn Ads',
+  'snap.licdn.com': 'LinkedIn Insights',
   'platform.linkedin.com': 'LinkedIn Platform',
   'pinterest.com': 'Pinterest Tag',
   'ct.pinterest.com': 'Pinterest Conversion',
+  's.pinimg.com': 'Pinterest CDN',
   'analytics.tiktok.com': 'TikTok Pixel',
+  'platform.twitter.com': 'Twitter Platform',
+  'analytics.twitter.com': 'Twitter Analytics',
   'clarity.ms': 'Microsoft Clarity',
   'bing.com': 'Bing Ads',
   't.leady.com': 'Leady',
+  'ct.leady.com': 'Leady CDN',
   'events.getsitectrl.com': 'GetSiteControl',
+  'l.getsitecontrol.com': 'GetSiteControl Loader',
+  's2.getsitecontrol.com': 'GetSiteControl Static',
   'collector.snowplow.io': 'Snowplow',
   'd2dpiwfhf3tz0r.cloudfront.net': 'Snowplow',
   'etarget.sk': 'eTarget',
+  'sk.search.etargetnet.com': 'eTarget Search',
   'matomo.org': 'Matomo',
   'gstatic.com': 'Google Static',
   'recaptcha.net': 'reCAPTCHA',
-  'google.com/recaptcha': 'reCAPTCHA'
+  'google.com': 'reCAPTCHA'
 };
 
 // Pre-consent beacon patterns (critical for GDPR compliance)
@@ -37,6 +49,7 @@ const PRE_CONSENT_PATTERNS = [
   { pattern: /facebook\.com\/tr.*ev=PageView/, service: 'Facebook Pixel' },
   { pattern: /pagead2\.googlesyndication\.com\/ccm\/collect.*en=page_view/, service: 'Google Ads' },
   { pattern: /region1\.google-analytics\.com\/g\/collect/, service: 'Google Analytics' },
+  { pattern: /google-analytics\.com.*collect/, service: 'Google Analytics' },
   { pattern: /ct\.pinterest\.com\/v3.*event=init/, service: 'Pinterest' },
   { pattern: /ct\.pinterest\.com\/user/, service: 'Pinterest' },
   { pattern: /t\.leady\.com\/L\?/, service: 'Leady' },
@@ -44,7 +57,10 @@ const PRE_CONSENT_PATTERNS = [
   { pattern: /collector\.snowplow\.io.*\/i\?.*e=pv/, service: 'Snowplow' },
   { pattern: /d2dpiwfhf3tz0r\.cloudfront\.net.*\/i\?.*e=pv/, service: 'Snowplow' },
   { pattern: /clarity\.ms.*collect/, service: 'Microsoft Clarity' },
-  { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' }
+  { pattern: /analytics\.tiktok\.com.*track/, service: 'TikTok' },
+  { pattern: /px\.ads\.linkedin\.com.*collect/, service: 'LinkedIn Ads' },
+  { pattern: /snap\.licdn\.com.*li_fat_id/, service: 'LinkedIn Insights' },
+  { pattern: /analytics\.twitter\.com.*track/, service: 'Twitter Analytics' }
 ];
 
 // Cookie classification patterns
@@ -69,8 +85,9 @@ const COOKIE_PATTERNS = {
 // LocalStorage patterns that indicate personal data
 const PERSONAL_DATA_PATTERNS = [
   /user_?id/i, /client_?id/i, /visitor_?id/i, /session_?id/i,
-  /ip_?address/i, /location/i, /geo/i, /latitude/i, /longitude/i,
-  /email/i, /phone/i, /identifier/i, /tracking/i
+  /ip_?address/i, /ip/i, /location/i, /geo/i, /latitude/i, /longitude/i,
+  /email/i, /phone/i, /identifier/i, /tracking/i, /gscs/i,
+  /snowplow/i, /sp_/i, /fbp/i, /fbc/i, /leady/i
 ];
 
 export async function simulateAudit(
@@ -475,8 +492,46 @@ function determineVerdict(
 ): { verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE'; reasons: string[] } {
   const reasons: string[] = [];
 
+  // CRITICAL: Check for pre-consent violations first (most important)
+  const preConsentBeacons = beacons.filter(beacon => beacon.pre_consent);
+  if (preConsentBeacons.length > 0) {
+    const services = preConsentBeacons.map(b => b.service).join(', ');
+    reasons.push(`Pred-súhlasové volania: ${services}`);
+  }
+
+  // Check for PII in storage before consent
+  const storageWithPII = storage.filter(item => item.contains_personal_data);
+  if (storageWithPII.length > 0) {
+    const keys = storageWithPII.map(s => s.key).join(', ');
+    reasons.push(`Osobné údaje v LocalStorage bez súhlasu: ${keys}`);
+  }
+
+  // Check CMP effectiveness
+  if (!cmp.present) {
+    reasons.push('Chýba Consent Management Platform (CMP)');
+  } else if (cmp.pre_consent_fires) {
+    reasons.push('CMP neefektívne - trackery bežia pred súhlasom');
+  }
+
+  // Check for tracking cookies without consent
+  const marketingCookiesArray = cookies.filter(c => c.type === 'marketing');
+  if (marketingCookiesArray.length > 0 && !cmp.present) {
+    reasons.push('Tracking cookies bez súhlasu používateľa');
+  }
+
+  // CRITICAL COMPLIANCE CHECKS (any violation = NON_COMPLIANT)
+  
+  // If we have any pre-consent violations or PII violations, immediate NON_COMPLIANT
+  if (preConsentBeacons.length > 0 || storageWithPII.length > 0) {
+    return { verdict: 'NON_COMPLIANT', reasons };
+  }
+
+  // If CMP issues or marketing cookies without consent
+  if (reasons.length > 0) {
+    return { verdict: 'NON_COMPLIANT', reasons };
+  }
+
   // SIMULATION SAFEGUARDS: For simulated mode, lean towards INCOMPLETE rather than false compliance
-  // This prevents false confidence in compliance status
   if (isSimulation && (!thirdParties.length && !beacons.length && !cookies.length)) {
     return {
       verdict: 'INCOMPLETE',
@@ -492,47 +547,16 @@ function determineVerdict(
     };
   }
 
-  // Validation safeguards (Poistky A-D)
-  
-  // Poistka A - Data consistency
-  const marketingCookies = cookies.filter(c => c.type === 'marketing').length;
-  const analyticsCookies = cookies.filter(c => c.type === 'analytics').length;
-  if (thirdParties.length === 0 && beacons.length > 0) {
-    reasons.push('Nekonzistentné dáta: Zistené trackery bez tretích strán');
-    return { verdict: 'INCOMPLETE', reasons };
+  // SAFEGUARD D: Minimal sensitivity check - if very few 3P detected but should have more
+  if (thirdParties.length <= 1 && beacons.length === 0) {
+    return {
+      verdict: 'INCOMPLETE',
+      reasons: ['Obmedzený zber údajov - odporúčame profesionálnu analýzu']
+    };
   }
 
-  // Poistka B - Pre-consent violations
-  const preConsentBeacons = beacons.filter(b => b.pre_consent);
-  if (preConsentBeacons.length > 0) {
-    reasons.push(`Pred-súhlasové volania: ${preConsentBeacons.map(b => b.service).join(', ')}`);
-  }
-
-  // Poistka C - LocalStorage PII
-  const personalDataInStorage = storage.filter(s => s.contains_personal_data);
-  if (personalDataInStorage.length > 0) {
-    reasons.push(`Osobné údaje v storage: ${personalDataInStorage.map(s => s.key).join(', ')}`);
-  }
-
-  // Poistka D - CMP ineffectiveness
-  if (cmp.present && cmp.pre_consent_fires) {
-    reasons.push('CMP neblokuje trackery pred súhlasom');
-  }
-
-  // SIMULATION ENHANCED SAFEGUARDS: Add uncertainty for simulation
-  if (thirdParties.length > 2 || beacons.length > 1) {
-    reasons.push('Simulačný režim: Komplexná stránka vyžaduje detailnú analýzu');
-  }
-
-  // Determine final verdict
-  if (reasons.length === 0) {
-    // Additional checks for compliance
-    if (marketingCookies === 0 && analyticsCookies === 0 && preConsentBeacons.length === 0) {
-      return { verdict: 'COMPLIANT', reasons: ['Žiadne porušenia GDPR/ePrivacy'] };
-    }
-  }
-
-  return { verdict: 'NON_COMPLIANT', reasons };
+  // Only return COMPLIANT if we have substantial evidence and no violations
+  return { verdict: 'COMPLIANT', reasons: [] };
 }
 
 function convertToDisplayFormat(internalJson: InternalAuditJson, originalInput: string): AuditData {

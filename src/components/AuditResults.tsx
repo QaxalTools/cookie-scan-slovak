@@ -71,11 +71,19 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               
               <h3>3. Trackery a web-beacony</h3>
               <table>
-                <tr><th>Služba</th><th>Host</th><th>Dôkaz</th><th>Stav</th></tr>
+                <tr><th>Služba</th><th>Host</th><th>Dôkaz</th><th>Pred súhlasom</th><th>Stav</th></tr>
                 ${data.detailedAnalysis.trackers.map(tracker =>
-                  `<tr><td>${tracker.service}</td><td>${tracker.host}</td><td>${tracker.evidence}</td><td class="status-${tracker.status}">${tracker.status.toUpperCase()}</td></tr>`
+                  `<tr><td>${tracker.service}</td><td>${tracker.host}</td><td>${tracker.evidence}</td><td>${tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}</td><td class="status-${tracker.status}">${tracker.status.toUpperCase()}</td></tr>`
                 ).join('')}
               </table>
+              
+              ${data._internal?.beacons?.filter(b => b.pre_consent).length > 0 ? `
+              <h4>Pred-súhlasové trackery (${data._internal.beacons.filter(b => b.pre_consent).length})</h4>
+              <ul>
+                ${data._internal.beacons.filter(b => b.pre_consent).map(beacon =>
+                  `<li><strong>${beacon.service}:</strong> ${beacon.sample_url}</li>`
+                ).join('')}
+              </ul>` : ''}
               
               <h3>4. Cookies (${data.detailedAnalysis.cookies.total})</h3>
               <table>
@@ -231,28 +239,53 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b">
-                    <th className="text-left p-2">Služba</th>
-                    <th className="text-left p-2">Host</th>
-                    <th className="text-left p-2">Dôkaz (URL/parametre)</th>
-                    <th className="text-left p-2">Stav</th>
-                  </tr>
+                   <tr className="border-b">
+                     <th className="text-left p-2">Služba</th>
+                     <th className="text-left p-2">Host</th>
+                     <th className="text-left p-2">Dôkaz (URL/parametre)</th>
+                     <th className="text-left p-2">Pred súhlasom</th>
+                     <th className="text-left p-2">Stav</th>
+                   </tr>
                 </thead>
                 <tbody>
-                  {data.detailedAnalysis.trackers.map((tracker, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="p-2">{tracker.service}</td>
-                      <td className="p-2 text-xs text-muted-foreground">{tracker.host}</td>
-                      <td className="p-2 text-xs font-mono bg-muted/50 rounded px-1">{tracker.evidence}</td>
-                      <td className="p-2">{getStatusBadge(tracker.status)}</td>
-                    </tr>
-                  ))}
+                   {data.detailedAnalysis.trackers.map((tracker, index) => (
+                     <tr key={index} className="border-b">
+                       <td className="p-2">{tracker.service}</td>
+                       <td className="p-2 text-xs text-muted-foreground">{tracker.host}</td>
+                       <td className="p-2 text-xs font-mono bg-muted/50 rounded px-1">{tracker.evidence}</td>
+                       <td className="p-2">
+                         <Badge variant={tracker.spamsBeforeConsent ? 'destructive' : 'secondary'} className="text-xs">
+                           {tracker.spamsBeforeConsent ? 'ÁNO' : 'NIE'}
+                         </Badge>
+                       </td>
+                       <td className="p-2">{getStatusBadge(tracker.status)}</td>
+                     </tr>
+                   ))}
                 </tbody>
-              </table>
-            </div>
-          </div>
+               </table>
+             </div>
+             
+             {/* Show pre-consent trackers explicitly if they exist */}
+             {data._internal?.beacons?.filter(b => b.pre_consent).length > 0 && (
+               <div className="mt-4 p-4 bg-destructive/10 border border-destructive/30 rounded-lg">
+                 <h4 className="font-semibold text-destructive mb-2">
+                   ⚠️ Pred-súhlasové trackery ({data._internal.beacons.filter(b => b.pre_consent).length})
+                 </h4>
+                 <div className="space-y-2">
+                   {data._internal.beacons.filter(b => b.pre_consent).map((beacon, index) => (
+                     <div key={index} className="text-xs font-mono bg-muted/50 p-2 rounded">
+                       <strong>{beacon.service}:</strong> {beacon.sample_url}
+                     </div>
+                   ))}
+                 </div>
+                 <p className="text-xs text-destructive mt-2">
+                   Tieto trackery sa spúšťajú automaticky pri načítaní stránky bez súhlasu používateľa.
+                 </p>
+               </div>
+             )}
+           </div>
 
-          {/* 4. Cookies */}
+           {/* 4. Cookies */}
           <div>
             <h3 className="font-semibold mb-2">4. Cookies ({data.detailedAnalysis.cookies.total})</h3>
             <div className="overflow-x-auto">
