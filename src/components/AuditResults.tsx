@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SimulationBadge } from '@/components/SimulationBadge';
+import { LiveBadge } from '@/components/LiveBadge';
 import { 
   CheckCircle, 
   XCircle, 
@@ -17,11 +19,15 @@ import {
   Lock,
   FileText,
   Monitor,
-  Scale
+  Scale,
+  Loader2
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { calculateRiskScoresFromDisplay, calculateOverallRiskFromScores } from '@/utils/riskScoring';
+import { autoCaptureConsent } from '@/utils/consentService';
+import { analyzeConsentScreenshot } from '@/utils/consentOcr';
+import { useToast } from '@/hooks/use-toast';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -72,6 +78,11 @@ const getVerdictColor = (verdict: string): string => {
 };
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
+  const [capturedScreenshot, setCapturedScreenshot] = useState<string | null>(null);
+  const [consentAnalysis, setConsentAnalysis] = useState<any>(null);
+  const { toast } = useToast();
+
   // Consistency checks
   const performConsistencyChecks = () => {
     const checks = [];
@@ -112,6 +123,37 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
     URL.revokeObjectURL(url);
   };
 
+  const handleCaptureScreenshot = async () => {
+    setIsCapturingScreenshot(true);
+    try {
+      const result = await autoCaptureConsent(data.url);
+      
+      if (result.success && result.screenshot) {
+        setCapturedScreenshot(result.screenshot);
+        
+        // Perform OCR analysis
+        const ocrResult = await analyzeConsentScreenshot(result.screenshot);
+        setConsentAnalysis(ocrResult);
+        
+        toast({
+          title: "Screenshot zachytený",
+          description: "Banner bol úspešne zachytený a analyzovaný.",
+        });
+      } else {
+        throw new Error(result.error || 'Zachytenie zlyhalo');
+      }
+    } catch (error) {
+      console.error('Screenshot capture failed:', error);
+      toast({
+        title: "Chyba pri zachytávaní",
+        description: error instanceof Error ? error.message : "Nepodarilo sa zachytiť screenshot.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCapturingScreenshot(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -122,7 +164,11 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               <CardTitle className="flex items-center gap-2">
                 <Shield className="h-6 w-6" />
                 GDPR Cookie Audit Report
-                <SimulationBadge />
+                {data.managementSummary.data_source?.includes('Simulácia') ? (
+                  <SimulationBadge />
+                ) : (
+                  <LiveBadge />
+                )}
               </CardTitle>
               <p className="text-muted-foreground mt-2">
                 URL: <span className="font-mono text-sm">{data.url}</span>
@@ -134,6 +180,19 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               )}
             </div>
             <div className="flex gap-2">
+              <Button 
+                onClick={handleCaptureScreenshot} 
+                variant="outline" 
+                size="sm"
+                disabled={isCapturingScreenshot}
+              >
+                {isCapturingScreenshot ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Camera className="h-4 w-4 mr-2" />
+                )}
+                Zachytiť banner
+              </Button>
               <Button variant="outline" size="sm" onClick={handleDownloadJSON}>
                 <Download className="h-4 w-4 mr-2" />
                 JSON
@@ -237,6 +296,59 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
           })()}
         </CardContent>
       </Card>
+
+      {/* Screenshot Proof Section */}
+      {(capturedScreenshot || data.consentUx?.screenshot) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Dôkaz - Cookie Banner Screenshot</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              <div className="border rounded-lg overflow-hidden">
+                <img 
+                  src={capturedScreenshot || data.consentUx?.screenshot} 
+                  alt="Cookie banner screenshot" 
+                  className="w-full h-auto"
+                />
+              </div>
+              
+              {(consentAnalysis || data.consentUx) && (
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <h4 className="font-medium mb-2">OCR Analýza</h4>
+                    <div className="text-sm space-y-1">
+                      <p><span className="font-medium">Dôvera OCR:</span> {((consentAnalysis || data.consentUx)?.confidence * 100 || 0).toFixed(1)}%</p>
+                      <p><span className="font-medium">Banner detekovaný:</span> {(consentAnalysis || data.consentUx)?.analysis?.bannerPresent ? 'Áno' : 'Nie'}</p>
+                      <p><span className="font-medium">Accept tlačidlo:</span> {(consentAnalysis || data.consentUx)?.analysis?.acceptButtonFound ? 'Áno' : 'Nie'}</p>
+                      <p><span className="font-medium">Reject tlačidlo:</span> {(consentAnalysis || data.consentUx)?.analysis?.rejectButtonFound ? 'Áno' : 'Nie'}</p>
+                      <p><span className="font-medium">Nastavenia:</span> {(consentAnalysis || data.consentUx)?.analysis?.settingsButtonFound ? 'Áno' : 'Nie'}</p>
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <h4 className="font-medium mb-2">UX Hodnotenie</h4>
+                    <div className="text-sm space-y-1">
+                      <p><span className="font-medium">Vyváženosť:</span> {(consentAnalysis || data.consentUx)?.analysis?.uxAssessment?.balance || 'N/A'}</p>
+                      <p><span className="font-medium">Prehľadnosť:</span> {(consentAnalysis || data.consentUx)?.analysis?.uxAssessment?.clarity || 'N/A'}</p>
+                      <p><span className="font-medium">Celkové skóre:</span> {(consentAnalysis || data.consentUx)?.analysis?.uxAssessment?.overallScore || 'N/A'}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {(consentAnalysis || data.consentUx)?.text && (
+                <details className="mt-4">
+                  <summary className="cursor-pointer font-medium">Extrahovaný text</summary>
+                  <pre className="mt-2 p-3 bg-muted rounded text-xs whitespace-pre-wrap">
+                    {(consentAnalysis || data.consentUx)?.text}
+                  </pre>
+                </details>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* B) Detailed Analysis */}
       <Card>

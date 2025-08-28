@@ -6,6 +6,7 @@ import { AnalysisProgress, DEFAULT_AUDIT_STEPS } from '@/components/AnalysisProg
 import { simulateAudit, generateEmailDraft } from '@/utils/auditSimulator';
 import { AuditData } from '@/types/audit';
 import { useToast } from '@/hooks/use-toast';
+import { supabase } from '@/integrations/supabase/client';
 
 const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
@@ -23,15 +24,61 @@ const Index = () => {
     setClientEmail(email);
     
     try {
+      let auditInput = input;
+      let isLiveMode = false;
+      let finalUrl = input;
+
+      // For URL inputs, try to fetch real HTML using Edge Function
+      if (!isHtml) {
+        try {
+          const { data, error } = await supabase.functions.invoke('fetch-html', {
+            body: { url: input },
+          });
+
+          if (error) {
+            throw error;
+          }
+
+          if (data?.success && data?.html) {
+            auditInput = data.html;
+            isHtml = true;
+            isLiveMode = true;
+            finalUrl = data.finalUrl || input;
+            
+            toast({
+              title: "Live analýza spustená",
+              description: "Načítavame reálne dáta z webstránky...",
+            });
+          } else {
+            throw new Error(data?.error || 'Failed to fetch HTML');
+          }
+        } catch (fetchError) {
+          console.log('Live fetch failed, falling back to simulation:', fetchError);
+          toast({
+            title: "Prechod na simuláciu",
+            description: "Nebolo možné načítať reálne dáta. Používame simuláciu.",
+            variant: "default",
+          });
+        }
+      }
+
       const minDuration = isHtml ? 2000 : 4000;
       
       // Run main audit simulation
       const data = await simulateAudit(
-        input, 
+        auditInput, 
         isHtml, 
         (stepIndex) => setCurrentStep(stepIndex),
         minDuration
       );
+      
+      // Update audit data with live mode information
+      if (isLiveMode) {
+        data.url = input; // Original URL
+        data.finalUrl = finalUrl;
+        data.hasRedirect = finalUrl !== input;
+        data.managementSummary.data_source = "Live analýza (server fetch)";
+      }
       
       // Skip to verdict step
       const verdictStepIndex = DEFAULT_AUDIT_STEPS.findIndex(step => step.id === 'verdict');
@@ -42,7 +89,7 @@ const Index = () => {
         setShowProgress(false);
         toast({
           title: "Audit dokončený",
-          description: isHtml ? "Analýza HTML kódu bola úspešne dokončená" : "Technická analýza bola úspešne dokončená",
+          description: isLiveMode ? "Live analýza dokončená." : "Simulácia dokončená.",
         });
         setIsLoading(false);
       }, 1000);

@@ -1,1 +1,7 @@
 project_id = "mwmgbosttdqsfrjfkfny"
+
+[functions.fetch-html]
+verify_jwt = true
+
+[functions.capture-consent-banner]
+verify_jwt = true
