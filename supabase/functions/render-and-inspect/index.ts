@@ -227,7 +227,7 @@ serve(async (req) => {
     `;
 
     // Call Browserless API with token parameter
-    const browserlessResponse = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
+    const browserlessResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

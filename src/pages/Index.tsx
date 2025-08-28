@@ -69,12 +69,39 @@ const Index = () => {
             throw new Error(data?.error || 'Failed to render and inspect');
           }
         } catch (fetchError) {
-          console.log('Live fetch failed, falling back to simulation:', fetchError);
-          toast({
-            title: "Prechod na simuláciu",
-            description: "Nebolo možné načítať reálne dáta. Používame simuláciu.",
-            variant: "default",
-          });
+          console.log('Live render failed, trying HTML fetch fallback:', fetchError);
+          
+          // Try HTML fetch as fallback
+          try {
+            const { data: htmlData, error: htmlError } = await supabase.functions.invoke('fetch-html', {
+              body: { url: input },
+            });
+
+            if (htmlError) {
+              throw htmlError;
+            }
+
+            if (htmlData?.success && htmlData?.html) {
+              const baseTag = `<base href="${htmlData.finalUrl || input}">`;
+              auditInput = htmlData.html.replace('<head>', `<head>${baseTag}`);
+              isHtml = true;
+              finalUrl = htmlData.finalUrl || input;
+              
+              toast({
+                title: "HTML analýza spustená",
+                description: "Získavame základné HTML dáta zo stránky...",
+              });
+            } else {
+              throw new Error(htmlData?.error || 'Failed to fetch HTML');
+            }
+          } catch (htmlError) {
+            console.log('HTML fetch also failed, falling back to simulation:', htmlError);
+            toast({
+              title: "Prechod na simuláciu",
+              description: "Nebolo možné načítať reálne dáta. Používame simuláciu.",
+              variant: "default",
+            });
+          }
         }
       }
 
