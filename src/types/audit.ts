@@ -49,6 +49,7 @@ export interface AuditData {
     verdict: 'súlad' | 'čiastočný súlad' | 'nesúlad' | 'neúplné dáta';
     overall: string;
     risks: string;
+    data_source?: string;
   };
 
   // B) Detailná analýza

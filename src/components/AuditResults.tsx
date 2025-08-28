@@ -80,6 +80,18 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                 {data.managementSummary.risks}
               </p>
             </div>
+            {data.managementSummary.data_source && (
+              <div className="p-3 rounded-lg bg-warning/10 border border-warning/30">
+                <p className="text-sm text-warning-foreground">
+                  <strong>Zdroj dát:</strong> {data.managementSummary.data_source}
+                  {data.managementSummary.data_source.includes('Simulácia') && (
+                    <span className="block mt-1 text-xs">
+                      Pre presné výsledky odporúčame použitie profesionálneho auditovacieho nástroja.
+                    </span>
+                  )}
+                </p>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
