@@ -499,8 +499,8 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         </CardContent>
       </Card>
 
-      {/* Consistency Check Alert */}
-      {consistencyIssues.length > 0 && (
+      {/* Consistency Check */}
+      {consistencyIssues.length > 0 ? (
         <Card className="shadow-medium border-destructive">
           <CardHeader>
             <CardTitle className="text-destructive">⚠️ INCOMPLETE - Zber alebo parsing neúplný</CardTitle>
@@ -518,6 +518,17 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               <p className="text-sm text-muted-foreground mt-2">
                 Verdikt zostáva <strong>NESÚLAD</strong>, ale dáta môžu byť neúplné.
               </p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="shadow-medium border-green-500/50 bg-green-50/50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-green-700">
+              <Shield className="h-4 w-4" />
+              <span className="text-sm font-medium">
+                ✓ Kontrola konzistencie: Všetky počty v tabuľkách sa zhodujú s číslami v súhrne.
+              </span>
             </div>
           </CardContent>
         </Card>
