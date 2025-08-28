@@ -71,9 +71,7 @@ export function performSelfCheck(
     gates,
     stats: {
       cookies_expiry_days: cookieStats,
-      trackers_with_params: trackerAnalysis.trackersWithParams,
-      cookies_3p_persisted: summary.cookies_3p_persisted,
-      cookies_3p_attempted: summary.cookies_3p_attempted
+      trackers_with_params: trackerAnalysis.trackersWithParams
     }
   };
 }
@@ -351,9 +349,9 @@ function runQualityGates(
     }
   });
 
-  // G3P: Third-party cookies probably blocked (check only)
-  const hasThirdPartiesForCheck = summary.third_parties_unique > 0;
-  const cookies3pBlocked = hasThirdPartiesForCheck && 
+  // G3P - Third-party cookies probably blocked
+  const hasThirdParties = summary.third_parties_unique > 0;
+  const cookies3pBlocked = hasThirdParties && 
                           summary.cookies_3p_persisted === 0 && 
                           summary.cookies_3p_attempted > 0;
   gates.push({

@@ -30,8 +30,6 @@ export interface AuditSelfCheck {
       marketing?: { min?: number; p50?: number; p95?: number; max?: number };
     };
     trackers_with_params: number;
-    cookies_3p_persisted: number;
-    cookies_3p_attempted: number;
   };
 }
 
@@ -59,12 +57,6 @@ export interface InternalAuditJson {
     party: '1P' | '3P';
     type: 'technical' | 'analytics' | 'marketing';
     expiry_days: number | null;
-    sources?: {
-      jar: boolean;
-      setCookie: boolean;
-      document: boolean;
-    };
-    persisted?: boolean;
   }>;
   storage: Array<{
     scope: 'local' | 'session';
@@ -129,12 +121,6 @@ export interface AuditData {
       category: 'technické' | 'analytické' | 'marketingové';
       expiration: string;
       status: 'ok' | 'warning' | 'error';
-      sources?: {
-        jar: boolean;
-        setCookie: boolean;
-        document: boolean;
-      };
-      persisted?: boolean;
     }>;
   };
   storage: Array<{
