@@ -16,6 +16,55 @@ Deno.serve(async (req: Request) => {
   let requestData = null;
   let url = '';
   let supabase, browserlessApiKey;
+
+  // Set-Cookie header parsers
+  const parseSetCookieHeader = (setCookieValue: string) => {
+    const parts = setCookieValue.split(';').map(p => p.trim());
+    const [nameValue, ...attributes] = parts;
+    const [name, value] = nameValue.split('=', 2);
+    
+    const cookie = {
+      name: name?.trim() || '',
+      value: value?.trim() || '',
+      domain: '',
+      path: '/',
+      expires: null as number | null,
+      maxAge: null as number | null,
+      secure: false,
+      httpOnly: false,
+      sameSite: 'Lax'
+    };
+    
+    attributes.forEach(attr => {
+      const [key, val] = attr.split('=', 2);
+      const lowerKey = key?.toLowerCase();
+      
+      if (lowerKey === 'domain') {
+        cookie.domain = val?.trim() || '';
+      } else if (lowerKey === 'path') {
+        cookie.path = val?.trim() || '/';
+      } else if (lowerKey === 'expires') {
+        const expiresDate = new Date(val?.trim() || '');
+        if (!isNaN(expiresDate.getTime())) {
+          cookie.expires = Math.floor(expiresDate.getTime() / 1000);
+        }
+      } else if (lowerKey === 'max-age') {
+        const maxAge = parseInt(val?.trim() || '0');
+        if (!isNaN(maxAge)) {
+          cookie.maxAge = maxAge;
+          cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
+        }
+      } else if (lowerKey === 'secure') {
+        cookie.secure = true;
+      } else if (lowerKey === 'httponly') {
+        cookie.httpOnly = true;
+      } else if (lowerKey === 'samesite') {
+        cookie.sameSite = val?.trim() || 'Lax';
+      }
+    });
+    
+    return cookie;
+  };
   
   // Parse request body once at the start
   try {
@@ -119,6 +168,9 @@ Deno.serve(async (req: Request) => {
       cookies_pre: [],
       cookies_post_accept: [],
       cookies_post_reject: [],
+      set_cookie_headers_pre: [],
+      set_cookie_headers_post_accept: [],
+      set_cookie_headers_post_reject: [],
       storage_pre: { localStorage: {}, sessionStorage: {} },
       storage_post_accept: { localStorage: {}, sessionStorage: {} },
       storage_post_reject: { localStorage: {}, sessionStorage: {} },
@@ -184,6 +236,7 @@ Deno.serve(async (req: Request) => {
       
       // Storage for network events and data
       const requests = [];
+      const setCookieHeaders = [];
       
       // Handle CDP responses and events
       wsSocket.onmessage = (event) => {
@@ -294,6 +347,31 @@ Deno.serve(async (req: Request) => {
               }
               
               requests.push(request);
+            }
+            
+            // Capture Set-Cookie headers from responses
+            if (data.method === 'Network.responseReceived') {
+              const response = data.params.response;
+              if (response.headers && response.headers['set-cookie']) {
+                const setCookieValue = response.headers['set-cookie'];
+                const setCookieArray = Array.isArray(setCookieValue) ? setCookieValue : [setCookieValue];
+                
+                setCookieArray.forEach(cookieHeader => {
+                  try {
+                    const parsedCookie = parseSetCookieHeader(cookieHeader);
+                    if (parsedCookie.name) {
+                      setCookieHeaders.push({
+                        ...parsedCookie,
+                        isPreConsent: isPreConsent,
+                        timestamp: data.params.timestamp,
+                        url: response.url
+                      });
+                    }
+                  } catch (e) {
+                    console.log('Set-Cookie parse error:', e.message);
+                  }
+                });
+              }
             }
           }
         } catch (e) {
@@ -550,17 +628,38 @@ Deno.serve(async (req: Request) => {
         });
       }
       
-      // F) COOKIES & STORAGE - Phase 1: Pre-consent
+      // F) COOKIES & STORAGE - Phase 1: Pre-consent (multi-timing collection)
       console.log('🍪 Collecting pre-consent cookies and storage...');
       
-      // Phase 1: Pre-consent data collection
-      browserlessData.cookies_pre = await collectCookies('pre-consent');
+      // Multi-timing pre-consent cookie collection
+      const preLoadCookies = await collectCookies('pre-load');
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Network idle wait
+      const preIdleCookies = await collectCookies('pre-idle');
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Extra idle wait
+      const preExtraCookies = await collectCookies('pre-extra');
+      
+      // Merge and deduplicate pre-consent cookies
+      const allPreCookies = [...preLoadCookies, ...preIdleCookies, ...preExtraCookies];
+      const uniquePreCookies = new Map();
+      allPreCookies.forEach(cookie => {
+        const key = `${cookie.name}|${cookie.domain}|${cookie.path}`;
+        if (!uniquePreCookies.has(key) || 
+            (cookie.expires && (!uniquePreCookies.get(key).expires || cookie.expires > uniquePreCookies.get(key).expires))) {
+          uniquePreCookies.set(key, cookie);
+        }
+      });
+      
+      browserlessData.cookies_pre = Array.from(uniquePreCookies.values());
       browserlessData.storage_pre = await collectStorage('pre-consent');
       browserlessData.requests_pre = requests.filter(r => r.isPreConsent);
+      
+      // Store pre-consent Set-Cookie headers
+      browserlessData.set_cookie_headers_pre = setCookieHeaders.filter(c => c.isPreConsent);
       
       console.log('✅ Pre-consent data collected');
       console.log('📊 Pre-consent stats:', {
         cookies: browserlessData.cookies_pre.length,
+        setCookieHeaders: browserlessData.set_cookie_headers_pre.length,
         storage: Object.keys(browserlessData.storage_pre.localStorage).length + Object.keys(browserlessData.storage_pre.sessionStorage).length,
         requests: browserlessData.requests_pre.length
       });
@@ -711,16 +810,35 @@ Deno.serve(async (req: Request) => {
           
           console.log('✅ Accept clicked successfully');
           
-          // Phase 2: Post-accept data collection
+          // Phase 2: Post-accept data collection (multi-timing)
           await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for tracking to fire
           
-          browserlessData.cookies_post_accept = await collectCookies('post-accept');
+          const postAcceptCookies1 = await collectCookies('post-accept-1');
+          await new Promise(resolve => setTimeout(resolve, 4000)); // Additional wait
+          const postAcceptCookies2 = await collectCookies('post-accept-2');
+          
+          // Merge and deduplicate post-accept cookies
+          const allPostAcceptCookies = [...postAcceptCookies1, ...postAcceptCookies2];
+          const uniquePostAcceptCookies = new Map();
+          allPostAcceptCookies.forEach(cookie => {
+            const key = `${cookie.name}|${cookie.domain}|${cookie.path}`;
+            if (!uniquePostAcceptCookies.has(key) || 
+                (cookie.expires && (!uniquePostAcceptCookies.get(key).expires || cookie.expires > uniquePostAcceptCookies.get(key).expires))) {
+              uniquePostAcceptCookies.set(key, cookie);
+            }
+          });
+          
+          browserlessData.cookies_post_accept = Array.from(uniquePostAcceptCookies.values());
           browserlessData.storage_post_accept = await collectStorage('post-accept');
           browserlessData.requests_post_accept = requests.filter(r => !r.isPreConsent);
+          
+          // Store post-accept Set-Cookie headers
+          browserlessData.set_cookie_headers_post_accept = setCookieHeaders.filter(c => !c.isPreConsent);
           
           console.log('✅ Post-accept data collected');
           console.log('📊 Post-accept stats:', {
             cookies: browserlessData.cookies_post_accept.length,
+            setCookieHeaders: browserlessData.set_cookie_headers_post_accept.length,
             storage: Object.keys(browserlessData.storage_post_accept.localStorage).length + Object.keys(browserlessData.storage_post_accept.sessionStorage).length,
             requests: browserlessData.requests_post_accept.length
           });

@@ -17,6 +17,8 @@ export interface AuditSelfCheck {
     cookies_total: number;
     cookies_1p: number;
     cookies_3p: number;
+    cookies_3p_persisted: number;
+    cookies_3p_attempted: number;
     third_parties_unique: number;
   };
   gates: AuditQualityGate[];

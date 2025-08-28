@@ -9,7 +9,12 @@ interface MergedCookie {
   expiryDays: number | null;
   category: 'technical' | 'analytics' | 'marketing' | 'unknown';
   isFirstParty: boolean;
-  source: string;
+  sources: {
+    jar: boolean;
+    setCookie: boolean;
+    document: boolean;
+  };
+  persisted: boolean;
 }
 
 interface ThirdPartyHost {
@@ -53,11 +58,13 @@ export function performSelfCheck(
     cookies_total: mergedCookies.length,
     cookies_1p: mergedCookies.filter(c => c.isFirstParty).length,
     cookies_3p: mergedCookies.filter(c => !c.isFirstParty).length,
+    cookies_3p_persisted: mergedCookies.filter(c => !c.isFirstParty && c.persisted).length,
+    cookies_3p_attempted: mergedCookies.filter(c => !c.isFirstParty).length,
     third_parties_unique: thirdParties.length
   };
 
   // Run quality gates
-  const gates = runQualityGates(summary, internalJson, thirdParties, trackerAnalysis, cookieStats);
+  const gates = runQualityGates(summary, internalJson, thirdParties, trackerAnalysis, cookieStats, mergedCookies);
 
   return {
     summary,
@@ -70,14 +77,14 @@ export function performSelfCheck(
 }
 
 /**
- * Merge cookies from multiple sources (CDP, Playwright, document.cookie)
+ * Merge cookies from multiple sources (CDP, Set-Cookie headers, document.cookie)
  */
 function mergeCookieSources(renderData: any, mainDomain: string): MergedCookie[] {
   const cookieMap = new Map<string, MergedCookie>();
 
-  // Helper to add cookie to map
-  const addCookie = (name: string, domain: string, path: string, expires: number | null, source: string) => {
-    const normalizedDomain = normalizeDomain(domain);
+  // Helper to add/update cookie in map
+  const addOrUpdateCookie = (name: string, domain: string, path: string, expires: number | null, sourceType: 'jar' | 'setCookie' | 'document') => {
+    const normalizedDomain = normalizeDomain(domain || mainDomain);
     const key = `${name}|${normalizedDomain}|${path}`;
     
     const expiryDays = expires ? Math.ceil((expires - Date.now()) / 86400000) : null;
@@ -85,7 +92,18 @@ function mergeCookieSources(renderData: any, mainDomain: string): MergedCookie[]
     const cookieIsFirstParty = isFirstParty(normalizedDomain, mainDomain);
 
     const existing = cookieMap.get(key);
-    if (!existing || (expires && (!existing.expiryDays || expiryDays > existing.expiryDays))) {
+    if (existing) {
+      // Update existing cookie
+      existing.sources[sourceType] = true;
+      if (sourceType === 'jar') {
+        existing.persisted = true;
+      }
+      // Update expiry if this one is longer
+      if (expires && (!existing.expiryDays || expiryDays > existing.expiryDays)) {
+        existing.expiryDays = expiryDays;
+      }
+    } else {
+      // Create new cookie
       cookieMap.set(key, {
         name,
         normalizedDomain,
@@ -93,53 +111,53 @@ function mergeCookieSources(renderData: any, mainDomain: string): MergedCookie[]
         expiryDays,
         category,
         isFirstParty: cookieIsFirstParty,
-        source
+        sources: {
+          jar: sourceType === 'jar',
+          setCookie: sourceType === 'setCookie',
+          document: sourceType === 'document'
+        },
+        persisted: sourceType === 'jar'
       });
     }
   };
 
-  // Process CDP cookies
-  const allCookies = [
+  // Process CDP cookies (jar cookies)
+  const allJarCookies = [
     ...(renderData?.cookies_pre || []),
     ...(renderData?.cookies_post_accept || []),
     ...(renderData?.cookies_post_reject || [])
   ];
 
-  allCookies.forEach((cookie: any) => {
-    addCookie(
+  allJarCookies.forEach((cookie: any) => {
+    addOrUpdateCookie(
       cookie.name,
       cookie.domain,
       cookie.path || '/',
       cookie.expires ? cookie.expires * 1000 : null,
-      'CDP'
+      'jar'
     );
   });
 
-  // Process Playwright cookies
-  (renderData?.playwright_cookies || []).forEach((cookie: any) => {
-    addCookie(
+  // Process Set-Cookie headers
+  const allSetCookieHeaders = [
+    ...(renderData?.set_cookie_headers_pre || []),
+    ...(renderData?.set_cookie_headers_post_accept || []),
+    ...(renderData?.set_cookie_headers_post_reject || [])
+  ];
+
+  allSetCookieHeaders.forEach((cookie: any) => {
+    addOrUpdateCookie(
       cookie.name,
       cookie.domain,
       cookie.path || '/',
       cookie.expires ? cookie.expires * 1000 : null,
-      'Playwright'
+      'setCookie'
     );
   });
 
   // Process document.cookie (names only)
   (renderData?.document_cookies || []).forEach((cookieName: string) => {
-    const key = `${cookieName}|${mainDomain}|/`;
-    if (!cookieMap.has(key)) {
-      cookieMap.set(key, {
-        name: cookieName,
-        normalizedDomain: mainDomain,
-        path: '/',
-        expiryDays: null,
-        category: categorizeCookie(cookieName),
-        isFirstParty: true,
-        source: 'document.cookie'
-      });
-    }
+    addOrUpdateCookie(cookieName, mainDomain, '/', null, 'document');
   });
 
   return Array.from(cookieMap.values());
@@ -272,7 +290,8 @@ function runQualityGates(
   internalJson: InternalAuditJson,
   thirdParties: ThirdPartyHost[],
   trackerAnalysis: any,
-  cookieStats: any
+  cookieStats: any,
+  mergedCookies: MergedCookie[]
 ): AuditQualityGate[] {
   const gates: AuditQualityGate[] = [];
 
@@ -324,7 +343,28 @@ function runQualityGates(
       total: summary.cookies_total,
       table: internalJson.cookies.length,
       firstParty: summary.cookies_1p,
-      thirdParty: summary.cookies_3p
+      thirdParty: summary.cookies_3p,
+      persisted: summary.cookies_3p_persisted,
+      attempted: summary.cookies_3p_attempted
+    }
+  });
+
+  // G3P - Third-party cookies probably blocked
+  const hasThirdParties = summary.third_parties_unique > 0;
+  const cookies3pBlocked = hasThirdParties && 
+                          summary.cookies_3p_persisted === 0 && 
+                          summary.cookies_3p_attempted > 0;
+  gates.push({
+    id: 'third_party_cookies_blocked',
+    level: 'warn',
+    passed: !cookies3pBlocked,
+    message: cookies3pBlocked ?
+      'Pravdepodobne zablokované 3P cookies' :
+      'Third-party cookies not blocked',
+    details: {
+      third_parties: summary.third_parties_unique,
+      cookies_3p_attempted: summary.cookies_3p_attempted,
+      cookies_3p_persisted: summary.cookies_3p_persisted
     }
   });
 

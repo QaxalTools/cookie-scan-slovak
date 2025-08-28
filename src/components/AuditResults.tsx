@@ -630,6 +630,9 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               4. Cookies ({data.detailedAnalysis.cookies.total})
               <span className="text-sm font-normal text-muted-foreground ml-2">
                 First-party: {data.detailedAnalysis.cookies.firstParty} | Third-party: {data.detailedAnalysis.cookies.thirdParty}
+                {data.self_check?.summary?.cookies_3p_attempted && data.self_check?.summary?.cookies_3p_persisted !== undefined && (
+                  <span> | 3P cookies: {data.self_check.summary.cookies_3p_persisted} / {data.self_check.summary.cookies_3p_attempted} (persisted / attempted)</span>
+                )}
               </span>
             </h3>
             <div className="overflow-x-auto">
@@ -641,6 +644,8 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                     <th className="text-left p-2">1P/3P</th>
                     <th className="text-left p-2">Typ</th>
                     <th className="text-left p-2">Expirácia</th>
+                    <th className="text-left p-2">Zdroj</th>
+                    <th className="text-left p-2">Persistuje?</th>
                     <th className="text-left p-2">Stav</th>
                   </tr>
                 </thead>
