@@ -1,5 +1,4 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { chromium } from 'https://esm.sh/playwright@1.45.3';
 
 Deno.serve(async (req: Request) => {
   const corsHeaders = {
@@ -109,12 +108,12 @@ Deno.serve(async (req: Request) => {
     
     await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus });
 
-    // Playwright over WebSocket CDP implementation
-    console.log('🌐 Starting Playwright CDP analysis...');
+    // Raw WebSocket CDP implementation
+    console.log('🌐 Starting Raw WebSocket CDP analysis...');
     
     const WSE = `wss://production-sfo.browserless.io?token=${browserlessApiKey}`;
     
-    let browser;
+    let wsSocket;
     let browserlessData = {
       finalUrl: url,
       cookies_pre: [],
@@ -136,187 +135,404 @@ Deno.serve(async (req: Request) => {
     };
     
     try {
-      // A) CONNECTION - Connect to Browserless over CDP
-      console.log('🔗 Connecting to Browserless via CDP...');
-      browser = await chromium.connectOverCDP(WSE, { timeout: 120000 });
-      console.log('✅ Connected to Browserless');
+      // Initialize WebSocket connection to Browserless
+      console.log('🔗 Connecting to Browserless WebSocket...');
+      wsSocket = new WebSocket(WSE);
+      
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('WebSocket connection timeout'));
+        }, 30000);
+        
+        wsSocket.onopen = () => {
+          clearTimeout(timeout);
+          console.log('🔗 WebSocket connected to Browserless');
+          resolve(true);
+        };
+        
+        wsSocket.onerror = (error) => {
+          clearTimeout(timeout);
+          reject(new Error(`WebSocket connection failed: ${error}`));
+        };
+      });
+      
+      // CDP session management
+      let requestId = 1;
+      const cdpResults = {};
+      const sessions = new Map(); // sessionId -> target info
+      let browserSessionId = null;
+      let pageSessionId = null;
+      let isPreConsent = true;
+      
+      // Session-aware CDP command wrapper
+      const sendCDPCommand = (method, params = {}, sessionId = null) => {
+        return new Promise((resolve, reject) => {
+          const id = requestId++;
+          const message = sessionId 
+            ? JSON.stringify({ id, method, params, sessionId })
+            : JSON.stringify({ id, method, params });
+          
+          const timeout = setTimeout(() => {
+            delete cdpResults[id];
+            reject(new Error(`CDP command timeout: ${method}`));
+          }, 15000);
+          
+          cdpResults[id] = { resolve, reject, timeout };
+          wsSocket.send(message);
+        });
+      };
+      
+      // Storage for network events and data
+      const requests = [];
+      
+      // Handle CDP responses and events
+      wsSocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle command responses
+          if (data.id && cdpResults[data.id]) {
+            const { resolve, timeout } = cdpResults[data.id];
+            clearTimeout(timeout);
+            delete cdpResults[data.id];
+            
+            if (data.error) {
+              console.log(`CDP Error [${data.id}]:`, data.error);
+            }
+            resolve(data.result || data);
+            return;
+          }
+          
+          // Handle events from all sessions
+          if (data.method) {
+            const sessionId = data.sessionId;
+            
+            // Track new attached targets
+            if (data.method === 'Target.attachedToTarget') {
+              const targetSessionId = data.params.sessionId;
+              const targetInfo = data.params.targetInfo;
+              sessions.set(targetSessionId, targetInfo);
+              console.log(`📎 Target attached: ${targetInfo.type} [${targetSessionId}]`);
+              
+              // Enable domains for new page sessions
+              if (targetInfo.type === 'page' || targetInfo.type === 'iframe') {
+                sendCDPCommand('Page.enable', {}, targetSessionId).catch(e => console.log('Page.enable failed:', e.message));
+                sendCDPCommand('Runtime.enable', {}, targetSessionId).catch(e => console.log('Runtime.enable failed:', e.message));
+                sendCDPCommand('Network.enable', {
+                  maxTotalBufferSize: 10_000_000,
+                  maxResourceBufferSize: 5_000_000
+                }, targetSessionId).catch(e => console.log('Network.enable failed:', e.message));
+              }
+            }
+            
+            // Network event handling (filter by page session if available)
+            if (data.method === 'Network.requestWillBeSent') {
+              const request = {
+                id: data.params.requestId,
+                url: data.params.request.url,
+                method: data.params.request.method,
+                headers: data.params.request.headers,
+                timestamp: data.params.timestamp,
+                phase: isPreConsent ? 'pre' : 'post',
+                sessionId: sessionId,
+                query: {},
+                trackingParams: {},
+                isPreConsent: isPreConsent
+              };
+              
+              // Parse query parameters with tracking detection
+              try {
+                const urlObj = new URL(data.params.request.url);
+                const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
+                
+                urlObj.searchParams.forEach((value, key) => {
+                  request.query[key] = value;
+                  if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                    request.trackingParams[key] = value;
+                  }
+                });
+              } catch (e) {
+                console.log('URL parsing error:', e.message);
+              }
+              
+              // Parse POST data
+              if (data.params.request.postData) {
+                const contentType = data.params.request.headers['content-type'] || '';
+                request.postData = data.params.request.postData;
+                
+                if (contentType.includes('application/json')) {
+                  try {
+                    request.postDataParsed = JSON.parse(data.params.request.postData);
+                    // Extract tracking params from POST data
+                    if (typeof request.postDataParsed === 'object') {
+                      const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
+                      Object.entries(request.postDataParsed).forEach(([key, value]) => {
+                        if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                          request.trackingParams[key] = value;
+                        }
+                      });
+                    }
+                  } catch (e) {
+                    console.log('JSON parse error:', e.message);
+                  }
+                } else if (contentType.includes('application/x-www-form-urlencoded')) {
+                  try {
+                    const urlencoded = new URLSearchParams(data.params.request.postData);
+                    const formData = {};
+                    const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
+                    urlencoded.forEach((value, key) => {
+                      formData[key] = value;
+                      if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                        request.trackingParams[key] = value;
+                      }
+                    });
+                    request.postDataParsed = formData;
+                  } catch (e) {
+                    console.log('URLEncoded parse error:', e.message);
+                  }
+                }
+              }
+              
+              requests.push(request);
+            }
+          }
+        } catch (e) {
+          // Ignore non-JSON messages
+        }
+      };
       
       // B) BROWSER-LEVEL CDP SESSION (before anything else)
-      console.log('🌐 Setting up browser-level CDP session...');
-      const browserSession = await browser.newBrowserCDPSession();
-      await browserSession.send('Target.setAutoAttach', {
+      console.log('🌐 Setting up browser-level auto-attach...');
+      await sendCDPCommand('Target.setAutoAttach', {
         autoAttach: true,
         flatten: true,
         waitForDebuggerOnStart: false,
       });
-      await browserSession.send('Target.setDiscoverTargets', { discover: true });
+      await sendCDPCommand('Target.setDiscoverTargets', { discover: true });
       console.log('✅ Browser-level auto-attach enabled');
       
-      // C) CONTEXT & PAGE (CDP mode - use default context)
-      const [context] = browser.contexts();
-      if (!context) throw new Error('No default context from CDP connection');
+      // Get available targets
+      console.log('🎯 Getting browser targets...');
+      const targets = await sendCDPCommand('Target.getTargets');
+      console.log('TARGET CHECK', targets.targetInfos?.map(t => ({ type: t.type, url: t.url })));
       
-      const page = await context.newPage();
-      const client = await context.newCDPSession(page);
-      console.log('✅ Page and CDP session created');
+      const pageTarget = targets.targetInfos?.find(t => t.type === 'page');
       
-      // Enable domains on page-level session
-      await client.send('Page.enable');
-      await client.send('Runtime.enable');
-      await client.send('Network.enable', {
+      if (!pageTarget) {
+        // Create a new page target
+        console.log('📄 Creating new page target...');
+        const createResult = await sendCDPCommand('Target.createTarget', {
+          url: 'about:blank'
+        });
+        pageSessionId = createResult.targetId;
+        console.log('✅ New page target created:', pageSessionId);
+      } else {
+        // Attach to existing page target
+        console.log('📎 Attaching to existing page target...');
+        const attachResult = await sendCDPCommand('Target.attachToTarget', {
+          targetId: pageTarget.targetId,
+          flatten: true
+        });
+        pageSessionId = attachResult.sessionId;
+        sessions.set(pageSessionId, pageTarget);
+        console.log('✅ Attached to page target:', pageSessionId);
+      }
+      
+      // C) Enable CDP domains on the page session
+      console.log('🔧 Enabling CDP domains on page session:', pageSessionId);
+      await sendCDPCommand('Page.enable', {}, pageSessionId);
+      await sendCDPCommand('Runtime.enable', {}, pageSessionId);
+      await sendCDPCommand('Network.enable', {
         maxTotalBufferSize: 10_000_000,
-        maxResourceBufferSize: 5_000_000,
-      });
-      await client.send('Page.setLifecycleEventsEnabled', { enabled: true });
-      console.log('✅ CDP domains enabled');
+        maxResourceBufferSize: 5_000_000
+      }, pageSessionId);
+      await sendCDPCommand('DOMStorage.enable', {}, pageSessionId);
       
-      // D) LISTENERS (register before navigation)
-      const requests = [];
-      let isPreConsent = true;
+      console.log('✅ CDP domains enabled on page session');
+      console.log('📍 CDP_bound: true');
       
-      // Page-level fallback listener
-      page.on('request', (r) => {
-        try {
-          const u = new URL(r.url());
-          const qs = {};
-          u.searchParams.forEach((v, k) => qs[k] = v);
-          
-          // Extract tracking parameters
-          const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-          const trackingParams = {};
-          Object.entries(qs).forEach(([key, value]) => {
-            if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-              trackingParams[key] = value;
-            }
-          });
-          
-          requests.push({
-            ts: Date.now(),
-            phase: isPreConsent ? 'pre-fallback' : 'post-fallback',
-            url: r.url(),
-            method: r.method(),
-            type: r.resourceType(),
-            query: qs,
-            trackingParams: trackingParams,
-            isPreConsent: isPreConsent
-          });
-        } catch (e) {
-          console.log('Page listener error:', e.message);
+      // Set additional headers
+      await sendCDPCommand('Network.setUserAgentOverride', {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }, pageSessionId);
+      
+      await sendCDPCommand('Page.setExtraHTTPHeaders', {
+        headers: {
+          'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
+          'DNT': '1',
+          'Sec-GPC': '1'
         }
-      });
+      }, pageSessionId);
       
-      // CDP Network listener
-      client.on('Network.requestWillBeSent', (e) => {
+      // Helper functions for data collection
+      const collectCookies = async (label) => {
+        const cookies = [];
+        
         try {
-          const u = new URL(e.request.url);
-          const qs = {};
-          u.searchParams.forEach((v, k) => qs[k] = v);
+          const cdpCookies = await sendCDPCommand('Network.getAllCookies', {}, pageSessionId);
+          if (cdpCookies.cookies) {
+            cookies.push(...cdpCookies.cookies.map(c => ({
+              ...c,
+              expiry_days: c.expires ? Math.round((c.expires - Date.now() / 1000) / (24 * 60 * 60)) : null,
+              source: 'cdp'
+            })));
+          }
+        } catch (e) {
+          console.log(`CDP cookies failed for ${label}:`, e.message);
+        }
+        
+        // Fallback: document.cookie via Runtime.evaluate
+        try {
+          const docCookieResult = await sendCDPCommand('Runtime.evaluate', {
+            expression: 'document.cookie'
+          }, pageSessionId);
           
-          // Extract tracking parameters
-          const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-          const trackingParams = {};
-          Object.entries(qs).forEach(([key, value]) => {
-            if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-              trackingParams[key] = value;
+          const docCookie = docCookieResult.result?.value || '';
+          if (docCookie) {
+            const docCookies = docCookie.split('; ').filter(c => c.trim()).map(c => {
+              const [name, ...rest] = c.split('=');
+              return { 
+                name: name?.trim(), 
+                value: rest.join('='), 
+                domain: 'document.cookie',
+                source: 'document' 
+              };
+            });
+            cookies.push(...docCookies);
+          }
+        } catch (e) {
+          console.log(`Document cookie failed for ${label}:`, e.message);
+        }
+        
+        console.log(`Cookies ${label}:`, cookies.length);
+        return cookies;
+      };
+      
+      const collectStorage = async (label) => {
+        const storage = { localStorage: {}, sessionStorage: {} };
+        
+        try {
+          // Get origin for DOMStorage
+          const originResult = await sendCDPCommand('Runtime.evaluate', {
+            expression: 'window.location.origin'
+          }, pageSessionId);
+          const origin = originResult.result?.value || new URL(url).origin;
+          
+          // Local storage
+          try {
+            const localStorage = await sendCDPCommand('DOMStorage.getDOMStorageItems', {
+              storageId: { securityOrigin: origin, isLocalStorage: true }
+            }, pageSessionId);
+            if (localStorage.entries) {
+              localStorage.entries.forEach(([key, value]) => {
+                storage.localStorage[key] = value;
+              });
             }
-          });
-          
-          const request = {
-            ts: Date.now(),
-            phase: isPreConsent ? 'pre' : 'post',
-            requestId: e.requestId,
-            url: e.request.url,
-            method: e.request.method,
-            type: e.type || e.initiator?.type || 'other',
-            frameId: e.frameId,
-            query: qs,
-            trackingParams: trackingParams,
-            isPreConsent: isPreConsent
-          };
-          
-          // Parse POST data if available
-          if (e.request.postData) {
-            const contentType = e.request.headers['content-type'] || '';
-            request.postData = e.request.postData;
-            
-            if (contentType.includes('application/json')) {
-              try {
-                request.postDataParsed = JSON.parse(e.request.postData);
-                // Extract tracking params from POST data
-                if (typeof request.postDataParsed === 'object') {
-                  Object.entries(request.postDataParsed).forEach(([key, value]) => {
-                    if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                      trackingParams[key] = value;
-                    }
-                  });
-                }
-              } catch (err) {
-                console.log('JSON parse error:', err.message);
-              }
-            } else if (contentType.includes('application/x-www-form-urlencoded')) {
-              try {
-                const urlencoded = new URLSearchParams(e.request.postData);
-                const formData = {};
-                urlencoded.forEach((value, key) => {
-                  formData[key] = value;
-                  if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                    trackingParams[key] = value;
-                  }
-                });
-                request.postDataParsed = formData;
-              } catch (err) {
-                console.log('URLEncoded parse error:', err.message);
-              }
-            }
+          } catch (e) {
+            console.log(`Local storage failed for ${label}:`, e.message);
           }
           
-          requests.push(request);
-        } catch (err) {
-          console.log('CDP listener error:', err.message);
+          // Session storage
+          try {
+            const sessionStorage = await sendCDPCommand('DOMStorage.getDOMStorageItems', {
+              storageId: { securityOrigin: origin, isLocalStorage: false }
+            }, pageSessionId);
+            if (sessionStorage.entries) {
+              sessionStorage.entries.forEach(([key, value]) => {
+                storage.sessionStorage[key] = value;
+              });
+            }
+          } catch (e) {
+            console.log(`Session storage failed for ${label}:`, e.message);
+          }
+          
+          // Fallback: Runtime.evaluate for storage
+          try {
+            const storageResult = await sendCDPCommand('Runtime.evaluate', {
+              expression: `
+                (() => {
+                  const res = { local: {}, session: {} };
+                  try { 
+                    for (let i = 0; i < localStorage.length; i++) { 
+                      const k = localStorage.key(i); 
+                      if (k) res.local[k] = localStorage.getItem(k); 
+                    } 
+                  } catch {}
+                  try { 
+                    for (let i = 0; i < sessionStorage.length; i++) { 
+                      const k = sessionStorage.key(i); 
+                      if (k) res.session[k] = sessionStorage.getItem(k); 
+                    } 
+                  } catch {}
+                  return res;
+                })()
+              `
+            }, pageSessionId);
+            
+            const runtimeStorage = storageResult.result?.value || { local: {}, session: {} };
+            Object.assign(storage.localStorage, runtimeStorage.local);
+            Object.assign(storage.sessionStorage, runtimeStorage.session);
+          } catch (e) {
+            console.log(`Runtime storage failed for ${label}:`, e.message);
+          }
+          
+        } catch (e) {
+          console.log(`Storage collection failed for ${label}:`, e.message);
         }
-      });
-      
-      console.log('✅ Network listeners registered');
+        
+        const totalItems = Object.keys(storage.localStorage).length + Object.keys(storage.sessionStorage).length;
+        console.log(`Storage ${label}:`, totalItems, 'items');
+        return storage;
+      };
       
       // E) NAVIGATION (now that everything is set up)
-      await page.setExtraHTTPHeaders({
-        'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
-        'DNT': '1',
-        'Sec-GPC': '1'
+      console.log('🌐 Navigating to URL...');
+      await sendCDPCommand('Page.navigate', { url }, pageSessionId);
+      
+      // Wait for page load event
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 10000);
+        const messageHandler = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.method === 'Page.loadEventFired' && data.sessionId === pageSessionId) {
+              clearTimeout(timeout);
+              wsSocket.removeEventListener('message', messageHandler);
+              resolve(true);
+            }
+          } catch (e) {
+            // Ignore
+          }
+        };
+        wsSocket.addEventListener('message', messageHandler);
       });
       
-      try {
-        await page.setBypassServiceWorker(true);
-      } catch (e) {
-        console.log('ServiceWorker bypass failed:', e.message);
-      }
+      console.log('✅ Page load event fired');
       
-      console.log('🌐 Navigating to URL...');
-      await page.goto(url, { waitUntil: 'load' });
+      // Wait for network idle (additional 6 seconds)
+      await new Promise(resolve => setTimeout(resolve, 6000));
       
-      try {
-        await page.waitForLoadState('networkidle');
-      } catch (e) {
-        console.log('Network idle timeout (expected)');
-      }
+      // Get final URL and readyState
+      const finalUrlResult = await sendCDPCommand('Runtime.evaluate', {
+        expression: 'window.location.href'
+      }, pageSessionId);
+      const finalUrl = finalUrlResult.result?.value || url;
       
-      await page.waitForTimeout(6000);
+      const readyStateResult = await sendCDPCommand('Runtime.evaluate', {
+        expression: 'document.readyState'
+      }, pageSessionId);
+      const readyState = readyStateResult.result?.value || 'unknown';
       
-      const ready = await page.evaluate(() => document.readyState);
-      const finalUrl = await page.url();
-      
-      console.log('CDP ok', { url: finalUrl, ready });
+      console.log('CDP ok', { url: finalUrl, ready: readyState });
       browserlessData.finalUrl = finalUrl;
-      browserlessData.readyState = ready;
+      browserlessData.readyState = readyState;
       
       // Check if we captured any network traffic
       const preCdp = requests.filter(r => r.phase === 'pre').length;
-      const preFb = requests.filter(r => r.phase === 'pre-fallback').length;
+      console.log('REQUESTS PRE counts', { cdp: preCdp });
       
-      console.log('REQUESTS PRE', { cdp: preCdp, fallback: preFb });
-      
-      if (preCdp === 0 && preFb === 0) {
-        console.log('NO TRAFFIC DETECTED');
+      if (preCdp === 0) {
+        console.log('NO TRAFFIC – network capture empty (CDP not bound)');
         browserlessData._quality = {
           incomplete: true,
           reason: 'NETWORK_CAPTURE_EMPTY_CDP_AND_PAGE'
@@ -337,96 +553,6 @@ Deno.serve(async (req: Request) => {
       // F) COOKIES & STORAGE - Phase 1: Pre-consent
       console.log('🍪 Collecting pre-consent cookies and storage...');
       
-      // Collect cookies
-      const collectCookies = async (label) => {
-        const cookies = [];
-        
-        // CDP cookies
-        try {
-          const cdpCookies = await client.send('Network.getAllCookies');
-          if (cdpCookies.cookies) {
-            cookies.push(...cdpCookies.cookies.map(c => ({
-              ...c,
-              expiry_days: c.expires ? Math.round((c.expires - Date.now() / 1000) / (24 * 60 * 60)) : null,
-              source: 'cdp'
-            })));
-          }
-        } catch (e) {
-          console.log(`CDP cookies failed for ${label}:`, e.message);
-        }
-        
-        // Context cookies as fallback
-        try {
-          const contextCookies = await context.cookies();
-          cookies.push(...contextCookies.map(c => ({
-            ...c,
-            expiry_days: c.expires ? Math.round((c.expires - Date.now() / 1000) / (24 * 60 * 60)) : null,
-            source: 'context'
-          })));
-        } catch (e) {
-          console.log(`Context cookies failed for ${label}:`, e.message);
-        }
-        
-        // Document.cookie fallback
-        try {
-          const docCookie = await page.evaluate(() => document.cookie);
-          if (docCookie) {
-            const docCookies = docCookie.split('; ').filter(c => c.trim()).map(c => {
-              const [name, ...rest] = c.split('=');
-              return {
-                name: name?.trim(),
-                value: rest.join('='),
-                domain: window.location.hostname,
-                source: 'document'
-              };
-            });
-            cookies.push(...docCookies);
-          }
-        } catch (e) {
-          console.log(`Document cookie failed for ${label}:`, e.message);
-        }
-        
-        console.log(`Cookies ${label}:`, cookies.length);
-        return cookies;
-      };
-      
-      // Collect storage
-      const collectStorage = async (label) => {
-        const storage = { localStorage: {}, sessionStorage: {} };
-        
-        try {
-          const runtimeStorage = await page.evaluate(() => {
-            const res = { local: {}, session: {} };
-            try {
-              for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (k) res.local[k] = localStorage.getItem(k);
-              }
-            } catch (e) {
-              console.log('localStorage access failed:', e.message);
-            }
-            try {
-              for (let i = 0; i < sessionStorage.length; i++) {
-                const k = sessionStorage.key(i);
-                if (k) res.session[k] = sessionStorage.getItem(k);
-              }
-            } catch (e) {
-              console.log('sessionStorage access failed:', e.message);
-            }
-            return res;
-          });
-          
-          storage.localStorage = runtimeStorage.local || {};
-          storage.sessionStorage = runtimeStorage.session || {};
-        } catch (e) {
-          console.log(`Storage collection failed for ${label}:`, e.message);
-        }
-        
-        const totalItems = Object.keys(storage.localStorage).length + Object.keys(storage.sessionStorage).length;
-        console.log(`Storage ${label}:`, totalItems, 'items');
-        return storage;
-      };
-      
       // Phase 1: Pre-consent data collection
       browserlessData.cookies_pre = await collectCookies('pre-consent');
       browserlessData.storage_pre = await collectStorage('pre-consent');
@@ -442,132 +568,143 @@ Deno.serve(async (req: Request) => {
       // G) CMP DETECTION AND INTERACTION
       console.log('🔍 Detecting CMP...');
       
-      const cmpDetection = await page.evaluate(() => {
-        const results = {
-          cmpDetected: false,
-          cmpType: '',
-          cmpSelectors: [],
-          acceptButton: null,
-          rejectButton: null
-        };
-        
-        // Common CMP detection patterns
-        const cmpChecks = [
-          { name: 'CookieScript', check: () => !!window.CookieScript || !!document.querySelector('[data-cs-i18n-read-more]') },
-          { name: 'Cookiebot', check: () => !!window.Cookiebot || !!document.querySelector('#CybotCookiebotDialog') },
-          { name: 'OneTrust', check: () => !!window.OneTrust || !!document.querySelector('#onetrust-banner-sdk') },
-          { name: 'Quantcast', check: () => !!window.__qc || !!document.querySelector('.qc-cmp-ui') },
-          { name: 'TrustArc', check: () => !!window.truste || !!document.querySelector('#truste-consent-track') },
-          { name: 'Didomi', check: () => !!window.Didomi || !!document.querySelector('.didomi-consent-popup') },
-          { name: 'Klaro', check: () => !!window.klaro || !!document.querySelector('.klaro') },
-          { name: 'Cookie Yes', check: () => !!document.querySelector('.cky-consent-container') }
-        ];
-        
-        // Detect CMP
-        for (const cmp of cmpChecks) {
-          try {
-            if (cmp.check()) {
-              results.cmpDetected = true;
-              results.cmpType = cmp.name;
-              break;
+      const cmpDetection = await sendCDPCommand('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const results = {
+              cmpDetected: false,
+              cmpType: '',
+              cmpSelectors: [],
+              acceptButton: null,
+              rejectButton: null
+            };
+            
+            // Common CMP detection patterns
+            const cmpChecks = [
+              { name: 'CookieScript', check: () => !!window.CookieScript || !!document.querySelector('[data-cs-i18n-read-more]') },
+              { name: 'Cookiebot', check: () => !!window.Cookiebot || !!document.querySelector('#CybotCookiebotDialog') },
+              { name: 'OneTrust', check: () => !!window.OneTrust || !!document.querySelector('#onetrust-banner-sdk') },
+              { name: 'Quantcast', check: () => !!window.__qc || !!document.querySelector('.qc-cmp-ui') },
+              { name: 'TrustArc', check: () => !!window.truste || !!document.querySelector('#truste-consent-track') },
+              { name: 'Didomi', check: () => !!window.Didomi || !!document.querySelector('.didomi-consent-popup') },
+              { name: 'Klaro', check: () => !!window.klaro || !!document.querySelector('.klaro') },
+              { name: 'Cookie Yes', check: () => !!document.querySelector('.cky-consent-container') }
+            ];
+            
+            // Detect CMP
+            for (const cmp of cmpChecks) {
+              try {
+                if (cmp.check()) {
+                  results.cmpDetected = true;
+                  results.cmpType = cmp.name;
+                  break;
+                }
+              } catch (e) {
+                console.log('CMP check failed for ' + cmp.name + ':', e.message);
+              }
             }
-          } catch (e) {
-            console.log(`CMP check failed for ${cmp.name}:`, e.message);
-          }
-        }
-        
-        // Generic CMP detection based on common selectors
-        const genericCmpSelectors = [
-          '[data-cs-i18n-read-more]',
-          '#CybotCookiebotDialog',
-          '#onetrust-banner-sdk',
-          '.qc-cmp-ui',
-          '#truste-consent-track',
-          '.didomi-consent-popup',
-          '.klaro',
-          '.cky-consent-container',
-          '[class*="cookie"][class*="banner"]',
-          '[class*="consent"][class*="popup"]',
-          '[id*="cookie"][id*="consent"]'
-        ];
-        
-        for (const selector of genericCmpSelectors) {
-          const element = document.querySelector(selector);
-          if (element && element.offsetParent !== null) {
-            results.cmpDetected = true;
-            if (!results.cmpType) results.cmpType = 'Generic';
-            results.cmpSelectors.push(selector);
-          }
-        }
-        
-        // Find accept/reject buttons
-        if (results.cmpDetected) {
-          const acceptSelectors = [
-            '[data-cs-accept-all]',
-            '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
-            '#onetrust-accept-btn-handler',
-            '.qc-cmp-button[mode="primary"]',
-            '[class*="accept"]',
-            '[class*="allow"]',
-            '[id*="accept"]',
-            'button:contains("Súhlasím")',
-            'button:contains("Prijať")',
-            'button:contains("Accept")',
-            'button:contains("Allow")'
-          ];
-          
-          const rejectSelectors = [
-            '[data-cs-reject-all]',
-            '#CybotCookiebotDialogBodyButtonDecline',
-            '#onetrust-reject-all-handler',
-            '.qc-cmp-button[mode="secondary"]',
-            '[class*="reject"]',
-            '[class*="decline"]',
-            '[id*="reject"]',
-            'button:contains("Odmietnuť")',
-            'button:contains("Reject")',
-            'button:contains("Decline")'
-          ];
-          
-          for (const selector of acceptSelectors) {
-            const button = document.querySelector(selector);
-            if (button && button.offsetParent !== null) {
-              results.acceptButton = selector;
-              break;
+            
+            // Generic CMP detection based on common selectors
+            const genericCmpSelectors = [
+              '[data-cs-i18n-read-more]',
+              '#CybotCookiebotDialog',
+              '#onetrust-banner-sdk',
+              '.qc-cmp-ui',
+              '#truste-consent-track',
+              '.didomi-consent-popup',
+              '.klaro',
+              '.cky-consent-container',
+              '[class*="cookie"][class*="banner"]',
+              '[class*="consent"][class*="popup"]',
+              '[id*="cookie"][id*="consent"]'
+            ];
+            
+            for (const selector of genericCmpSelectors) {
+              const element = document.querySelector(selector);
+              if (element && element.offsetParent !== null) {
+                results.cmpDetected = true;
+                if (!results.cmpType) results.cmpType = 'Generic';
+                results.cmpSelectors.push(selector);
+              }
             }
-          }
-          
-          for (const selector of rejectSelectors) {
-            const button = document.querySelector(selector);
-            if (button && button.offsetParent !== null) {
-              results.rejectButton = selector;
-              break;
+            
+            // Find accept/reject buttons
+            if (results.cmpDetected) {
+              const acceptSelectors = [
+                '[data-cs-accept-all]',
+                '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+                '#onetrust-accept-btn-handler',
+                '.qc-cmp-button[mode="primary"]',
+                '[class*="accept"]',
+                '[class*="allow"]',
+                '[id*="accept"]'
+              ];
+              
+              const rejectSelectors = [
+                '[data-cs-reject-all]',
+                '#CybotCookiebotDialogBodyButtonDecline',
+                '#onetrust-reject-all-handler',
+                '.qc-cmp-button[mode="secondary"]',
+                '[class*="reject"]',
+                '[class*="decline"]',
+                '[id*="reject"]'
+              ];
+              
+              for (const selector of acceptSelectors) {
+                const button = document.querySelector(selector);
+                if (button && button.offsetParent !== null) {
+                  results.acceptButton = selector;
+                  break;
+                }
+              }
+              
+              for (const selector of rejectSelectors) {
+                const button = document.querySelector(selector);
+                if (button && button.offsetParent !== null) {
+                  results.rejectButton = selector;
+                  break;
+                }
+              }
             }
-          }
-        }
-        
-        return results;
-      });
+            
+            return results;
+          })()
+        `
+      }, pageSessionId);
       
-      browserlessData.cmp_detected = cmpDetection.cmpDetected;
+      const cmpDetectionResult = cmpDetection.result?.value || {};
+      browserlessData.cmp_detected = cmpDetectionResult.cmpDetected || false;
       
       console.log('🔍 CMP detection result:', {
-        detected: cmpDetection.cmpDetected,
-        type: cmpDetection.cmpType,
-        acceptButton: !!cmpDetection.acceptButton,
-        rejectButton: !!cmpDetection.rejectButton
+        detected: cmpDetectionResult.cmpDetected,
+        type: cmpDetectionResult.cmpType,
+        acceptButton: !!cmpDetectionResult.acceptButton,
+        rejectButton: !!cmpDetectionResult.rejectButton
       });
       
       // Try to click accept if CMP detected
-      if (cmpDetection.cmpDetected && cmpDetection.acceptButton) {
+      if (cmpDetectionResult.cmpDetected && cmpDetectionResult.acceptButton) {
         try {
           console.log('✅ Attempting to accept cookies...');
           
           // Switch to post-consent phase
           isPreConsent = false;
           
-          await page.click(cmpDetection.acceptButton);
-          await page.waitForTimeout(3000); // Wait for consent processing
+          // Click accept button
+          await sendCDPCommand('Runtime.evaluate', {
+            expression: `
+              (() => {
+                const button = document.querySelector('${cmpDetectionResult.acceptButton}');
+                if (button) {
+                  button.click();
+                  return true;
+                }
+                return false;
+              })()
+            `
+          }, pageSessionId);
+          
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for consent processing
           
           browserlessData.consent_clicked = true;
           browserlessData.accept_clicked = true;
@@ -575,7 +712,7 @@ Deno.serve(async (req: Request) => {
           console.log('✅ Accept clicked successfully');
           
           // Phase 2: Post-accept data collection
-          await page.waitForTimeout(3000); // Wait for tracking to fire
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for tracking to fire
           
           browserlessData.cookies_post_accept = await collectCookies('post-accept');
           browserlessData.storage_post_accept = await collectStorage('post-accept');
@@ -593,33 +730,6 @@ Deno.serve(async (req: Request) => {
         }
       }
       
-      // Optional: Try reject scenario (commented out for now to keep response times reasonable)
-      /*
-      if (cmpDetection.cmpDetected && cmpDetection.rejectButton) {
-        try {
-          console.log('❌ Attempting to reject cookies...');
-          
-          // Reload page for clean state
-          await page.reload({ waitUntil: 'load' });
-          await page.waitForTimeout(3000);
-          
-          await page.click(cmpDetection.rejectButton);
-          await page.waitForTimeout(3000);
-          
-          browserlessData.reject_clicked = true;
-          
-          // Phase 3: Post-reject data collection
-          browserlessData.cookies_post_reject = await collectCookies('post-reject');
-          browserlessData.storage_post_reject = await collectStorage('post-reject');
-          
-          console.log('✅ Post-reject data collected');
-          
-        } catch (rejectError) {
-          console.log('❌ Failed to click reject button:', rejectError.message);
-        }
-      }
-      */
-      
       console.log('✅ Analysis completed successfully');
       
     } catch (cdpError) {
@@ -632,12 +742,12 @@ Deno.serve(async (req: Request) => {
       });
     } finally {
       // Cleanup
-      if (browser) {
+      if (wsSocket) {
         try {
-          await browser.close();
-          console.log('🔌 Browser connection closed');
+          wsSocket.close();
+          console.log('🔌 WebSocket connection closed');
         } catch (closeError) {
-          console.log('Browser close warning:', closeError.message);
+          console.log('WebSocket close warning:', closeError.message);
         }
       }
     }
