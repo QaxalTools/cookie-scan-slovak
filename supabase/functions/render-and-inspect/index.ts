@@ -149,29 +149,62 @@ export default async ({ page, context }) => {
 
   // Helper: Create isolated context for each scenario
   const createIsolatedContext = async () => {
-    const context = await page.browser().createIncognitoBrowserContext();
-    const newPage = await context.newPage();
-    
-    // Apply same stealth settings
-    await newPage.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    );
-    await newPage.setExtraHTTPHeaders({
-      'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
-      'DNT': '1',
-      'Sec-GPC': '1'
-    });
-    await newPage.emulateTimezone('Europe/Bratislava');
-    await newPage.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    });
-    
-    // Bypass service workers to prevent caching issues
-    await newPage.setBypassServiceWorker(true);
-    
-    return { context, page: newPage };
+    try {
+      let newContext, newPage;
+      
+      // Try Playwright approach first (newer)
+      if (page.context && typeof page.context === 'function') {
+        newContext = await page.context().browser().newContext();
+        newPage = await newContext.newPage();
+      } 
+      // Fallback to Puppeteer approach
+      else if (page.browser && typeof page.browser === 'function') {
+        newContext = await page.browser().createIncognitoBrowserContext();
+        newPage = await newContext.newPage();
+      }
+      // Use existing page if context creation fails
+      else {
+        console.log('⚠️ Using existing page, context isolation not available');
+        return { context: null, page: page };
+      }
+      
+      // Apply same stealth settings
+      await newPage.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      );
+      await newPage.setExtraHTTPHeaders({
+        'Accept-Language': 'sk-SK,sk;q=0.9,en;q=0.8',
+        'DNT': '1',
+        'Sec-GPC': '1'
+      });
+      
+      // Timezone (Playwright/Puppeteer compatible)
+      try {
+        await newPage.emulateTimezone('Europe/Bratislava');
+      } catch (e) {
+        console.log('⚠️ Timezone emulation not supported');
+      }
+      
+      await newPage.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['sk-SK', 'sk', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      });
+      
+      // Bypass service workers (Puppeteer only)
+      try {
+        if (newPage.setBypassServiceWorker) {
+          await newPage.setBypassServiceWorker(true);
+        }
+      } catch (e) {
+        console.log('⚠️ Service worker bypass not available');
+      }
+      
+      return { context: newContext, page: newPage };
+    } catch (error) {
+      console.log('⚠️ Context creation failed, using existing page:', error.message);
+      return { context: null, page: page };
+    }
   };
 
   // Helper: Run single scenario
@@ -181,18 +214,42 @@ export default async ({ page, context }) => {
     const { context: isolatedContext, page: scenarioPage } = await createIsolatedContext();
     
     try {
-      // Set up CDP session
-      const client = await scenarioPage.target().createCDPSession();
+      // Set up CDP session (Puppeteer/Playwright compatible)
+      let client;
+      try {
+        // Try Puppeteer approach first
+        if (scenarioPage.target && typeof scenarioPage.target === 'function') {
+          client = await scenarioPage.target().createCDPSession();
+        }
+        // Try Playwright approach
+        else if (scenarioPage.context && scenarioPage.context()._connection) {
+          client = scenarioPage.context()._connection;
+        }
+        // Fallback: create basic client interface
+        else {
+          throw new Error('CDP not available');
+        }
+      } catch (cdpError) {
+        console.log('⚠️ CDP not available, using page-only collection:', cdpError.message);
+        client = null;
+      }
       
-      // Enable CDP domains with increased buffer sizes
-      await client.send('Network.enable', { 
-        maxTotalBufferSize: 20000000, 
-        maxResourceBufferSize: 10000000 
-      });
-      await client.send('Page.enable');
-      await client.send('Runtime.enable');
-      await client.send('Storage.enable');
-      await client.send('DOMStorage.enable');
+      // Enable CDP domains with increased buffer sizes (if CDP available)
+      if (client) {
+        try {
+          await client.send('Network.enable', { 
+            maxTotalBufferSize: 20000000, 
+            maxResourceBufferSize: 10000000 
+          });
+          await client.send('Page.enable');
+          await client.send('Runtime.enable');
+          await client.send('Storage.enable');
+          await client.send('DOMStorage.enable');
+        } catch (cdpEnableError) {
+          console.log('⚠️ CDP domain enable failed:', cdpEnableError.message);
+          client = null; // Disable CDP for this scenario
+        }
+      }
       
       // Initialize data collection for scenario
       const data = {
@@ -222,8 +279,9 @@ export default async ({ page, context }) => {
       let isPreConsent = true;
       const origin = new URL(context.url).origin;
 
-      // Network request logging with enhanced query/POST parsing
-      client.on('Network.requestWillBeSent', (params) => {
+      // Network request logging with enhanced query/POST parsing (if CDP available)
+      if (client) {
+        client.on('Network.requestWillBeSent', (params) => {
         const request = {
           id: params.requestId,
           url: params.request.url,
@@ -289,10 +347,10 @@ export default async ({ page, context }) => {
         } else {
           data.requests_post.push(request);
         }
-      });
-
-      // Response logging
-      client.on('Network.responseReceived', (params) => {
+        });
+      
+        // Response logging
+        client.on('Network.responseReceived', (params) => {
         const response = {
           requestId: params.requestId,
           url: params.response.url,
@@ -309,7 +367,8 @@ export default async ({ page, context }) => {
         } else {
           data.responses_post.push(response);
         }
-      });
+        });
+      }
 
       // Console logging
       scenarioPage.on('console', msg => {
@@ -326,12 +385,14 @@ export default async ({ page, context }) => {
       const getAllCookies = async () => {
         const cookies = [];
         
-        // Method 1: CDP Network.getAllCookies
-        try {
-          const { cookies: cdpCookies } = await client.send('Network.getAllCookies');
-          cookies.push(...cdpCookies);
-        } catch (e) {
-          console.log('CDP cookies failed:', e.message);
+        // Method 1: CDP Network.getAllCookies (if client available)
+        if (client) {
+          try {
+            const { cookies: cdpCookies } = await client.send('Network.getAllCookies');
+            cookies.push(...cdpCookies);
+          } catch (e) {
+            console.log('CDP cookies failed:', e.message);
+          }
         }
         
         // Method 2: Puppeteer page.cookies()
@@ -387,32 +448,34 @@ export default async ({ page, context }) => {
       const getStorage = async () => {
         const storage = { localStorage: {}, sessionStorage: {} };
         
-        try {
-          // Get localStorage via CDP
-          const localStorageId = await client.send('DOMStorage.getDOMStorageItems', {
-            storageId: { securityOrigin: origin, isLocalStorage: true }
-          });
-          if (localStorageId.entries) {
-            localStorageId.entries.forEach(([key, value]) => {
-              storage.localStorage[key] = value;
+        // Get localStorage via CDP (if client available)
+        if (client) {
+          try {
+            const localStorageId = await client.send('DOMStorage.getDOMStorageItems', {
+              storageId: { securityOrigin: origin, isLocalStorage: true }
             });
+            if (localStorageId.entries) {
+              localStorageId.entries.forEach(([key, value]) => {
+                storage.localStorage[key] = value;
+              });
+            }
+          } catch (e) {
+            console.log('CDP localStorage failed:', e.message);
           }
-        } catch (e) {
-          console.log('CDP localStorage failed:', e.message);
-        }
 
-        try {
-          // Get sessionStorage via CDP  
-          const sessionStorageId = await client.send('DOMStorage.getDOMStorageItems', {
-            storageId: { securityOrigin: origin, isLocalStorage: false }
-          });
-          if (sessionStorageId.entries) {
-            sessionStorageId.entries.forEach(([key, value]) => {
-              storage.sessionStorage[key] = value;
+          try {
+            // Get sessionStorage via CDP  
+            const sessionStorageId = await client.send('DOMStorage.getDOMStorageItems', {
+              storageId: { securityOrigin: origin, isLocalStorage: false }
             });
+            if (sessionStorageId.entries) {
+              sessionStorageId.entries.forEach(([key, value]) => {
+                storage.sessionStorage[key] = value;
+              });
+            }
+          } catch (e) {
+            console.log('CDP sessionStorage failed:', e.message);
           }
-        } catch (e) {
-          console.log('CDP sessionStorage failed:', e.message);
         }
 
         // Fallback: evaluate storage directly
@@ -445,11 +508,25 @@ export default async ({ page, context }) => {
 
       console.log(\`🌐 [\${scenarioName}] Navigating to page...\`);
       
-      // Navigate to the page
-      await scenarioPage.goto(context.url, { 
-        waitUntil: 'networkidle2', 
-        timeout: 90000 
-      });
+      // Navigate to the page (with compatibility for both Puppeteer/Playwright)
+      try {
+        await scenarioPage.goto(context.url, { 
+          waitUntil: 'networkidle2', 
+          timeout: 90000 
+        });
+      } catch (gotoError) {
+        // Fallback for Playwright compatibility
+        try {
+          await scenarioPage.goto(context.url, { 
+            waitUntil: 'networkidle', 
+            timeout: 90000 
+          });
+        } catch (fallbackError) {
+          // Basic goto if networkidle is not supported
+          await scenarioPage.goto(context.url, { timeout: 90000 });
+          await scenarioPage.waitForTimeout(5000); // Basic wait
+        }
+      }
 
       console.log(\`📄 [\${scenarioName}] Page loaded\`);
       
@@ -580,8 +657,14 @@ export default async ({ page, context }) => {
       return data;
       
     } finally {
-      // Clean up isolated context
-      await isolatedContext.close();
+      // Clean up isolated context if it exists
+      try {
+        if (isolatedContext && isolatedContext.close) {
+          await isolatedContext.close();
+        }
+      } catch (cleanupError) {
+        console.log('⚠️ Context cleanup failed:', cleanupError.message);
+      }
     }
   };
 
