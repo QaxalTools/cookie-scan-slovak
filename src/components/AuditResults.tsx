@@ -180,19 +180,21 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               )}
             </div>
             <div className="flex gap-2">
-              <Button 
-                onClick={handleCaptureScreenshot} 
-                variant="outline" 
-                size="sm"
-                disabled={isCapturingScreenshot}
-              >
-                {isCapturingScreenshot ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Camera className="h-4 w-4 mr-2" />
-                )}
-                Zachytiť banner
-              </Button>
+              {!capturedScreenshot && !data.consentUx?.screenshot && (
+                <Button 
+                  onClick={handleCaptureScreenshot} 
+                  variant="outline" 
+                  size="sm"
+                  disabled={isCapturingScreenshot}
+                >
+                  {isCapturingScreenshot ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Camera className="h-4 w-4 mr-2" />
+                  )}
+                  Zachytiť banner
+                </Button>
+              )}
               <Button variant="outline" size="sm" onClick={handleDownloadJSON}>
                 <Download className="h-4 w-4 mr-2" />
                 JSON
@@ -301,7 +303,13 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
       {(capturedScreenshot || data.consentUx?.screenshot) && (
         <Card>
           <CardHeader>
-            <CardTitle>Dôkaz - Cookie Banner Screenshot</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <Camera className="h-5 w-5" />
+              Dôkaz - Cookie Banner Screenshot
+              {data.consentUx?.used === 'edge' && (
+                <Badge variant="secondary" className="ml-2">Automaticky zachytené</Badge>
+              )}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">

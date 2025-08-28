@@ -116,6 +116,12 @@ export const DEFAULT_AUDIT_STEPS: ProgressStep[] = [
     status: 'pending'
   },
   {
+    id: 'banner_capture',
+    title: 'Zachytávam banner',
+    description: 'Automaticky zachytávam cookie banner',
+    status: 'pending'
+  },
+  {
     id: 'verdict',
     title: 'Generujem výsledok',
     description: 'Vyhodnocujem súlad a vytváram report',

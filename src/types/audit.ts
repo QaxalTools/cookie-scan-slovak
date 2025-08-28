@@ -154,18 +154,17 @@ export interface AuditData {
 export interface ConsentUxResult {
   screenshot?: string; // data URL base64
   used?: 'edge' | 'client';
-  ocr?: {
-    hasConsentBanner: boolean;
-    buttons: {
-      accept: string[];
-      reject: string[];
-      settings: string[];
-    };
-    evaluation: {
-      hasBalancedButtons: boolean;
-      hasDetailedSettings: boolean;
-      uxAssessment: 'transparent' | 'unbalanced' | 'missing';
+  confidence?: number;
+  text?: string;
+  analysis?: {
+    bannerPresent: boolean;
+    acceptButtonFound: boolean;
+    rejectButtonFound: boolean;
+    settingsButtonFound: boolean;
+    uxAssessment: {
+      balance: string;
+      clarity: string;
+      overallScore: string;
     };
   };
-  confidence?: number;
 }
