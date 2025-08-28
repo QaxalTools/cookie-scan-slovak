@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { AuditData } from '@/types/audit';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { calculateRiskScoresFromDisplay, calculateOverallRiskFromScores } from '@/utils/riskScoring';
 
 interface AuditResultsProps {
   data: AuditData;
@@ -168,64 +169,9 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
         </CardHeader>
         <CardContent className="space-y-4">
           {(() => {
-            // Calculate risk scores (0-5) for management summary
-            const calculateRiskScores = () => {
-              const scores = [];
-              
-              // HTTPS
-              const httpsScore = data.detailedAnalysis.https.status === 'ok' ? 0 : 
-                               data.detailedAnalysis.https.status === 'warning' ? 3 : 5;
-              let httpsNote = data.detailedAnalysis.https.status === 'ok' ? 'SSL certifikát je platný a stránka je bezpečne šifrovaná' :
-                             data.detailedAnalysis.https.status === 'warning' ? 'SSL certifikát má problémy - overenie zlyhalo alebo exspiruje' :
-                             'Stránka nepoužíva HTTPS šifrovanie - KRITICKÝ bezpečnostný problém';
-              scores.push({ area: 'HTTPS', score: httpsScore, note: httpsNote });
-              
-              // CMP
-              const hasConsentTool = data.detailedAnalysis.consentManagement.hasConsentTool;
-              const preConsentTrackers = data.detailedAnalysis.consentManagement.trackersBeforeConsent;
-              const cmpScore = !hasConsentTool ? 5 : (preConsentTrackers > 0 ? 4 : 1);
-              let cmpNote = !hasConsentTool ? 'Chýba Consent Management Platform - porušenie GDPR článku 7' :
-                           (preConsentTrackers > 0 ? `CMP implementované, ale ${preConsentTrackers} trackerov začína pred súhlasom - porušenie GDPR` :
-                           'CMP správne implementované a kontroluje súhlas pred načítaním trackerov');
-              scores.push({ area: 'CMP', score: cmpScore, note: cmpNote });
-              
-              // Cookies
-              const hasMarketingCookies = data.detailedAnalysis.cookies.details.some(c => c.category === 'marketingové');
-              const cookiesScore = hasMarketingCookies ? 4 : 1;
-              let cookiesNote = hasMarketingCookies ? 'Detegované marketingové cookies - vyžadujú výslovný súhlas podľa GDPR článku 6' :
-                               'Iba nevyhnutné cookies - v súlade s ePrivacy direktívou';
-              scores.push({ area: 'Cookies', score: cookiesScore, note: cookiesNote });
-              
-              // Storage
-              const hasPreConsentStorage = data.detailedAnalysis.storage?.some(s => s.createdPreConsent) || false;
-              const storageScore = hasPreConsentStorage ? 5 : 1;
-              let storageNote = hasPreConsentStorage ? 'localStorage/sessionStorage sa zapisuje pred súhlasom - porušenie GDPR' :
-                               'Lokálne úložisko sa nepoužíva bez súhlasu - v súlade s GDPR';
-              scores.push({ area: 'Storage', score: storageScore, note: storageNote });
-              
-              // Trackers
-              const trackerCount = data.detailedAnalysis.trackers.length;
-              const trackersScore = trackerCount === 0 ? 0 : (trackerCount <= 2 ? 3 : 5);
-              let trackersNote = trackerCount === 0 ? 'Žiadne trackery detegované - výborný súlad s ochranou súkromia' :
-                                (trackerCount <= 2 ? `${trackerCount} trackery detegované - stredné riziko pre súkromie návštevníkov` :
-                                `${trackerCount} trackerov detegovaných - vysoké riziko pre súkromie a potenciálne GDPR pokuty`);
-              scores.push({ area: 'Trackery', score: trackersScore, note: trackersNote });
-              
-              // UX Banner (technical assessment only)
-              const hasCmp = data.detailedAnalysis.consentManagement.hasConsentTool;
-              const uxScore = hasCmp ? 1 : 3;
-              let uxNote = hasCmp ? 'Technická kontrola cookie lišty prebehla úspešne' :
-                          'Chýba cookie lišta - porušenie transparency požiadaviek GDPR článku 12';
-              scores.push({ area: 'UX lišta', score: uxScore, note: uxNote });
-              
-              return scores;
-            };
-
-            const riskScores = calculateRiskScores();
-            const averageScore = riskScores.reduce((sum, s) => sum + s.score, 0) / riskScores.length;
-            const overallRisk = averageScore <= 1.5 ? 'NÍZKE' : (averageScore <= 3 ? 'STREDNÉ' : 'VYSOKÉ');
-            const overallRiskColor = averageScore <= 1.5 ? 'bg-green-600' : (averageScore <= 3 ? 'bg-orange-500' : 'bg-red-600');
-            const riskScoreOutOf100 = Math.round((averageScore / 5) * 100);
+            // Calculate risk scores using utility function
+            const riskScores = calculateRiskScoresFromDisplay(data);
+            const { averageScore, riskLevel, riskColor } = calculateOverallRiskFromScores(riskScores);
 
             return (
               <>
@@ -238,8 +184,8 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="font-semibold">Celkové riziko:</span>
-                    <Badge className={`text-white ${overallRiskColor}`}>
-                      {overallRisk} ({riskScoreOutOf100}/100)
+                    <Badge className={`text-white ${riskColor}`}>
+                      {riskLevel} ({averageScore.toFixed(1)}/5)
                     </Badge>
                   </div>
                 </div>
