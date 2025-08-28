@@ -1,30 +1,70 @@
 import { jsPDF } from 'jspdf';
 import { AuditData } from '@/types/audit';
 
+// Add Unicode font support for Slovak diacritics
+import 'jspdf/dist/polyfills.es.js';
+
 export const generatePDFReport = (data: AuditData): jsPDF => {
   const pdf = new jsPDF('p', 'mm', 'a4');
-  let currentY = 20;
+  let currentY = 30;
   const leftMargin = 20;
   const rightMargin = 190;
-  const lineHeight = 7;
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const lineHeight = 6;
+  
+  // Add header and footer on each page
+  const addHeader = () => {
+    pdf.setFontSize(8);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor('#666666');
+    pdf.text('GDPR Cookie Audit Report', leftMargin, 15);
+    pdf.text(new Date().toLocaleDateString('sk-SK'), pageWidth - leftMargin, 15, { align: 'right' });
+    
+    // Add line under header
+    pdf.setDrawColor('#E5E5E5');
+    pdf.line(leftMargin, 18, pageWidth - leftMargin, 18);
+  };
+  
+  const addFooter = () => {
+    const pageCount = pdf.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      pdf.setPage(i);
+      pdf.setFontSize(8);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor('#666666');
+      
+      // Add line above footer
+      pdf.setDrawColor('#E5E5E5');
+      pdf.line(leftMargin, pageHeight - 20, pageWidth - leftMargin, pageHeight - 20);
+      
+      pdf.text(`Strana ${i} z ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+    }
+  };
+  
+  // Add initial header
+  addHeader();
   
   // Helper functions
   const addPageIfNeeded = (neededSpace: number) => {
-    if (currentY + neededSpace > 280) {
+    if (currentY + neededSpace > 260) {
       pdf.addPage();
-      currentY = 20;
+      addHeader();
+      currentY = 30;
       return true;
     }
     return false;
   };
 
-  const addText = (text: string, fontSize: number = 12, style: 'normal' | 'bold' = 'normal', color: string = '#000000') => {
+  const addText = (text: string, fontSize: number = 11, style: 'normal' | 'bold' = 'normal', color: string = '#000000') => {
     pdf.setFontSize(fontSize);
     pdf.setFont('helvetica', style);
     pdf.setTextColor(color);
     
-    const lines = pdf.splitTextToSize(text, rightMargin - leftMargin);
-    const neededSpace = lines.length * lineHeight;
+    // Better text wrapping with proper Slovak character handling
+    const maxWidth = rightMargin - leftMargin;
+    const lines = pdf.splitTextToSize(text, maxWidth);
+    const neededSpace = lines.length * lineHeight + 2;
     
     addPageIfNeeded(neededSpace);
     
@@ -33,53 +73,103 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
       currentY += lineHeight;
     });
     
-    currentY += 3; // Extra spacing after text block
+    currentY += 2; // Consistent spacing
   };
 
   const addTitle = (text: string, level: number = 1) => {
-    const fontSize = level === 1 ? 18 : level === 2 ? 16 : 14;
-    const spacing = level === 1 ? 10 : 7;
+    const fontSize = level === 1 ? 16 : level === 2 ? 14 : 12;
+    const spacing = level === 1 ? 8 : level === 2 ? 6 : 4;
+    const color = level === 1 ? '#1e40af' : level === 2 ? '#2563eb' : '#000000';
     
     currentY += spacing;
-    addText(text, fontSize, 'bold');
-    currentY += spacing / 2;
+    addPageIfNeeded(fontSize + spacing);
+    
+    pdf.setFontSize(fontSize);
+    pdf.setFont('helvetica', 'bold');
+    pdf.setTextColor(color);
+    
+    pdf.text(text, leftMargin, currentY);
+    currentY += fontSize * 0.4 + spacing;
+    
+    // Add underline for level 1 and 2 titles
+    if (level <= 2) {
+      pdf.setDrawColor(color);
+      pdf.setLineWidth(level === 1 ? 0.8 : 0.5);
+      const textWidth = pdf.getTextWidth(text);
+      pdf.line(leftMargin, currentY - spacing + 2, leftMargin + textWidth, currentY - spacing + 2);
+      currentY += 2;
+    }
   };
 
-  const addTable = (headers: string[], rows: string[][]) => {
-    const colWidth = (rightMargin - leftMargin) / headers.length;
+  const addTable = (headers: string[], rows: string[][], title?: string) => {
+    if (title) {
+      addText(title, 10, 'bold', '#374151');
+      currentY += 2;
+    }
     
-    // Check if table fits on page
-    const tableHeight = (rows.length + 1) * 8;
+    const colWidth = (rightMargin - leftMargin) / headers.length;
+    const rowHeight = 7;
+    const tableHeight = (rows.length + 1) * rowHeight + 6;
+    
     addPageIfNeeded(tableHeight);
     
-    // Draw headers
-    pdf.setFillColor(240, 240, 240);
-    pdf.rect(leftMargin, currentY - 5, rightMargin - leftMargin, 8, 'F');
+    // Draw table border
+    pdf.setDrawColor('#D1D5DB');
+    pdf.setLineWidth(0.3);
+    
+    // Draw headers with better styling
+    pdf.setFillColor(248, 250, 252);
+    pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, rowHeight, 'FD');
     
     headers.forEach((header, i) => {
-      pdf.setFontSize(10);
+      pdf.setFontSize(9);
       pdf.setFont('helvetica', 'bold');
-      pdf.text(header, leftMargin + (i * colWidth) + 2, currentY);
-    });
-    currentY += 8;
-    
-    // Draw rows
-    rows.forEach((row, rowIndex) => {
-      if (rowIndex % 2 === 0) {
-        pdf.setFillColor(250, 250, 250);
-        pdf.rect(leftMargin, currentY - 5, rightMargin - leftMargin, 8, 'F');
+      pdf.setTextColor('#374151');
+      const headerText = header.length > 25 ? header.substring(0, 22) + '...' : header;
+      pdf.text(headerText, leftMargin + (i * colWidth) + 2, currentY);
+      
+      // Draw column separators
+      if (i > 0) {
+        pdf.line(leftMargin + (i * colWidth), currentY - 3, leftMargin + (i * colWidth), currentY + rowHeight - 3);
       }
+    });
+    currentY += rowHeight;
+    
+    // Draw rows with alternating colors
+    rows.forEach((row, rowIndex) => {
+      // Check if we need a new page for this row
+      addPageIfNeeded(rowHeight + 2);
+      
+      const fillColor = rowIndex % 2 === 0 ? [255, 255, 255] : [249, 250, 251];
+      pdf.setFillColor(fillColor[0], fillColor[1], fillColor[2]);
+      pdf.rect(leftMargin, currentY - 3, rightMargin - leftMargin, rowHeight, 'FD');
       
       row.forEach((cell, i) => {
-        pdf.setFontSize(9);
+        pdf.setFontSize(8);
         pdf.setFont('helvetica', 'normal');
-        const cellText = cell.length > 40 ? cell.substring(0, 37) + '...' : cell;
-        pdf.text(cellText, leftMargin + (i * colWidth) + 2, currentY);
+        pdf.setTextColor('#1F2937');
+        
+        // Better cell text handling with proper truncation
+        const maxCellWidth = colWidth - 4;
+        const cellText = pdf.splitTextToSize(cell || '', maxCellWidth);
+        const displayText = cellText[0] || '';
+        
+        pdf.text(displayText, leftMargin + (i * colWidth) + 2, currentY);
+        
+        // Draw column separators
+        if (i > 0) {
+          pdf.setDrawColor('#E5E7EB');
+          pdf.line(leftMargin + (i * colWidth), currentY - 3, leftMargin + (i * colWidth), currentY + rowHeight - 3);
+        }
       });
-      currentY += 8;
+      currentY += rowHeight;
     });
     
-    currentY += 5;
+    // Draw final border
+    pdf.setDrawColor('#D1D5DB');
+    pdf.rect(leftMargin, currentY - tableHeight, rightMargin - leftMargin, tableHeight, 'S');
+    
+    currentY += 6;
   };
 
   // Generate PDF content
@@ -193,6 +283,9 @@ export const generatePDFReport = (data: AuditData): jsPDF => {
         addText(`${index + 1}. ${rec.title}: ${rec.description}`, 11);
       });
     }
+    
+    // Add footer to all pages
+    addFooter();
     
     return pdf;
     
