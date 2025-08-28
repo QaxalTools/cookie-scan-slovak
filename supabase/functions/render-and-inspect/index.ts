@@ -108,7 +108,7 @@ Deno.serve(async (req: Request) => {
     
     await logToDatabase('info', '🏥 Browserless health check', { status: healthStatus });
 
-    // Direct WebSocket CDP implementation
+    // Direct WebSocket CDP implementation with session-aware commands
     console.log('🌐 Starting CDP WebSocket analysis...');
     
     // Create WebSocket connection to Browserless
@@ -138,14 +138,22 @@ Deno.serve(async (req: Request) => {
         };
       });
       
-      // Send CDP commands via WebSocket
+      // CDP session management
       let requestId = 1;
       const cdpResults = {};
+      const sessions = new Map(); // sessionId -> target info
+      let pageSessionId = null;
       
-      const sendCDPCommand = (method, params = {}) => {
+      // Session-aware CDP command wrapper
+      const sendCDPCommand = (method, params = {}, sessionId = null) => {
         return new Promise((resolve, reject) => {
           const id = requestId++;
-          const message = JSON.stringify({ id, method, params });
+          const message = JSON.stringify({ 
+            id, 
+            method, 
+            params: sessionId ? { ...params } : params,
+            sessionId
+          });
           
           const timeout = setTimeout(() => {
             delete cdpResults[id];
@@ -157,10 +165,25 @@ Deno.serve(async (req: Request) => {
         });
       };
       
-      // Handle CDP responses
+      // Storage for network events and data
+      const networkData = {
+        requests: [],
+        responses: [],
+        cookies_pre: [],
+        cookies_post_accept: [],
+        cookies_post_reject: [],
+        storage_pre: {},
+        storage_post_accept: {},
+        storage_post_reject: {},
+        isPreConsent: true
+      };
+      
+      // Handle CDP responses and events
       wsSocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          
+          // Handle command responses
           if (data.id && cdpResults[data.id]) {
             const { resolve, timeout } = cdpResults[data.id];
             clearTimeout(timeout);
@@ -170,9 +193,89 @@ Deno.serve(async (req: Request) => {
               console.log(`CDP Error [${data.id}]:`, data.error);
             }
             resolve(data.result || data);
+            return;
+          }
+          
+          // Handle events from all sessions
+          if (data.method) {
+            const sessionId = data.sessionId;
+            
+            // Track new attached targets
+            if (data.method === 'Target.attachedToTarget') {
+              const targetSessionId = data.params.sessionId;
+              const targetInfo = data.params.targetInfo;
+              sessions.set(targetSessionId, targetInfo);
+              console.log(`📎 Target attached: ${targetInfo.type} [${targetSessionId}]`);
+              
+              // Enable domains for new session
+              if (targetInfo.type === 'page' || targetInfo.type === 'iframe') {
+                sendCDPCommand('Page.enable', {}, targetSessionId).catch(e => console.log('Page.enable failed:', e.message));
+                sendCDPCommand('Runtime.enable', {}, targetSessionId).catch(e => console.log('Runtime.enable failed:', e.message));
+                sendCDPCommand('Network.enable', {
+                  maxTotalBufferSize: 10_000_000,
+                  maxResourceBufferSize: 5_000_000
+                }, targetSessionId).catch(e => console.log('Network.enable failed:', e.message));
+              }
+            }
+            
+            // Network event handling (filter by main page session)
+            if (data.method === 'Network.requestWillBeSent') {
+              const request = {
+                id: data.params.requestId,
+                url: data.params.request.url,
+                method: data.params.request.method,
+                headers: data.params.request.headers,
+                timestamp: data.params.timestamp,
+                phase: networkData.isPreConsent ? 'pre' : 'post',
+                sessionId: sessionId,
+                query: {},
+                trackingParams: {}
+              };
+              
+              // Parse query parameters with tracking detection
+              try {
+                const urlObj = new URL(data.params.request.url);
+                const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
+                
+                urlObj.searchParams.forEach((value, key) => {
+                  request.query[key] = value;
+                  if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                    request.trackingParams[key] = value;
+                  }
+                });
+              } catch (e) {
+                console.log('URL parsing error:', e.message);
+              }
+              
+              // Parse POST data
+              if (data.params.request.postData) {
+                const contentType = data.params.request.headers['content-type'] || '';
+                request.postData = data.params.request.postData;
+                
+                if (contentType.includes('application/json')) {
+                  try {
+                    request.postDataParsed = JSON.parse(data.params.request.postData);
+                  } catch (e) {
+                    console.log('JSON parse error:', e.message);
+                  }
+                }
+              }
+              
+              networkData.requests.push(request);
+              
+            } else if (data.method === 'Network.responseReceived') {
+              const response = {
+                requestId: data.params.requestId,
+                status: data.params.response.status,
+                mimeType: data.params.response.mimeType,
+                resourceType: data.params.type,
+                sessionId: sessionId
+              };
+              networkData.responses.push(response);
+            }
           }
         } catch (e) {
-          console.log('CDP message parse error:', e.message);
+          // Ignore non-JSON messages
         }
       };
       
@@ -190,6 +293,16 @@ Deno.serve(async (req: Request) => {
       const targetId = pageTarget.targetId;
       console.log('🎯 Using target:', targetId);
       
+      // Attach to page target to get session ID
+      const attachResult = await sendCDPCommand('Target.attachToTarget', {
+        targetId,
+        flatten: true
+      });
+      
+      pageSessionId = attachResult.sessionId;
+      sessions.set(pageSessionId, pageTarget);
+      console.log('📎 Page session ID:', pageSessionId);
+      
       // Auto-attach to all targets with flattening
       await sendCDPCommand('Target.setAutoAttach', {
         autoAttach: true,
@@ -197,98 +310,29 @@ Deno.serve(async (req: Request) => {
         waitForDebuggerOnStart: false
       });
       
-      // Enable CDP domains
-      await sendCDPCommand('Page.enable');
-      await sendCDPCommand('Runtime.enable');
+      // Enable CDP domains on the page session
+      await sendCDPCommand('Page.enable', {}, pageSessionId);
+      await sendCDPCommand('Runtime.enable', {}, pageSessionId);
       await sendCDPCommand('Network.enable', {
         maxTotalBufferSize: 10_000_000,
         maxResourceBufferSize: 5_000_000
-      });
-      await sendCDPCommand('DOMStorage.enable');
+      }, pageSessionId);
+      await sendCDPCommand('DOMStorage.enable', {}, pageSessionId);
       
-      console.log('✅ CDP domains enabled');
+      console.log('✅ CDP domains enabled on page session:', pageSessionId);
+      console.log('📍 CDP_bound: true');
       
-      // Storage for network events and data
-      const networkData = {
-        requests: [],
-        responses: [],
-        cookies_pre: [],
-        cookies_post_accept: [],
-        cookies_post_reject: [],
-        storage_pre: {},
-        storage_post_accept: {},
-        storage_post_reject: {},
-        requestIndex: 0,
-        isPreConsent: true
-      };
-      
-      // Register network event listeners
-      wsSocket.addEventListener('message', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.method === 'Network.requestWillBeSent') {
-            const request = {
-              id: data.params.requestId,
-              url: data.params.request.url,
-              method: data.params.request.method,
-              headers: data.params.request.headers,
-              timestamp: data.params.timestamp,
-              phase: networkData.isPreConsent ? 'pre' : 'post',
-              query: {},
-              trackingParams: {}
-            };
-            
-            // Parse query parameters with tracking detection
-            try {
-              const urlObj = new URL(data.params.request.url);
-              const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
-              
-              urlObj.searchParams.forEach((value, key) => {
-                request.query[key] = value;
-                if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
-                  request.trackingParams[key] = value;
-                }
-              });
-            } catch (e) {
-              console.log('URL parsing error:', e.message);
-            }
-            
-            // Parse POST data
-            if (data.params.request.postData) {
-              const contentType = data.params.request.headers['content-type'] || '';
-              request.postData = data.params.request.postData;
-              
-              if (contentType.includes('application/json')) {
-                try {
-                  request.postDataParsed = JSON.parse(data.params.request.postData);
-                } catch (e) {
-                  console.log('JSON parse error:', e.message);
-                }
-              }
-            }
-            
-            networkData.requests.push(request);
-            
-          } else if (data.method === 'Network.responseReceived') {
-            const response = {
-              requestId: data.params.requestId,
-              status: data.params.response.status,
-              mimeType: data.params.response.mimeType,
-              resourceType: data.params.type
-            };
-            networkData.responses.push(response);
-          }
-        } catch (e) {
-          // Ignore non-JSON messages
-        }
-      });
+      // Set additional headers
+      await sendCDPCommand('Network.setUserAgentOverride', {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }, pageSessionId);
       
       // Helper functions for data collection
       const collectCookies = async (label) => {
         const cookies = [];
         
         try {
-          const cdpCookies = await sendCDPCommand('Network.getAllCookies');
+          const cdpCookies = await sendCDPCommand('Network.getAllCookies', {}, pageSessionId);
           if (cdpCookies.cookies) {
             cookies.push(...cdpCookies.cookies.map(c => ({
               ...c,
@@ -297,6 +341,24 @@ Deno.serve(async (req: Request) => {
           }
         } catch (e) {
           console.log(`CDP cookies failed for ${label}:`, e.message);
+        }
+        
+        // Fallback: document.cookie via Runtime.evaluate
+        try {
+          const docCookieResult = await sendCDPCommand('Runtime.evaluate', {
+            expression: 'document.cookie'
+          }, pageSessionId);
+          
+          const docCookie = docCookieResult.result?.value || '';
+          if (docCookie) {
+            const docCookies = docCookie.split('; ').map(c => {
+              const [name, ...rest] = c.split('=');
+              return { name, value: rest.join('='), source: 'document.cookie' };
+            });
+            cookies.push(...docCookies);
+          }
+        } catch (e) {
+          console.log(`Document cookie failed for ${label}:`, e.message);
         }
         
         console.log(`Cookies ${label}:`, cookies.length);
@@ -313,7 +375,7 @@ Deno.serve(async (req: Request) => {
           try {
             const localStorage = await sendCDPCommand('DOMStorage.getDOMStorageItems', {
               storageId: { securityOrigin: origin, isLocalStorage: true }
-            });
+            }, pageSessionId);
             if (localStorage.entries) {
               localStorage.entries.forEach(([key, value]) => {
                 storage.localStorage[key] = value;
@@ -327,7 +389,7 @@ Deno.serve(async (req: Request) => {
           try {
             const sessionStorage = await sendCDPCommand('DOMStorage.getDOMStorageItems', {
               storageId: { securityOrigin: origin, isLocalStorage: false }
-            });
+            }, pageSessionId);
             if (sessionStorage.entries) {
               sessionStorage.entries.forEach(([key, value]) => {
                 storage.sessionStorage[key] = value;
@@ -335,6 +397,36 @@ Deno.serve(async (req: Request) => {
             }
           } catch (e) {
             console.log(`Session storage failed for ${label}:`, e.message);
+          }
+          
+          // Fallback: Runtime.evaluate for storage
+          try {
+            const storageResult = await sendCDPCommand('Runtime.evaluate', {
+              expression: `
+                (() => {
+                  const res = { local: {}, session: {} };
+                  try { 
+                    for (let i = 0; i < localStorage.length; i++) { 
+                      const k = localStorage.key(i); 
+                      res.local[k] = localStorage.getItem(k); 
+                    } 
+                  } catch {}
+                  try { 
+                    for (let i = 0; i < sessionStorage.length; i++) { 
+                      const k = sessionStorage.key(i); 
+                      res.session[k] = sessionStorage.getItem(k); 
+                    } 
+                  } catch {}
+                  return res;
+                })()
+              `
+            }, pageSessionId);
+            
+            const runtimeStorage = storageResult.result?.value || { local: {}, session: {} };
+            Object.assign(storage.localStorage, runtimeStorage.local);
+            Object.assign(storage.sessionStorage, runtimeStorage.session);
+          } catch (e) {
+            console.log(`Runtime storage failed for ${label}:`, e.message);
           }
           
         } catch (e) {
@@ -348,7 +440,7 @@ Deno.serve(async (req: Request) => {
       
       // Navigate to the URL
       console.log('📄 Navigating to URL...');
-      await sendCDPCommand('Page.navigate', { url });
+      await sendCDPCommand('Page.navigate', { url }, pageSessionId);
       
       // Wait for page load event
       await new Promise((resolve) => {
@@ -356,7 +448,7 @@ Deno.serve(async (req: Request) => {
         const messageHandler = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data.method === 'Page.loadEventFired') {
+            if (data.method === 'Page.loadEventFired' && data.sessionId === pageSessionId) {
               clearTimeout(timeout);
               wsSocket.removeEventListener('message', messageHandler);
               resolve(true);
@@ -373,22 +465,114 @@ Deno.serve(async (req: Request) => {
       // Wait for network idle (additional 6 seconds)
       await new Promise(resolve => setTimeout(resolve, 6000));
       
-      // Get final URL
+      // Get final URL and readyState
       const finalUrlResult = await sendCDPCommand('Runtime.evaluate', {
         expression: 'window.location.href'
-      });
+      }, pageSessionId);
       const finalUrl = finalUrlResult.result?.value || url;
       
+      const readyStateResult = await sendCDPCommand('Runtime.evaluate', {
+        expression: 'document.readyState'
+      }, pageSessionId);
+      const readyState = readyStateResult.result?.value || 'unknown';
+      
       console.log('🌐 Final URL:', finalUrl);
+      console.log('📄 readyState:', readyState);
       
-      // DEBUG: Check request counts
-      const preRequests = networkData.requests.filter(r => r.phase === 'pre');
-      console.log('🔍 DEBUG - Requests captured (pre):', preRequests.length);
+      // DEBUG: Check request counts with fallback
+      const cdpRequestsCount = networkData.requests.filter(r => r.phase === 'pre').length;
       
-      if (preRequests.length === 0) {
+      // Add fetch/XHR monkeypatch as fallback
+      const fallbackRequests = [];
+      try {
+        const monkeypatchResult = await sendCDPCommand('Runtime.evaluate', {
+          expression: `
+            (() => {
+              const requests = [];
+              const trackingKeys = ['id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 'ip', 'geo', 'pid', 'aid', 'k'];
+              
+              // Monkeypatch fetch
+              const originalFetch = window.fetch;
+              window.fetch = function(...args) {
+                const [resource, options] = args;
+                const url = typeof resource === 'string' ? resource : resource.url;
+                const method = options?.method || 'GET';
+                
+                const request = {
+                  url,
+                  method,
+                  phase: 'pre-fallback',
+                  timestamp: Date.now(),
+                  query: {},
+                  trackingParams: {}
+                };
+                
+                try {
+                  const urlObj = new URL(url, window.location.href);
+                  urlObj.searchParams.forEach((value, key) => {
+                    request.query[key] = value;
+                    if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                      request.trackingParams[key] = value;
+                    }
+                  });
+                } catch (e) {}
+                
+                requests.push(request);
+                return originalFetch.apply(this, args);
+              };
+              
+              // Monkeypatch XMLHttpRequest
+              const originalXHR = window.XMLHttpRequest;
+              const XHRopen = originalXHR.prototype.open;
+              originalXHR.prototype.open = function(method, url, ...args) {
+                const request = {
+                  url,
+                  method,
+                  phase: 'pre-fallback',
+                  timestamp: Date.now(),
+                  query: {},
+                  trackingParams: {}
+                };
+                
+                try {
+                  const urlObj = new URL(url, window.location.href);
+                  urlObj.searchParams.forEach((value, key) => {
+                    request.query[key] = value;
+                    if (trackingKeys.some(tk => key.toLowerCase().includes(tk))) {
+                      request.trackingParams[key] = value;
+                    }
+                  });
+                } catch (e) {}
+                
+                requests.push(request);
+                return XHRopen.apply(this, [method, url, ...args]);
+              };
+              
+              return { monkeypatchEnabled: true };
+            })()
+          `
+        }, pageSessionId);
+        
+        console.log('🐒 Fetch/XHR monkeypatch enabled');
+      } catch (e) {
+        console.log('Monkeypatch failed:', e.message);
+      }
+      
+      console.log('🔍 DEBUG - Requests captured:', {
+        cdp: cdpRequestsCount,
+        fallback: fallbackRequests.length
+      });
+      
+      console.log('🎯 TARGET CHECK:', {
+        url: finalUrl,
+        sessionId: pageSessionId,
+        readyState
+      });
+      
+      // Quality check: if no requests captured, return INCOMPLETE
+      if (cdpRequestsCount === 0 && fallbackRequests.length === 0) {
         console.log('⚠️ WARNING: No network requests captured - CDP not bound properly');
         
-        // Return with INCOMPLETE banner
         return new Response(JSON.stringify({
           success: true,
           trace_id: traceId,
@@ -410,10 +594,13 @@ Deno.serve(async (req: Request) => {
             scenarios: { baseline: true, accept: false, reject: false },
             _quality: { 
               incomplete: true, 
-              reason: 'NETWORK_CAPTURE_EMPTY_CDP_NOT_BOUND',
+              reason: 'NETWORK_CAPTURE_EMPTY_CDP_AND_FALLBACK',
               debug: {
                 target_id: targetId,
-                requests_captured: preRequests.length
+                page_session_id: pageSessionId,
+                cdp_requests: cdpRequestsCount,
+                fallback_requests: fallbackRequests.length,
+                ready_state: readyState
               }
             }
           }
@@ -478,7 +665,7 @@ Deno.serve(async (req: Request) => {
             return { cmpDetected, hasAcceptButton: !!foundButton };
           })()
         `
-      });
+      }, pageSessionId);
       
       const cmpInfo = cmpDetection.result?.value || { cmpDetected: false, hasAcceptButton: false };
       console.log('🔍 CMP Detection Result:', cmpInfo);
@@ -524,7 +711,7 @@ Deno.serve(async (req: Request) => {
               return { clicked: false, method: 'none' };
             })()
           `
-        });
+        }, pageSessionId);
         
         const clickInfo = clickResult.result?.value || { clicked: false };
         consentClicked = clickInfo.clicked;
@@ -547,12 +734,12 @@ Deno.serve(async (req: Request) => {
       }
       
       // Final data compilation
-      const preRequests = networkData.requests.filter(r => r.phase === 'pre');
-      const postRequests = networkData.requests.filter(r => r.phase === 'post');
+      const preConsentRequests = networkData.requests.filter(r => r.phase === 'pre');
+      const postConsentRequests = networkData.requests.filter(r => r.phase === 'post');
       
       console.log('📊 Final Summary:');
       console.log(`Cookies: pre=${networkData.cookies_pre.length}, post=${networkData.cookies_post_accept.length}`);
-      console.log(`Requests: pre=${preRequests.length}, post=${postRequests.length}`);
+      console.log(`Requests: pre=${preConsentRequests.length}, post=${postConsentRequests.length}`);
       console.log(`Final URL: ${finalUrl}`);
       
       browserlessData = {
@@ -560,8 +747,8 @@ Deno.serve(async (req: Request) => {
         cookies_pre: networkData.cookies_pre,
         cookies_post_accept: networkData.cookies_post_accept,
         cookies_post_reject: [],
-        requests_pre: preRequests,
-        requests_post_accept: postRequests,
+        requests_pre: preConsentRequests,
+        requests_post_accept: postConsentRequests,
         requests_post_reject: [],
         storage_pre: networkData.storage_pre,
         storage_post_accept: networkData.storage_post_accept,
