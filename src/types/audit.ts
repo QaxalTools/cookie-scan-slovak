@@ -129,6 +129,12 @@ export interface AuditData {
       category: 'technické' | 'analytické' | 'marketingové';
       expiration: string;
       status: 'ok' | 'warning' | 'error';
+      sources?: {
+        jar: boolean;
+        setCookie: boolean;
+        document: boolean;
+      };
+      persisted?: boolean;
     }>;
   };
   storage: Array<{
