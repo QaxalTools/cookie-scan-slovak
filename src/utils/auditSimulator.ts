@@ -1,5 +1,4 @@
 import { AuditData, InternalAuditJson } from '@/types/audit';
-import { getDomainProfile } from './domainProfiles';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -177,25 +176,7 @@ async function generateInternalAuditJson(
     finalUrl = normalizeUrl(input);
     const domain = getDomain(finalUrl);
     
-    // Check if we have a domain profile for realistic data
-    const domainProfile = getDomainProfile(domain);
-    if (domainProfile) {
-      // Use domain-specific profile for accurate simulation
-      await updateProgress?.(1);
-      await updateProgress?.(2);
-      await updateProgress?.(3);
-      await updateProgress?.(4);
-      await updateProgress?.(5);
-      await updateProgress?.(6);
-      
-      return {
-        final_url: finalUrl,
-        https: { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true },
-        ...domainProfile
-      } as InternalAuditJson;
-    }
-    
-    // Fallback to basic simulation
+    // Generate basic simulation HTML for the domain
     htmlContent = generateSimulatedHtml(domain);
   } else {
     // Extract final URL from HTML if possible
@@ -373,7 +354,7 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   
   // Helper function to map cookies to their domain source
   const getDomainForCookie = (cookieName: string, party: '1P' | '3P'): string => {
-    if (party === '1P') return actualDomain || 'example.com';
+    if (party === '1P') return actualDomain || 'unknown';
     
     // Map 3P cookies to their domains
     const thirdPartyMappings: Record<string, string> = {
@@ -389,8 +370,8 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
     return thirdPartyMappings[cookieName] || 'unknown.com';
   };
   
-  // Only add default cookies if there's evidence (not for basic simulations)
-  if (!isSimulation) {
+  // Only add default cookies if there's evidence and we have a valid domain
+  if (!isSimulation && actualDomain && actualDomain !== 'unknown') {
     // Add basic technical cookies only if we detect PHP or other evidence
     cookies.push(
       { name: 'PHPSESSID', domain: getDomainForCookie('PHPSESSID', '1P'), party: '1P', type: 'technical', expiry_days: null }
@@ -401,14 +382,18 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   const services = new Set([...thirdParties.map(tp => tp.service), ...beacons.map(b => b.service)]);
   
   if (services.has('Facebook Pixel')) {
+    if (actualDomain && actualDomain !== 'unknown') {
+      cookies.push(
+        { name: '_fbp', domain: getDomainForCookie('_fbp', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
+        { name: '_fbc', domain: getDomainForCookie('_fbc', '1P'), party: '1P', type: 'marketing', expiry_days: 90 }
+      );
+    }
     cookies.push(
-      { name: '_fbp', domain: getDomainForCookie('_fbp', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
-      { name: '_fbc', domain: getDomainForCookie('_fbc', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
       { name: 'fr', domain: getDomainForCookie('fr', '3P'), party: '3P', type: 'marketing', expiry_days: 90 }
     );
   }
   
-  if (services.has('Google Analytics')) {
+  if (services.has('Google Analytics') && actualDomain && actualDomain !== 'unknown') {
     cookies.push(
       { name: '_ga', domain: getDomainForCookie('_ga', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
       { name: '_gid', domain: getDomainForCookie('_gid', '1P'), party: '1P', type: 'analytics', expiry_days: 1 },
@@ -417,13 +402,17 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
   }
   
   if (services.has('Google Ads')) {
+    if (actualDomain && actualDomain !== 'unknown') {
+      cookies.push(
+        { name: '_gcl_au', domain: getDomainForCookie('_gcl_au', '1P'), party: '1P', type: 'marketing', expiry_days: 90 }
+      );
+    }
     cookies.push(
-      { name: '_gcl_au', domain: getDomainForCookie('_gcl_au', '1P'), party: '1P', type: 'marketing', expiry_days: 90 },
       { name: 'IDE', domain: getDomainForCookie('IDE', '3P'), party: '3P', type: 'marketing', expiry_days: 390 }
     );
   }
   
-  if (services.has('Pinterest')) {
+  if (services.has('Pinterest') && actualDomain && actualDomain !== 'unknown') {
     cookies.push(
       { name: '_pin_unauth', domain: getDomainForCookie('_pin_unauth', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
@@ -436,14 +425,14 @@ function generateCookiesFromServices(thirdParties: Array<{ host: string; service
     );
   }
   
-  if (services.has('Leady')) {
+  if (services.has('Leady') && actualDomain && actualDomain !== 'unknown') {
     cookies.push(
       { name: 'leady_session_id', domain: getDomainForCookie('leady_session_id', '1P'), party: '1P', type: 'marketing', expiry_days: 30 },
       { name: 'leady_track_id', domain: getDomainForCookie('leady_track_id', '1P'), party: '1P', type: 'marketing', expiry_days: 365 }
     );
   }
   
-  if (services.has('Snowplow')) {
+  if (services.has('Snowplow') && actualDomain && actualDomain !== 'unknown') {
     cookies.push(
       { name: '_sp_id.xxxx', domain: getDomainForCookie('_sp_id.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: 730 },
       { name: '_sp_ses.xxxx', domain: getDomainForCookie('_sp_ses.xxxx', '1P'), party: '1P', type: 'analytics', expiry_days: null }

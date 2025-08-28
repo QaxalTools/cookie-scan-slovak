@@ -42,7 +42,9 @@ const Index = () => {
           }
 
           if (data?.success && data?.html) {
-            auditInput = data.html;
+            // Inject base tag to ensure correct domain identification
+            const baseTag = `<base href="${data.finalUrl || input}">`;
+            auditInput = data.html.replace('<head>', `<head>${baseTag}`);
             isHtml = true;
             isLiveMode = true;
             finalUrl = data.finalUrl || input;
