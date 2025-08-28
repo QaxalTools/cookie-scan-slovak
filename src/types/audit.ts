@@ -6,7 +6,7 @@ export interface AuditData {
   
   // A) Manažérsky sumár
   managementSummary: {
-    verdict: 'súlad' | 'čiastočný súlad' | 'nesúlad';
+    verdict: 'súlad' | 'čiastočný súlad' | 'nesúlad' | 'neúplné dáta';
     overall: string;
     risks: string;
   };
