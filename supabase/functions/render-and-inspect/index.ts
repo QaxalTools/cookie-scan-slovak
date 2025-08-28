@@ -81,13 +81,13 @@ Deno.serve(async (req: Request) => {
     console.log(`🔑 Using Browserless token: ${maskedToken}`);
     await logToDatabase('info', '🔑 Token verification', { masked_token: maskedToken });
 
-    // Health check Browserless first
+    // Health check Browserless first with production endpoint
     console.log('🏥 Checking Browserless health...');
     let healthStatus = 'unknown';
     let healthDetails = {};
     
     try {
-      const healthResponse = await fetch(`https://chrome.browserless.io/json/version?token=${browserlessApiKey}`, {
+      const healthResponse = await fetch(`https://production-sfo.browserless.io/json/version?token=${browserlessApiKey}`, {
         method: 'GET',
         timeout: 10000
       });
@@ -621,8 +621,8 @@ export default async ({ page, context }) => {
     console.log('🌐 Calling Browserless API...');
     await logToDatabase('info', '🌐 Calling Browserless API', { url });
 
-    // Call Browserless API with token in query string for better compatibility
-    const browserlessResponse = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
+    // Call Browserless API with production endpoint and token in query string
+    const browserlessResponse = await fetch(`https://production-sfo.browserless.io/function?token=${browserlessApiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
