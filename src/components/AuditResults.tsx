@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -76,6 +78,8 @@ const getVerdictColor = (verdict: string): string => {
 };
 
 export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
+  const { toast } = useToast();
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
 
   // Consistency checks
   const performConsistencyChecks = () => {
@@ -117,9 +121,72 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
     URL.revokeObjectURL(url);
   };
 
+  const handleDownloadPDF = async () => {
+    setIsGeneratingPDF(true);
+    try {
+      const reportElement = document.getElementById('audit-report');
+      if (!reportElement) {
+        throw new Error('Report element not found');
+      }
+
+      // Configure html2canvas for better quality
+      const canvas = await html2canvas(reportElement, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        logging: false,
+        scrollX: 0,
+        scrollY: 0,
+        width: reportElement.scrollWidth,
+        height: reportElement.scrollHeight
+      });
+
+      // Create PDF
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      
+      const imgWidth = 210; // A4 width in mm
+      const pageHeight = 295; // A4 height in mm
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let heightLeft = imgHeight;
+      let position = 0;
+
+      // Add first page
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+
+      // Add additional pages if needed
+      while (heightLeft >= 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+
+      // Download PDF
+      const dateStr = new Date().toISOString().split('T')[0];
+      pdf.save(`gdpr-audit-report-${dateStr}.pdf`);
+      
+      toast({
+        title: "PDF vygenerované",
+        description: "GDPR audit report bol úspešne stiahnutý ako PDF.",
+      });
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      toast({
+        title: "Chyba pri generovaní PDF",
+        description: "Nepodarilo sa vygenerovať PDF report. Skúste to znova.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsGeneratingPDF(false);
+    }
+  };
+
 
   return (
-    <div className="space-y-8">
+    <div id="audit-report" className="space-y-8">
       {/* Header */}
       <Card>
         <CardHeader>
@@ -136,6 +203,14 @@ export const AuditResults = ({ data, onGenerateEmail }: AuditResultsProps) => {
               </CardTitle>
             </div>
             <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={handleDownloadPDF} disabled={isGeneratingPDF}>
+                {isGeneratingPDF ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <FileText className="h-4 w-4 mr-2" />
+                )}
+                PDF
+              </Button>
               <Button variant="outline" size="sm" onClick={handleDownloadJSON}>
                 <Download className="h-4 w-4 mr-2" />
                 JSON
