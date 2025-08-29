@@ -379,6 +379,15 @@ serve(async (req) => {
     const requestMap = new Map();
     const responseInfo = new Map();
     const responseExtraInfo = new Map();
+    const postDataMap = new Map(); // For POST body tracking
+    const trackingParams: any[] = [];
+    const hostMap = {
+      requests: { firstParty: new Set(), thirdParty: new Set() },
+      cookies: { firstParty: new Set(), thirdParty: new Set() },
+      storage: { firstParty: new Set(), thirdParty: new Set() },
+      links: { firstParty: new Set(), thirdParty: new Set() }
+    };
+    
     const setCookieEvents_pre: ParsedCookie[] = [];
     const setCookieEvents_post_accept: ParsedCookie[] = [];
     const setCookieEvents_post_reject: ParsedCookie[] = [];
@@ -402,8 +411,14 @@ serve(async (req) => {
       const cookies_pre_load: any[] = [];
       const cookies_pre_idle: any[] = [];
       const cookies_pre_extra: any[] = [];
+      const cookies_post_accept: any[] = [];
+      const cookies_post_reject: any[] = [];
       const storage_pre: any[] = [];
+      const storage_post_accept: any[] = [];
+      const storage_post_reject: any[] = [];
       let requests_pre: any[] = [];
+      let requests_post_accept: any[] = [];
+      let requests_post_reject: any[] = [];
 
       const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
         const id = messageId++;
@@ -628,30 +643,157 @@ serve(async (req) => {
           
           await logger.log('info', `🔍 CMP detection result: ${JSON.stringify(cmpResult.result?.result?.value)}`);
           
-          // Collect final metrics
-          const metrics = {
-            requests_pre: requests_pre.length,
-            cookies_pre: cookies_pre.length,
-            setCookie_pre: setCookieEvents_pre.length,
-            setCookie_post_accept: setCookieEvents_post_accept.length,
-            setCookie_post_reject: setCookieEvents_post_reject.length,
-            storage_pre_items: storage_pre.length,
-            data_sent_to_third_parties: 0 // Calculated later
-          };
+          const cmpDetected = cmpResult.result?.result?.value?.detected;
+          const cmpType = cmpResult.result?.result?.value?.type;
           
-          // Calculate third-party data sending
+          // Phase 4: CMP Interaction (Accept/Reject flows)
+          if (cmpDetected) {
+            await logger.log('info', `🤖 CMP detected (${cmpType}), attempting interactions...`);
+            
+            // Try Accept flow
+            currentPhase = 'post_accept';
+            const acceptResult: any = await sendCommand('Runtime.evaluate', {
+              expression: `
+                (() => {
+                  const selectors = ${JSON.stringify(CMP_SELECTORS[cmpType as keyof typeof CMP_SELECTORS] || CMP_SELECTORS.generic)};
+                  const acceptSelectors = [selectors.accept];
+                  
+                  for (const selector of acceptSelectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const element of elements) {
+                      if (element.offsetParent !== null) { // visible check
+                        element.click();
+                        return { clicked: true, selector, text: element.textContent?.trim() };
+                      }
+                    }
+                  }
+                  return { clicked: false };
+                })()
+              `
+            }, pageSessionId);
+            
+            if (acceptResult.result?.result?.value?.clicked) {
+              await logger.log('info', `✅ Clicked Accept: ${acceptResult.result.result.value.selector}`);
+              
+              // Wait and collect post-accept data
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              
+              const postAcceptCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
+              cookies_post_accept.push(...(postAcceptCookies.result?.cookies || []));
+              requests_post_accept = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_accept');
+              
+              await logger.log('info', `📊 Post-accept: cookies=${cookies_post_accept.length}, requests=${requests_post_accept.length}`);
+              
+              // Reload page for reject test
+              currentPhase = 'pre';
+              requestMap.clear();
+              await sendCommand('Page.reload', {}, pageSessionId);
+              await new Promise((resolveReload) => {
+                const checkReload = (message: any) => {
+                  if (message.method === 'Page.loadEventFired' && message.sessionId === pageSessionId) {
+                    resolveReload();
+                  }
+                };
+                const originalOnMessage = ws.onmessage;
+                ws.onmessage = (event) => {
+                  const message = JSON.parse(event.data);
+                  checkReload(message);
+                  if (originalOnMessage) originalOnMessage(event);
+                };
+              });
+              
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Try Reject flow
+              currentPhase = 'post_reject';
+              const rejectResult: any = await sendCommand('Runtime.evaluate', {
+                expression: `
+                  (() => {
+                    const selectors = ${JSON.stringify(CMP_SELECTORS[cmpType as keyof typeof CMP_SELECTORS] || CMP_SELECTORS.generic)};
+                    const rejectSelectors = [selectors.reject];
+                    
+                    for (const selector of rejectSelectors) {
+                      const elements = document.querySelectorAll(selector);
+                      for (const element of elements) {
+                        if (element.offsetParent !== null) {
+                          element.click();
+                          return { clicked: true, selector, text: element.textContent?.trim() };
+                        }
+                      }
+                    }
+                    return { clicked: false };
+                  })()
+                `
+              }, pageSessionId);
+              
+              if (rejectResult.result?.result?.value?.clicked) {
+                await logger.log('info', `❌ Clicked Reject: ${rejectResult.result.result.value.selector}`);
+                
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                const postRejectCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
+                cookies_post_reject.push(...(postRejectCookies.result?.cookies || []));
+                requests_post_reject = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_reject');
+                
+                await logger.log('info', `📊 Post-reject: cookies=${cookies_post_reject.length}, requests=${requests_post_reject.length}`);
+              }
+            }
+          }
+          
+          // Phase 5: Calculate tracking parameters and data sending
           const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
-          let thirdPartyRequests = 0;
+          let thirdPartyDataSending = 0;
           
-          for (const request of requests_pre) {
+          // Process all requests for tracking analysis
+          const allRequests = [...requests_pre, ...requests_post_accept, ...requests_post_reject];
+          
+          for (const request of allRequests) {
             try {
               const requestHost = new URL(request.url).hostname;
               const requestDomain = getETldPlusOneLite(requestHost);
-              if (requestDomain !== mainDomain) {
-                const params = parseQuery(request.url);
-                const hasSignificantParams = SIGNIFICANT_PARAMS.some(param => params[param]);
-                if (hasSignificantParams) {
-                  thirdPartyRequests++;
+              const isFirstParty = requestDomain === mainDomain;
+              
+              // Update host map
+              if (isFirstParty) {
+                hostMap.requests.firstParty.add(requestHost);
+              } else {
+                hostMap.requests.thirdParty.add(requestHost);
+              }
+              
+              // Extract query parameters
+              const queryParams = parseQuery(request.url);
+              const significantQueryParams = Object.keys(queryParams).filter(key => 
+                SIGNIFICANT_PARAMS.includes(key)
+              );
+              
+              // Extract POST body parameters if available
+              const postData = postDataMap.get(request.requestId);
+              let significantPostParams: string[] = [];
+              
+              if (postData) {
+                const postParams = typeof postData === 'string' ? 
+                  parseFormUrlEncoded(postData) : 
+                  (typeof postData === 'object' ? postData : {});
+                  
+                significantPostParams = Object.keys(postParams).filter(key => 
+                  SIGNIFICANT_PARAMS.includes(key)
+                );
+              }
+              
+              // Track significant parameters
+              if (significantQueryParams.length > 0 || significantPostParams.length > 0) {
+                trackingParams.push({
+                  host: requestHost,
+                  path: new URL(request.url).pathname,
+                  method: request.method,
+                  params: Object.fromEntries(significantQueryParams.map(key => [key, queryParams[key]])),
+                  bodyKeys: significantPostParams,
+                  phase: request.phase,
+                  isFirstParty
+                });
+                
+                if (!isFirstParty) {
+                  thirdPartyDataSending++;
                 }
               }
             } catch {
@@ -659,9 +801,86 @@ serve(async (req) => {
             }
           }
           
-          metrics.data_sent_to_third_parties = thirdPartyRequests;
-          await logger.log('info', `📤 data_sent_to_third_parties: ${thirdPartyRequests}`);
+          // Phase 6: Build host map and simplified metadata
+          const allCookies = [...cookies_pre, ...cookies_post_accept, ...cookies_post_reject];
           
+          for (const cookie of allCookies) {
+            const cookieDomain = getETldPlusOneLite(cookie.domain);
+            const isFirstParty = cookieDomain === mainDomain;
+            
+            if (isFirstParty) {
+              hostMap.cookies.firstParty.add(cookie.domain);
+            } else {
+              hostMap.cookies.thirdParty.add(cookie.domain);
+            }
+          }
+          
+          // Create simplified metadata
+          const uniqueCookies = new Map();
+          allCookies.forEach(cookie => {
+            const key = `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
+            if (!uniqueCookies.has(key)) {
+              uniqueCookies.set(key, {
+                name: cookie.name,
+                domain: cookie.domain,
+                path: cookie.path || '/',
+                expires: cookie.expires !== -1 ? 'persistent' : 'session'
+              });
+            }
+          });
+          
+          const uniqueStorageKeys = new Set();
+          [...storage_pre, ...storage_post_accept, ...storage_post_reject].forEach(([key]) => {
+            uniqueStorageKeys.add(key);
+          });
+          
+          const beacons = trackingParams.map(tp => {
+            const url = new URL(`https://${tp.host}${tp.path}`);
+            return { urlNormalized: `${url.protocol}//${url.host}${url.pathname}` };
+          });
+          
+          const uniqueBeacons = Array.from(new Set(beacons.map(b => b.urlNormalized)))
+            .map(url => ({ urlNormalized: url }));
+          
+          // Phase 7: Self-check gates
+          const selfCheckReasons: string[] = [];
+          let isComplete = true;
+          
+          if (requests_pre.length === 0) {
+            selfCheckReasons.push('Network capture empty (CDP not bound)');
+            isComplete = false;
+          }
+          
+          if (allCookies.length === 0 && setCookieEvents_pre.length === 0) {
+            selfCheckReasons.push('No cookies detected (possible collection failure)');
+            isComplete = false;
+          }
+          
+          if (trackingParams.length > 0 && thirdPartyDataSending === 0) {
+            selfCheckReasons.push('Tracking detected but data sending section empty');
+            isComplete = false;
+          }
+          
+          // Collect final metrics
+          const metrics = {
+            requests_pre: requests_pre.length,
+            requests_post_accept: requests_post_accept.length,
+            requests_post_reject: requests_post_reject.length,
+            cookies_pre: cookies_pre.length,
+            cookies_post_accept: cookies_post_accept.length,
+            cookies_post_reject: cookies_post_reject.length,
+            setCookie_pre: setCookieEvents_pre.length,
+            setCookie_post_accept: setCookieEvents_post_accept.length,
+            setCookie_post_reject: setCookieEvents_post_reject.length,
+            storage_pre_items: storage_pre.length,
+            storage_post_accept_items: storage_post_accept.length,
+            storage_post_reject_items: storage_post_reject.length,
+            data_sent_to_third_parties: thirdPartyDataSending,
+            third_party_hosts: hostMap.requests.thirdParty.size,
+            tracking_params_count: trackingParams.length
+          };
+          
+          await logger.log('info', `📤 data_sent_to_third_parties: ${thirdPartyDataSending}`);
           await logger.log('info', `📊 Final collection summary: ${JSON.stringify(metrics)}`);
           
           ws.close();
@@ -673,11 +892,39 @@ serve(async (req) => {
               finalUrl: finalUrl, // Backward compatibility
               requests: requests_pre,
               requests_pre: requests_pre,
+              requests_post_accept: requests_post_accept,
+              requests_post_reject: requests_post_reject,
               cookies_pre,
+              cookies_post_accept,
+              cookies_post_reject,
               storage_pre,
+              storage_post_accept,
+              storage_post_reject,
               set_cookie_headers_pre: setCookieEvents_pre,
               set_cookie_headers_post_accept: setCookieEvents_post_accept,
               set_cookie_headers_post_reject: setCookieEvents_post_reject,
+              tracking_params: trackingParams,
+              host_map: {
+                requests: {
+                  firstParty: Array.from(hostMap.requests.firstParty),
+                  thirdParty: Array.from(hostMap.requests.thirdParty)
+                },
+                cookies: {
+                  firstParty: Array.from(hostMap.cookies.firstParty),
+                  thirdParty: Array.from(hostMap.cookies.thirdParty)
+                }
+              },
+              meta: {
+                simplified: {
+                  cookies: Array.from(uniqueCookies.values()),
+                  localStorage: Array.from(uniqueStorageKeys).map(key => ({ key })),
+                  beacons: uniqueBeacons
+                }
+              },
+              self_check: {
+                complete: isComplete,
+                reasons: selfCheckReasons
+              },
               cmp: cmpResult.result?.result?.value || {},
               metrics
             }
@@ -714,8 +961,25 @@ serve(async (req) => {
                 method: request.request.method,
                 headers: request.request.headers,
                 timestamp: request.timestamp,
-                phase: currentPhase
+                phase: currentPhase,
+                requestId: request.requestId
               });
+              
+              // Extract POST data if available
+              if (request.request.postData) {
+                try {
+                  const contentType = request.request.headers['Content-Type'] || request.request.headers['content-type'] || '';
+                  if (contentType.includes('application/json')) {
+                    postDataMap.set(request.requestId, safeJsonParse(request.request.postData));
+                  } else if (contentType.includes('application/x-www-form-urlencoded')) {
+                    postDataMap.set(request.requestId, parseFormUrlEncoded(request.request.postData));
+                  } else {
+                    postDataMap.set(request.requestId, request.request.postData);
+                  }
+                } catch {
+                  // Ignore POST data parsing errors
+                }
+              }
               break;
               
             case 'Network.responseReceived':

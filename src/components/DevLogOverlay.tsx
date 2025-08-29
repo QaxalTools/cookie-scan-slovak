@@ -52,8 +52,49 @@ export const DevLogOverlay: React.FC<DevLogOverlayProps> = ({
         <div className="space-y-2">
           {latestTrace && (
             <div className="bg-background/95 border rounded-lg p-2 text-sm backdrop-blur">
-              <div className="font-mono text-xs text-muted-foreground">
-                Trace: {latestTrace.slice(0, 8)}...
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-mono">
+                  Trace: {latestTrace.slice(0, 8)}...
+                </span>
+                {/* Metrics badges */}
+                {(() => {
+                  const metricsLog = logs.find(log => 
+                    log.message?.includes('Final collection summary') && 
+                    (log.message?.includes('{') || log.traceId === latestTrace)
+                  );
+                  
+                  let metrics = null;
+                  if (metricsLog?.message) {
+                    try {
+                      const match = metricsLog.message.match(/\{.*\}/);
+                      if (match) {
+                        metrics = JSON.parse(match[0]);
+                      }
+                    } catch {
+                      // Ignore parsing errors
+                    }
+                  }
+                  
+                  if (metrics) {
+                    return (
+                      <div className="flex gap-1">
+                        <span className="bg-primary/20 text-primary px-1.5 py-0.5 rounded text-xs">
+                          R:{metrics.requests_pre || 0}
+                        </span>
+                        <span className="bg-secondary/20 text-secondary-foreground px-1.5 py-0.5 rounded text-xs">
+                          C:{metrics.cookies_pre || 0}
+                        </span>
+                        <span className="bg-accent/20 text-accent-foreground px-1.5 py-0.5 rounded text-xs">
+                          S:{metrics.setCookie_pre || 0}
+                        </span>
+                        <span className="bg-destructive/20 text-destructive px-1.5 py-0.5 rounded text-xs">
+                          3P:{metrics.third_party_hosts || 0}
+                        </span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
             </div>
           )}
