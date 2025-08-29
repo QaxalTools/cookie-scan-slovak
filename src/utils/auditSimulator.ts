@@ -164,11 +164,15 @@ export async function performLiveAudit(
         });
       }
       
-      // Handle specific Browserless token errors
-      if (data?.bl_status_code === 401 || data?.bl_status_code === 403) {
-        throw new Error('Neplatný Browserless token - kontaktujte administrátora pre aktualizáciu konfigurácie');
-      } else if (data?.bl_health_status === 'token_error') {
-        throw new Error('Chyba autentifikácie Browserless služby - skontrolujte nastavenia tokenu');
+      // Handle specific Browserless token errors with detailed messages
+      if (data?.bl_health_status === 'token_error') {
+        throw new Error('❌ Browserless token je neplatný alebo pre nesprávny produkt (Chrome vs. Playwright). Skontrolujte nastavenie v Browserless dashboard.');
+      } else if (data?.bl_status_code === 401 || data?.bl_status_code === 403) {
+        throw new Error('❌ Browserless autentifikácia zlyhala. Token môže byť zamietnutý kvôli IP allowlist alebo iným obmedzeniam.');
+      } else if (data?.bl_health_status === 'failed') {
+        throw new Error('⚠️ Browserless služba nedostupná alebo preťažená. Skúste znovu o chvíľu.');
+      } else if (data?.bl_health_status === 'error') {
+        throw new Error('🔧 Problém s pripojením k Browserless službe. Skontrolujte internetové pripojenie.');
       }
       
       // Fall back to basic analysis

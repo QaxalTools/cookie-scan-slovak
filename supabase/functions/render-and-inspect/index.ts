@@ -36,10 +36,10 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Browserless configuration
-    const browserlessToken = Deno.env.get('BROWSERLESS_TOKEN');
+    // Get Browserless token from either variable
+    const browserlessToken = Deno.env.get('BROWSERLESS_TOKEN') || Deno.env.get('BROWSERLESS_API_KEY');
     if (!browserlessToken) {
-      throw new Error('Missing Browserless token');
+      throw new Error('Missing Browserless token - check BROWSERLESS_TOKEN or BROWSERLESS_API_KEY');
     }
 
     const BROWSERLESS_WS_URL = 'wss://chrome.browserless.io';
@@ -48,12 +48,14 @@ serve(async (req) => {
     console.log(`🔑 Using Browserless token: ${browserlessToken.slice(0, 8)}...${browserlessToken.slice(-4)}`);
     console.log(`📝 Analyzing URL: ${url}`);
 
-    // Check Browserless health
+    // Check Browserless health with multiple auth methods
     console.log('🏥 Checking Browserless health...');
     let healthCheckPassed = false;
     let healthStatus = 'unknown';
     let healthStatusCode = 0;
+    let authMethod = 'unknown';
     
+    // Try query parameter authentication first
     try {
       const healthResponse = await fetch(`https://chrome.browserless.io/health?token=${browserlessToken}`);
       healthStatusCode = healthResponse.status;
@@ -61,7 +63,30 @@ serve(async (req) => {
       if (healthResponse.ok) {
         healthCheckPassed = true;
         healthStatus = 'ok';
-        console.log('✅ Browserless health check passed');
+        authMethod = 'query_param';
+        console.log('✅ Browserless health check passed (query param auth)');
+      } else if (healthResponse.status === 401 || healthResponse.status === 403) {
+        // Try header-based authentication
+        console.log('🔄 Trying header-based authentication...');
+        const headerHealthResponse = await fetch('https://chrome.browserless.io/health', {
+          headers: { 'Authorization': `Bearer ${browserlessToken}` }
+        });
+        
+        if (headerHealthResponse.ok) {
+          healthCheckPassed = true;
+          healthStatus = 'ok';
+          authMethod = 'header';
+          healthStatusCode = headerHealthResponse.status;
+          console.log('✅ Browserless health check passed (header auth)');
+        } else {
+          healthStatus = 'token_error';
+          healthStatusCode = headerHealthResponse.status;
+          console.log(`❌ Both auth methods failed. Token may be invalid or for wrong product.`);
+          await logToDatabase('error', `Browserless token authentication failed: ${headerHealthResponse.status}`, { 
+            status: headerHealthResponse.status,
+            auth_methods_tried: ['query_param', 'header']
+          });
+        }
       } else {
         healthStatus = 'failed';
         console.log(`⚠️ Browserless health check failed with status ${healthResponse.status}, but continuing to WebSocket attempt...`);
