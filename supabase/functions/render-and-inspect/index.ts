@@ -48,480 +48,238 @@ function ensureArray<T>(v: T | T[] | undefined): T[] {
   if (!v) return [];
   return Array.isArray(v) ? v : [v];
 }
-// These functions are defined once and used throughout the Edge function
 
-function onceLoadFired(ws: WebSocket, sessionId: string, timeoutMs = 20000) {
-  return new Promise<void>((resolve, reject) => {
-    const onMsg = (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse((event as any).data);
-        if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) {
-          ws.removeEventListener('message', onMsg);
-          clearTimeout(to);
-          resolve();
-        }
-      } catch {}
-    };
-    const to = setTimeout(() => {
-      ws.removeEventListener('message', onMsg);
-      reject(new Error('NAVIGATION_TIMEOUT'));
-    }, timeoutMs);
-    ws.addEventListener('message', onMsg);
-  });
+// PATCH 2 - URL parsing utilities
+function safeJsonParse(str: string): any {
+  try { return JSON.parse(str); } catch { return null; }
 }
 
-function normalizeDomain(input?: string): string {
-  return (input ?? '').trim().replace(/^\./, '');
-}
-
-function buildCookieKey(cookie: { name: string; domain?: string; path?: string }): string {
-  return `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
-}
-
-function maskValue(value: string): string {
-  return value.length > 12 ? value.slice(0, 12) + '…' : value;
+function safeGetHostname(url: string): string {
+  try { return new URL(url).hostname; } catch { return ''; }
 }
 
 function parseQuery(url: string): Record<string, string> {
   try {
-    const urlObj = new URL(url);
-    const params: Record<string, string> = {};
-    urlObj.searchParams.forEach((value, key) => {
-      params[key] = value;
+    const u = new URL(url);
+    const out: Record<string, string> = {};
+    u.searchParams.forEach((v, k) => out[k] = v);
+    return out;
+  } catch { return {}; }
+}
+
+function parseFormUrlEncoded(body: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!body) return out;
+  try {
+    new URLSearchParams(body).forEach((v, k) => out[k] = v);
+  } catch {}
+  return out;
+}
+
+// PATCH 3 - Domain utilities
+function normalizeDomain(domain: string): string {
+  if (!domain) return '';
+  return domain.startsWith('.') ? domain.slice(1) : domain;
+}
+
+function getETldPlusOneLite(hostname: string): string {
+  if (!hostname) return '';
+  const parts = hostname.split('.');
+  if (parts.length >= 2) return parts.slice(-2).join('.');
+  return hostname;
+}
+
+// PATCH 4 - Masking of sensitive data (used for logs and GDPR compliance)
+function maskSensitiveQuery(url: string): string {
+  const sensitiveParams = ['email', 'user_id', 'token', 'session', 'api_key', 'password'];
+  try {
+    const u = new URL(url);
+    sensitiveParams.forEach(param => {
+      if (u.searchParams.has(param)) {
+        u.searchParams.set(param, '[MASKED]');
+      }
     });
-    return params;
-  } catch {
-    return {};
-  }
+    return u.toString();
+  } catch { return url; }
 }
 
-function parseFormUrlEncoded(data: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  if (!data) return params;
-  
+function maskSensitiveStorageValue(value: any): any {
+  if (typeof value !== 'string') return value;
+  // Mask common PII patterns
+  if (/email|@|\.com/.test(value)) return '[EMAIL_PATTERN]';
+  if (/\d{4}-\d{2}-\d{2}/.test(value)) return '[DATE_PATTERN]';
+  if (value.length > 50) return '[LONG_VALUE]';
+  return value;
+}
+
+// =================== BROWSERLESS AUTH CHECK ===================
+const BROWSERLESS_BASE = 'browserless.io';
+
+function normalizeToken(rawToken: string | undefined): string {
+  if (!rawToken) return '';
+  // Remove 'Bearer ' prefix if present
+  return rawToken.startsWith('Bearer ') ? rawToken.slice(7) : rawToken;
+}
+
+async function checkBrowserlessAuth(token: string): Promise<{ status: string; details: any }> {
   try {
-    const pairs = data.split('&');
-    for (const pair of pairs) {
-      const [key, value] = pair.split('=');
-      if (key) {
-        params[decodeURIComponent(key)] = decodeURIComponent(value || '');
-      }
+    const url = `https://${token}@${BROWSERLESS_BASE}/json/version`;
+    const response = await fetch(url, { method: 'GET' });
+    
+    if (response.status === 200) {
+      const data = await response.json();
+      return { status: 'ok', details: data };
+    } else if (response.status === 401) {
+      return { status: 'unauthorized', details: { code: 401 } };
+    } else {
+      return { status: 'error', details: { code: response.status } };
     }
-  } catch {
-    // Ignore parsing errors
-  }
-  return params;
-}
-
-function safeJsonParse(data?: string): any | undefined {
-  if (!data?.trim()) return undefined;
-  try {
-    return JSON.parse(data);
-  } catch {
-    return undefined;
+  } catch (error) {
+    return { status: 'network_error', details: String(error) };
   }
 }
 
-function getETldPlusOneLite(host: string): string {
-  const cleanHost = host.toLowerCase().replace(/^www\./, '');
-  
-  // Handle special cases (whitelist approach)
-  const specialTlds = [
-    '.co.uk', '.com.au', '.co.nz', '.com.br', '.co.za', '.org.uk',
-    '.net.au', '.gov.au', '.edu.au', '.asn.au', '.id.au'
-  ];
-  
-  for (const tld of specialTlds) {
-    if (cleanHost.endsWith(tld)) {
-      const parts = cleanHost.split('.');
-      if (parts.length >= 3) {
-        return parts.slice(-3).join('.');
-      }
-    }
-  }
-  
-  // Standard case: domain.tld
-  const parts = cleanHost.split('.');
-  if (parts.length >= 2) {
-    return parts.slice(-2).join('.');
-  }
-  
-  return cleanHost;
-}
-
-interface ParsedCookie {
-  name: string;
-  valueMasked: string;
-  domain: string;
-  path: string;
-  expiresEpochMs?: number;
-  secure: boolean;
-  httpOnly: boolean;
-  sameSite?: string;
-  source: string;
-}
-
-function parseSetCookieHeader(value: string, responseUrl: string): ParsedCookie {
-  const parts = value.split(';').map(p => p.trim());
-  const [nameValue] = parts;
-  const [name, rawValue] = nameValue.split('=');
-  
-  const cookie: ParsedCookie = {
-    name: name?.trim() || '',
-    valueMasked: maskValue(rawValue || ''),
-    domain: '',
-    path: '/',
-    secure: false,
-    httpOnly: false,
-    source: 'set-cookie-header'
-  };
-  
-  // Extract domain from response URL if not specified
-  try {
-    const urlObj = new URL(responseUrl);
-    cookie.domain = urlObj.hostname;
-  } catch {
-    cookie.domain = 'unknown';
-  }
-  
-  // Parse attributes
-  for (let i = 1; i < parts.length; i++) {
-    const part = parts[i].toLowerCase();
-    if (part.startsWith('domain=')) {
-      cookie.domain = normalizeDomain(part.substring(7));
-    } else if (part.startsWith('path=')) {
-      cookie.path = part.substring(5) || '/';
-    } else if (part.startsWith('expires=')) {
-      try {
-        const expireDate = new Date(part.substring(8));
-        cookie.expiresEpochMs = expireDate.getTime();
-      } catch {
-        // Ignore invalid dates
-      }
-    } else if (part.startsWith('max-age=')) {
-      try {
-        const maxAge = parseInt(part.substring(8));
-        cookie.expiresEpochMs = Date.now() + (maxAge * 1000);
-      } catch {
-        // Ignore invalid max-age
-      }
-    } else if (part === 'secure') {
-      cookie.secure = true;
-    } else if (part === 'httponly') {
-      cookie.httpOnly = true;
-    } else if (part.startsWith('samesite=')) {
-      cookie.sameSite = part.substring(9);
-    }
-  }
-  
-  return cookie;
-}
-
-// Significant tracking parameters to extract
+// =================== TRACKING PARAMETER CONSTANTS ===================
 const SIGNIFICANT_PARAMS = [
-  'id', 'tid', 'ev', 'en', 'fbp', 'fbc', 'sid', 'cid', 'uid', 'user_id', 
-  'ip', 'geo', 'pid', 'aid', 'k', 'gclid', 'dclid', 'wbraid', 'gbraid',
-  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'
+  // Google Analytics / Google Tags
+  'tid', 'cid', 'uid', 'gtm_debug', 'ga_debug', 'gclid', 'gclsrc', 'dclid', 'wbraid', 'gbraid',
+  
+  // Facebook / Meta
+  'fbclid', 'fb_source', 'fb_ref', 'fb_click_id', 
+  
+  // User identification
+  'user_id', 'userId', 'customer_id', 'customerId', 'session_id', 'sessionId', 
+  
+  // Campaign tracking
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id',
+  
+  // Generic tracking
+  'ref', 'referrer', 'source', 'medium', 'campaign', 'click_id', 'clickid'
 ];
 
-// CMP selectors for detection and interaction
-const CMP_SELECTORS = {
-  onetrust: {
-    banner: '#onetrust-banner-sdk',
-    accept: '#onetrust-accept-btn-handler',
-    reject: '#onetrust-reject-all-handler, #onetrust-pc-btn-handler'
-  },
-  cookiescript: {
-    banner: '#cookiescript_injected',
-    accept: '[data-cs-accept-all]',
-    reject: '[data-cs-reject-all]'
-  },
-  generic: {
-    banner: '[id*="cookie"], [class*="consent"], [data-testid*="consent"]',
-    accept: '[id*="accept"], [class*="accept"], [data-testid*="accept"]',
-    reject: '[id*="reject"], [class*="reject"], [data-testid*="reject"]'
-  }
-};
-
-// Browserless configuration
-const BROWSERLESS_BASE = Deno.env.get('BROWSERLESS_BASE')?.trim() || 'https://production-sfo.browserless.io';
-
-function normalizeToken(token?: string): string {
-  if (!token) return '';
-  return token.trim().replace(/^["']|["']$/g, '');
-}
-
-async function checkBrowserlessAuth(token: string) {
-  const baseUrl = new URL(BROWSERLESS_BASE);
-  const result: any = { 
-    base: BROWSERLESS_BASE, 
-    host: baseUrl.host,
-    tests: {} 
-  };
-
-  // A) Query param health check
-  try {
-    const response = await fetch(`${BROWSERLESS_BASE}/json/version?token=${token}`);
-    const text = await response.text();
-    result.tests.query = { 
-      status: response.status, 
-      ok: response.ok, 
-      text: text.slice(0, 256) 
-    };
-  } catch (error) { 
-    result.tests.query = { error: String(error) }; 
-  }
-
-  // B) X-API-Key header
-  try {
-    const response = await fetch(`${BROWSERLESS_BASE}/json/version`, { 
-      headers: { 'X-API-Key': token } 
-    });
-    const text = await response.text();
-    result.tests.header = { 
-      status: response.status, 
-      ok: response.ok, 
-      text: text.slice(0, 256) 
-    };
-  } catch (error) { 
-    result.tests.header = { error: String(error) }; 
-  }
-
-  // C) WebSocket CDP test
-  result.tests.ws = await new Promise((resolve) => {
-    try {
-      const wsUrl = `wss://${baseUrl.host}?token=${token}`;
-      const ws = new WebSocket(wsUrl);
-      const timeout = setTimeout(() => { 
-        try { ws.close(); } catch {} 
-        resolve({ error: 'timeout' }); 
-      }, 8000);
-      
-      ws.onopen = () => { 
-        clearTimeout(timeout); 
-        ws.close(); 
-        resolve({ open: true }); 
-      };
-      
-      ws.onclose = (event) => { 
-        clearTimeout(timeout); 
-        resolve({ open: false, code: event.code }); 
-      };
-      
-      ws.onerror = () => { 
-        clearTimeout(timeout); 
-        resolve({ open: false, code: 'onerror' }); 
-      };
-    } catch (error) { 
-      resolve({ error: String(error) }); 
-    }
-  });
-
-  // Determine auth status
-  let status: 'ok' | 'invalid_token' | 'wrong_product' | 'network_error' = 'network_error';
-  
-  if (result.tests.query?.ok || result.tests.header?.ok || result.tests.ws?.open) {
-    status = 'ok';
-  } else if ([401, 403].includes(result.tests.query?.status) || [401, 403].includes(result.tests.header?.status)) {
-    status = 'invalid_token';
-  } else if (result.tests.ws?.open === false && (result.tests.ws?.code === 1008 || result.tests.ws?.code === 1006)) {
-    status = 'wrong_product';
-  }
-
-  return { status, details: result };
-}
-
-// =================== MODULAR ARCHITECTURE ===================
-
-// ==== Phase Controller ====
+// =================== PHASE CONTROLLER ===================
 class PhaseController {
-  private phase: 'pre' | 'post_accept' | 'post_reject' = 'pre';
+  private currentPhase: 'pre' | 'post_accept' | 'post_reject' = 'pre';
   
-  setPre() { this.phase = 'pre'; }
-  setAccept() { this.phase = 'post_accept'; }
-  setReject() { this.phase = 'post_reject'; }
-  get() { return this.phase; }
+  setPre() { this.currentPhase = 'pre'; }
+  setAccept() { this.currentPhase = 'post_accept'; }
+  setReject() { this.currentPhase = 'post_reject'; }
+  
+  get(): string { return this.currentPhase; }
 }
 
-// ==== Session Manager ====
+// =================== SESSION MANAGER ===================
 class SessionManager {
-  sessions = new Map<string, { type: 'page' | 'iframe' | 'worker'; frameId?: string; url?: string }>();
-  inflight = 0;
-  ws: WebSocket | null = null;
-  logger: any;
-  
+  private ws: WebSocket;
+  private logger: any;
+  public inflight = 0;
+
   constructor(ws: WebSocket, logger: any) {
     this.ws = ws;
     this.logger = logger;
   }
-  
+
   async attachHandlers() {
-    if (!this.ws) return;
-    
-    // Auto-attach to all targets (fixed parameters)
-    await this.sendCommand('Target.setAutoAttach', {
-      autoAttach: true,
-      flatten: true
+    // POINT 3: Fixed auto-attach parameters - removed invalid 'filter' parameter
+    await this.sendCommand('Target.setAutoAttach', { 
+      autoAttach: true, 
+      flatten: true,
+      waitForDebuggerOnStart: false
     });
-    await this.logger.log('info', '🎯 Auto-attach configured for page/worker');
   }
-  
-  async onAttachedToTarget(sessionId: string, type: string, targetId?: string) {
-    this.sessions.set(sessionId, { type: type as any });
-    await this.logger.log('info', `📎 Attached to ${type} session: ${sessionId}`);
+
+  onAttachedToTarget(sessionId: string, targetType: string, targetId: string) {
+    this.logger.log('info', `🎯 Attached to ${targetType} target: ${sessionId}`);
+  }
+
+  onNetworkRequestStart() { this.inflight++; }
+  onNetworkRequestEnd() { if (this.inflight > 0) this.inflight--; }
+
+  async waitForGlobalIdle(minWait: number, maxWait: number): Promise<void> {
+    await this.logger.log('info', `⏳ Waiting for global idle (${minWait}ms min, ${maxWait}ms max)`);
     
-    // Enable required domains for each session
-    await this.sendCommand('Runtime.enable', {}, sessionId);
-    await this.sendCommand('Network.enable', {
-      maxTotalBufferSize: 10000000,
-      maxResourceBufferSize: 5000000
-    }, sessionId);
-    await this.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    const startTime = Date.now();
+    await new Promise(resolve => setTimeout(resolve, minWait));
     
-    if (type === 'page') {
-      await this.sendCommand('Page.enable', {}, sessionId);
-      await this.sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, sessionId);
+    while (Date.now() - startTime < maxWait) {
+      if (this.inflight === 0) {
+        await this.logger.log('info', `✅ Global idle achieved after ${Date.now() - startTime}ms`);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
     
-    await this.logger.log('info', `✅ Domains enabled for ${type} session: ${sessionId}`);
+    await this.logger.log('warn', `⏰ Global idle timeout after ${maxWait}ms (inflight: ${this.inflight})`);
   }
-  
-  onNetworkRequestStart() {
-    this.inflight++;
-  }
-  
-  onNetworkRequestEnd() {
-    this.inflight = Math.max(0, this.inflight - 1);
-  }
-  
-  async waitForGlobalIdle(minQuietMs = 1500, timeoutMs = 15000): Promise<void> {
-    return new Promise((resolve) => {
-      let quietStart = 0;
-      const checkInterval = 100;
-      let totalWaited = 0;
-      
-      const check = () => {
-        totalWaited += checkInterval;
-        
-        if (this.inflight === 0) {
-          if (quietStart === 0) {
-            quietStart = Date.now();
-          } else if (Date.now() - quietStart >= minQuietMs) {
-            resolve();
-            return;
-          }
-        } else {
-          quietStart = 0;
-        }
-        
-        if (totalWaited >= timeoutMs) {
-          resolve();
-          return;
-        }
-        
-        setTimeout(check, checkInterval);
-      };
-      
-      setTimeout(check, checkInterval);
-    });
-  }
-  
+
   async sendCommand(method: string, params: any = {}, sessionId?: string) {
-    if (!this.ws) return null;
-    
-    return new Promise((resolve) => {
-      const id = Date.now() + Math.random();
-      const message = sessionId 
-        ? { id, method, params, sessionId }
-        : { id, method, params };
+    return new Promise((resolve, reject) => {
+      const id = Math.random();
+      const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
       
-      const timeout = setTimeout(() => resolve(null), 5000);
-      
-      const onMessage = (event: MessageEvent) => {
+      const handler = (event: MessageEvent) => {
         try {
           const response = JSON.parse(event.data);
           if (response.id === id) {
-            clearTimeout(timeout);
-            this.ws!.removeEventListener('message', onMessage);
-            resolve(response);
+            this.ws.removeEventListener('message', handler);
+            if (response.error) {
+              reject(new Error(response.error.message || 'Command failed'));
+            } else {
+              resolve(response);
+            }
           }
         } catch {}
       };
       
-      this.ws!.addEventListener('message', onMessage);
-      this.ws!.send(JSON.stringify(message));
+      this.ws.addEventListener('message', handler);
+      this.ws.send(JSON.stringify(message));
     });
   }
 }
 
-// ==== Events Pipeline ====
+// =================== EVENTS PIPELINE ===================
+interface ParsedCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires: number;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: string;
+}
+
 class EventsPipeline {
-  phaseController: PhaseController;
-  sessionManager: SessionManager;
-  logger: any;
-  
-  // Storage for events by phase
-  setCookieEvents_pre: ParsedCookie[] = [];
-  setCookieEvents_post_accept: ParsedCookie[] = [];
-  setCookieEvents_post_reject: ParsedCookie[] = [];
-  
-  requestMap = new Map();
-  responseInfo = new Map();
-  
-  constructor(phaseController: PhaseController, sessionManager: SessionManager, logger: any) {
-    this.phaseController = phaseController;
-    this.sessionManager = sessionManager;
-    this.logger = logger;
-  }
-  
-  onNetworkRequestWillBeSent(event: any, sessionId: string, activeSessionId?: string) {
-    // POINT 2: Strict session ID filter - only process events for current active session
-    if (activeSessionId && sessionId !== activeSessionId) {
-      return; // Ignore events from other sessions
+  public requestMap = new Map<string, any>();
+  public postDataMap = new Map<string, string>();
+  public setCookieEvents_pre: ParsedCookie[] = [];
+  public setCookieEvents_post_accept: ParsedCookie[] = [];
+  public setCookieEvents_post_reject: ParsedCookie[] = [];
+
+  constructor(
+    private phaseController: PhaseController,
+    private sessionManager: SessionManager,
+    private logger: any
+  ) {}
+
+  async collectPostData(requestId: string, sessionId: string) {
+    try {
+      const result: any = await this.sessionManager.sendCommand('Network.getRequestPostData', { requestId }, sessionId);
+      if (result?.result?.postData) {
+        this.postDataMap.set(requestId, result.result.postData);
+      }
+    } catch {
+      // POST data collection failed - not critical
     }
-    
-    this.sessionManager.onNetworkRequestStart();
-    
-    const requestData = {
-      ...event,
-      sessionId,
-      phase: this.phaseController.get(),
-      timestamp: Date.now()
-    };
-    
-    this.requestMap.set(event.requestId, requestData);
   }
-  
-  onNetworkResponseReceived(event: any, sessionId: string, activeSessionId?: string) {
-    // POINT 2: Strict session ID filter
-    if (activeSessionId && sessionId !== activeSessionId) {
-      return;
-    }
-    
-    this.responseInfo.set(event.requestId, {
-      ...event,
-      sessionId,
-      phase: this.phaseController.get()
-    });
-  }
-  
-  onNetworkResponseReceivedExtraInfo(event: any, sessionId: string, activeSessionId?: string) {
-    // POINT 2: Strict session ID filter
-    if (activeSessionId && sessionId !== activeSessionId) {
-      return;
-    }
-    
-    const headers = normalizeHeaderKeys(event.headers);
-    const setCookieHeaders = ensureArray(headers['set-cookie']);
-    
-    if (setCookieHeaders.length > 0) {
-      const responseData = this.responseInfo.get(event.requestId);
-      const responseUrl = responseData?.response?.url || 'unknown';
-      
-      for (const setCookieValue of setCookieHeaders) {
-        const cookie = parseSetCookieHeader(setCookieValue, responseUrl);
-        
-        const phase = this.phaseController.get();
+
+  onNetworkResponseReceivedExtraInfo(params: any, sessionId: string) {
+    const setCookieHeaders = ensureArray(params.headers?.['set-cookie'] || params.headers?.['Set-Cookie']);
+    const phase = this.phaseController.get();
+
+    for (const cookieStr of setCookieHeaders) {
+      const cookie = this.parseSetCookieHeader(cookieStr);
+      if (cookie) {
         if (phase === 'pre') {
           this.setCookieEvents_pre.push(cookie);
         } else if (phase === 'post_accept') {
@@ -532,202 +290,200 @@ class EventsPipeline {
       }
     }
   }
-  
-  onNetworkLoadingFinished(event: any, sessionId: string, activeSessionId?: string) {
-    // POINT 2: Strict session ID filter
-    if (activeSessionId && sessionId !== activeSessionId) {
-      return;
-    }
-    this.sessionManager.onNetworkRequestEnd();
+
+  onNetworkResponseReceived(params: any, sessionId: string) {
+    // Additional response processing if needed
   }
-  
-  onNetworkLoadingFailed(event: any, sessionId: string, activeSessionId?: string) {
-    // POINT 2: Strict session ID filter
-    if (activeSessionId && sessionId !== activeSessionId) {
-      return;
-    }
-    this.sessionManager.onNetworkRequestEnd();
-  }
-  
-  // POINT 6: Stable POST body collection
-  postDataMap = new Map<string, any>();
-  
-  async collectPostData(requestId: string, sessionId: string): Promise<void> {
-    try {
-      const result = await this.sessionManager.sendCommand('Network.getRequestPostData', { requestId }, sessionId) as any;
-      if (result?.result?.postData) {
-        this.postDataMap.set(requestId, result.result.postData);
+
+  private parseSetCookieHeader(cookieStr: string): ParsedCookie | null {
+    if (!cookieStr) return null;
+    
+    const parts = cookieStr.split(';').map(p => p.trim());
+    const [nameValue] = parts;
+    const [name, value = ''] = nameValue.split('=');
+    
+    if (!name) return null;
+    
+    const cookie: ParsedCookie = {
+      name: name.trim(),
+      value: value.trim(),
+      domain: '',
+      path: '/',
+      expires: -1,
+      httpOnly: false,
+      secure: false,
+      sameSite: 'none'
+    };
+    
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
+      const [key, val] = part.split('=').map(s => s.trim());
+      
+      switch (key.toLowerCase()) {
+        case 'domain':
+          cookie.domain = val || '';
+          break;
+        case 'path':
+          cookie.path = val || '/';
+          break;
+        case 'expires':
+          try {
+            cookie.expires = new Date(val).getTime();
+          } catch {}
+          break;
+        case 'max-age':
+          try {
+            cookie.expires = Date.now() + (parseInt(val) * 1000);
+          } catch {}
+          break;
+        case 'httponly':
+          cookie.httpOnly = true;
+          break;
+        case 'secure':
+          cookie.secure = true;
+          break;
+        case 'samesite':
+          cookie.sameSite = val?.toLowerCase() || 'none';
+          break;
       }
-    } catch {
-      // Ignore failures - POST data collection is best effort
     }
+    
+    return cookie;
   }
 }
 
-// ==== Snapshot Builder ====
+// =================== SNAPSHOT BUILDER ===================
 class SnapshotBuilder {
-  eventsPipeline: EventsPipeline;
-  sessionManager: SessionManager;
-  logger: any;
-  
-  constructor(eventsPipeline: EventsPipeline, sessionManager: SessionManager, logger: any) {
-    this.eventsPipeline = eventsPipeline;
-    this.sessionManager = sessionManager;
-    this.logger = logger;
-  }
-  
-  async buildSnapshot(phase: 'pre' | 'post_accept' | 'post_reject', pageSessionId: string) {
-    await this.logger.log('info', `📸 Building ${phase} snapshot`);
+  constructor(
+    private eventsPipeline: EventsPipeline,
+    private sessionManager: SessionManager,
+    private logger: any
+  ) {}
+
+  async buildSnapshot(phase: string, sessionId: string) {
+    await this.logger.log('info', `📸 Building ${phase} snapshot for session ${sessionId}`);
     
-    // Get persisted cookies as secondary data
-    const persistedCookies = await this.getPersistedCookies(pageSessionId);
-    
-    // Get storage data
-    const storage = await this.getStorageData(pageSessionId);
-    
-    // Get requests for this phase
+    // Collect requests for this phase
     const requests = Array.from(this.eventsPipeline.requestMap.values())
       .filter((r: any) => r.phase === phase);
     
-    // Get server-set cookies for this phase (primary)
-    let serverSetCookies: ParsedCookie[] = [];
-    if (phase === 'pre') {
-      serverSetCookies = this.eventsPipeline.setCookieEvents_pre;
-    } else if (phase === 'post_accept') {
-      serverSetCookies = this.eventsPipeline.setCookieEvents_post_accept;
-    } else if (phase === 'post_reject') {
-      serverSetCookies = this.eventsPipeline.setCookieEvents_post_reject;
+    // Get persisted cookies via Network.getAllCookies
+    let persistedCookies: any[] = [];
+    try {
+      const cookiesResult: any = await this.sessionManager.sendCommand('Network.getAllCookies', {}, sessionId);
+      persistedCookies = cookiesResult?.result?.cookies || [];
+    } catch (error) {
+      await this.logger.log('warn', `Failed to get cookies for ${phase}`, { error: String(error) });
     }
     
-    await this.logger.log('info', `📊 ${phase} snapshot: ${serverSetCookies.length} server-set cookies, ${persistedCookies.length} persisted, ${requests.length} requests`);
+    // POINT 5: Get storage data with correct format
+    const storage = await this.getStorageData(sessionId);
     
-    return {
-      serverSetCookies,
+    // Get final URL
+    let finalUrl = '';
+    try {
+      const urlResult: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: 'window.location.href'
+      }, sessionId);
+      finalUrl = urlResult?.result?.result?.value || '';
+    } catch {}
+    
+    const snapshot = {
+      phase,
+      requests,
       persistedCookies,
       storage,
-      requests
+      finalUrl,
+      timestamp: Date.now()
     };
+    
+    await this.logger.log('info', `📊 ${phase} snapshot: ${requests.length} requests, ${persistedCookies.length} cookies`);
+    
+    return snapshot;
   }
-  
-  private async getPersistedCookies(pageSessionId: string) {
+
+  async getStorageData(sessionId: string) {
     try {
-      const result = await this.sessionManager.sendCommand('Network.getAllCookies', {}, pageSessionId) as any;
-      return result?.result?.cookies || [];
-    } catch {
-      return [];
-    }
-  }
-  
-  private async getStorageData(pageSessionId: string) {
-    try {
-      // POINT 5: Correct storage metrics - get raw counts and unique keys
-      const localStorageResult = await this.sessionManager.sendCommand('Runtime.evaluate', {
-        expression: `(() => {
-          try {
-            const items = {};
-            const keys = [];
-            for (let i = 0; i < localStorage.length; i++) {
-              const key = localStorage.key(i);
-              if (key) {
-                keys.push(key);
-                items[key] = localStorage.getItem(key);
-              }
-            }
-            return { type: 'localStorage', items, count: keys.length, uniqueKeys: keys };
-          } catch (e) {
-            return { type: 'localStorage', items: {}, count: 0, uniqueKeys: [], error: e.message };
-          }
-        })()`
-      }, pageSessionId) as any;
+      // Get localStorage
+      const localStorageResult: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: 'JSON.stringify(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)]))'
+      }, sessionId);
       
-      const sessionStorageResult = await this.sessionManager.sendCommand('Runtime.evaluate', {
-        expression: `(() => {
-          try {
-            const items = {};
-            const keys = [];
-            for (let i = 0; i < sessionStorage.length; i++) {
-              const key = sessionStorage.key(i);
-              if (key) {
-                keys.push(key);
-                items[key] = sessionStorage.getItem(key);
-              }
-            }
-            return { type: 'sessionStorage', items, count: keys.length, uniqueKeys: keys };
-          } catch (e) {
-            return { type: 'sessionStorage', items: {}, count: 0, uniqueKeys: [], error: e.message };
-          }
-        })()`
-      }, pageSessionId) as any;
+      // Get sessionStorage  
+      const sessionStorageResult: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: 'JSON.stringify(Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)]))'
+      }, sessionId);
       
-      const localStorage = localStorageResult?.result?.value?.items || {};
-      const sessionStorage = sessionStorageResult?.result?.value?.items || {};
-      const localStorageCount = localStorageResult?.result?.value?.count || 0;
-      const sessionStorageCount = sessionStorageResult?.result?.value?.count || 0;
-      const localStorageKeys = localStorageResult?.result?.value?.uniqueKeys || [];
-      const sessionStorageKeys = sessionStorageResult?.result?.value?.uniqueKeys || [];
+      const localStorageItems = safeJsonParse(localStorageResult?.result?.result?.value || '[]') || [];
+      const sessionStorageItems = safeJsonParse(sessionStorageResult?.result?.result?.value || '[]') || [];
+      
+      // Convert to objects
+      const localStorage = Object.fromEntries(localStorageItems);
+      const sessionStorage = Object.fromEntries(sessionStorageItems);
       
       return {
         localStorage,
         sessionStorage,
         storageMetrics: {
-          localStorageCount,
-          sessionStorageCount,
-          totalItems: localStorageCount + sessionStorageCount,
-          uniqueKeys: [...new Set([...localStorageKeys, ...sessionStorageKeys])]
+          localStorageItems: localStorageItems.length,
+          sessionStorageItems: sessionStorageItems.length,
+          uniqueKeys: [...new Set([...Object.keys(localStorage), ...Object.keys(sessionStorage)])]
         }
       };
-    } catch {
-      return { 
-        localStorage: {}, 
+    } catch (error) {
+      await this.logger.log('warn', 'Failed to get storage data', { error: String(error) });
+      return {
+        localStorage: {},
         sessionStorage: {},
-        storageMetrics: {
-          localStorageCount: 0,
-          sessionStorageCount: 0,
-          totalItems: 0,
-          uniqueKeys: []
-        }
+        storageMetrics: { localStorageItems: 0, sessionStorageItems: 0, uniqueKeys: [] }
       };
     }
-  }
-  
-  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
-    return this.sessionManager.sendCommand(method, params, sessionId);
   }
 }
 
-// ==== CMP Hunter ====
+// =================== CMP HUNTER ===================
 class CMPHunter {
-  sessionManager: SessionManager;
-  logger: any;
-  
-  constructor(sessionManager: SessionManager, logger: any) {
-    this.sessionManager = sessionManager;
-    this.logger = logger;
-  }
-  
-  async findAndClickCMP(action: 'accept' | 'reject', pageSessionId: string): Promise<{ clicked: boolean; details?: any }> {
-    await this.logger.log('info', `🎯 Hunting for CMP ${action} button across all frames`);
+  constructor(
+    private sessionManager: SessionManager,
+    private logger: any
+  ) {}
+
+  async findAndClickCMP(action: 'accept' | 'reject', pageSessionId: string) {
+    await this.logger.log('info', `🎯 Hunting CMP for ${action} action`);
     
-    // Get frame tree
-    const frameTreeResult = await this.sendCommand('Page.getFrameTree', {}, pageSessionId) as any;
-    const frames = this.extractAllFrames(frameTreeResult?.result?.frameTree);
-    
-    // Try each frame
-    for (const frame of frames) {
-      const result = await this.tryClickInFrame(action, frame.id, pageSessionId);
-      if (result.clicked) {
-        await this.logger.log('info', `✅ CMP ${action} clicked in frame ${frame.id}`);
-        return result;
+    try {
+      // POINT 4: CMP click across all frames in the page session
+      const frameTreeResult: any = await this.sessionManager.sendCommand('Page.getFrameTree', {}, pageSessionId);
+      const allFrames = this.extractAllFrames(frameTreeResult?.result?.frameTree);
+      
+      for (const frame of allFrames) {
+        try {
+          // Create isolated world for this frame
+          await this.sessionManager.sendCommand('Page.createIsolatedWorld', {
+            frameId: frame.id,
+            worldName: `cmp-hunter-${Date.now()}`,
+            grantUniveralAccess: true
+          }, pageSessionId);
+          
+          const result = await this.attemptCMPClick(action, pageSessionId, frame.id);
+          if (result.clicked) {
+            await this.logger.log('info', `✅ CMP ${action} successful in frame ${frame.id}`);
+            return result;
+          }
+        } catch (error) {
+          await this.logger.log('warn', `CMP click failed in frame ${frame.id}`, { error: String(error) });
+        }
       }
+      
+      await this.logger.log('info', `❌ CMP ${action} failed in all frames`);
+      return { clicked: false };
+      
+    } catch (error) {
+      await this.logger.log('error', `CMP hunting failed`, { error: String(error) });
+      return { clicked: false };
     }
-    
-    // Try with MutationObserver fallback
-    await this.logger.log('info', '🔍 Setting up MutationObserver for dynamic CMP detection');
-    const observerResult = await this.setupMutationObserver(action, pageSessionId);
-    
-    return observerResult;
   }
-  
+
   private extractAllFrames(frameTree: any): any[] {
     if (!frameTree) return [];
     
@@ -739,190 +495,51 @@ class CMPHunter {
     }
     return frames;
   }
-  
-  private async tryClickInFrame(action: 'accept' | 'reject', frameId: string, pageSessionId: string) {
-    const expression = this.buildCMPFinderExpression(action);
-    
-    try {
-      // Create isolated world for frame execution
-      const worldResult = await this.sendCommand('Page.createIsolatedWorld', {
-        frameId: frameId,
-        worldName: `cmp-hunter-${Date.now()}`,
-        grantUniveralAccess: true
-      }, pageSessionId) as any;
-      
-      const executionContextId = worldResult?.result?.executionContextId;
-      
-      if (executionContextId) {
-        const result = await this.sendCommand('Runtime.evaluate', {
-          expression,
-          contextId: executionContextId
-        }, pageSessionId) as any;
-        
-        if (result?.result?.value?.clicked) {
-          return { clicked: true, details: result.result.value };
-        }
-      } else {
-        // Fallback to main context if isolated world creation fails
-        const result = await this.sendCommand('Runtime.evaluate', {
-          expression
-        }, pageSessionId) as any;
-        
-        if (result?.result?.value?.clicked) {
-          return { clicked: true, details: result.result.value };
-        }
-      }
-    } catch (error) {
-      await this.logger.log('debug', `Frame ${frameId} evaluation failed: ${error}`);
-    }
-    
-    return { clicked: false };
-  }
-  
-  private buildCMPFinderExpression(action: 'accept' | 'reject'): string {
-    return `(() => {
-      const selectors = {
-        onetrust: {
-          banner: '#onetrust-banner-sdk, .ot-sdk-container',
-          accept: '#onetrust-accept-btn-handler, .ot-pc-refuse-all-handler',
-          reject: '#onetrust-reject-all-handler, #onetrust-pc-btn-handler, .ot-pc-refuse-all-handler'
-        },
-        cookiescript: {
-          banner: '#cookiescript_injected, [data-cs-c]',
-          accept: '[data-cs-accept-all], .cs-accept-all',
-          reject: '[data-cs-reject-all], .cs-reject-all'
-        },
-        cookiebot: {
-          banner: '#CybotCookiebotDialog, .CybotCookiebotDialog',
-          accept: '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll, .CybotCookiebotDialogBodyButton[data-cookie-level="all"]',
-          reject: '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowallSelection, .CybotCookiebotDialogBodyButton[data-cookie-level="functional"]'
-        },
-        generic: {
-          banner: '[id*="cookie"], [class*="consent"], [data-testid*="consent"]',
-          accept: '[id*="accept"], [class*="accept"], [data-testid*="accept"]',
-          reject: '[id*="reject"], [class*="reject"], [data-testid*="reject"]'
-        }
-      };
-      
-      function isVisible(el) {
-        return el && (el.offsetParent !== null || el.getClientRects().length > 0);
-      }
-      
-      function searchInShadowRoots(root, selector) {
-        const elements = Array.from(root.querySelectorAll(selector));
-        const shadowHosts = Array.from(root.querySelectorAll('*')).filter(el => el.shadowRoot);
-        
-        for (const host of shadowHosts) {
-          elements.push(...searchInShadowRoots(host.shadowRoot, selector));
-        }
-        
-        return elements;
-      }
-      
-      function findByText(action) {
-        const patterns = action === 'accept' 
-          ? [/accept.*all/i, /accept.*cookies/i, /allow.*all/i, /súhlas/i, /prijať/i]
-          : [/reject.*all/i, /decline/i, /refuse/i, /odmietnuť/i, /zamietnuť/i];
-        
-        const allElements = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"]'));
-        
-        return allElements.find(el => {
-          const text = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
-          return patterns.some(pattern => pattern.test(text)) && isVisible(el);
-        });
-      }
-      
-      // Try known CMP selectors first
-      for (const [cmpName, config] of Object.entries(selectors)) {
-        const targetSelector = action === 'accept' ? config.accept : config.reject;
-        const elements = searchInShadowRoots(document, targetSelector);
-        
-        for (const el of elements) {
-          if (isVisible(el)) {
-            el.click();
-            return { 
-              clicked: true, 
-              cmp: cmpName, 
-              selector: targetSelector,
-              method: 'selector'
-            };
-          }
-        }
-      }
-      
-      // Fallback to text-based search
-      const textElement = findByText('${action}');
-      if (textElement) {
-        textElement.click();
-        return { 
-          clicked: true, 
-          cmp: 'unknown', 
-          selector: textElement.tagName + (textElement.id ? '#' + textElement.id : ''),
-          method: 'text',
-          text: textElement.textContent.trim().slice(0, 50)
-        };
-      }
-      
-      return { clicked: false };
-    })()`;
-  }
-  
-  private async setupMutationObserver(action: 'accept' | 'reject', pageSessionId: string) {
-    const cmpFinderCode = this.buildCMPFinderExpression(action);
-    const observerExpression = `
-      new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          if (typeof observer !== 'undefined') observer.disconnect();
-          resolve({ clicked: false, reason: 'timeout' });
-        }, 10000);
-        
-        const observer = new MutationObserver(() => {
+
+  private async attemptCMPClick(action: 'accept' | 'reject', sessionId: string, frameId?: string) {
+    const selectors = action === 'accept' ? [
+      '[data-testid="accept-all"]',
+      '[id*="accept"]',
+      '[class*="accept"]',
+      'button:contains("Accept")',
+      'button:contains("Agree")',
+      'button:contains("Allow")'
+    ] : [
+      '[data-testid="reject-all"]',
+      '[id*="reject"]',
+      '[class*="reject"]',
+      'button:contains("Reject")',
+      'button:contains("Decline")',
+      'button:contains("Deny")'
+    ];
+
+    for (const selector of selectors) {
+      try {
+        const clickExpression = `
           try {
-            const result = ${cmpFinderCode};
-            if (result && result.clicked) {
-              clearTimeout(timeout);
-              observer.disconnect();
-              resolve(result);
+            const element = document.querySelector('${selector}');
+            if (element && element.offsetParent !== null) {
+              element.click();
+              true;
+            } else {
+              false;
             }
-          } catch (e) {
-            // Ignore errors during CMP check
+          } catch {
+            false;
           }
-        });
-        
-        observer.observe(document.body, {
-          childList: true,
-          subtree: true,
-          attributes: false
-        });
-        
-        // Also try immediately
-        try {
-          const result = ${cmpFinderCode};
-          if (result && result.clicked) {
-            clearTimeout(timeout);
-            observer.disconnect();
-            resolve(result);
-          }
-        } catch (e) {
-          // Continue with observer
+        `;
+
+        const result: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+          expression: clickExpression
+        }, sessionId);
+
+        if (result?.result?.result?.value === true) {
+          return { clicked: true, selector, frameId };
         }
-      })
-    `;
-    
-    try {
-      const result = await this.sendCommand('Runtime.evaluate', {
-        expression: observerExpression,
-        awaitPromise: true
-      }, pageSessionId) as any;
-      
-      return result?.result?.value || { clicked: false };
-    } catch {
-      return { clicked: false };
+      } catch {}
     }
-  }
-  
-  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
-    return this.sessionManager.sendCommand(method, params, sessionId);
+
+    return { clicked: false };
   }
 }
 
@@ -1015,6 +632,28 @@ function dedupServerSet(arr: any[]) {
     m.set(key, c);
   }
   return Array.from(m.values());
+}
+
+// Helper to wait for Page.loadEventFired
+function onceLoadFired(ws: WebSocket, sessionId: string): Promise<void> {
+  return new Promise((resolve) => {
+    const handler = (event: MessageEvent) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.method === 'Page.loadEventFired' && message.sessionId === sessionId) {
+          ws.removeEventListener('message', handler);
+          resolve();
+        }
+      } catch {}
+    };
+    ws.addEventListener('message', handler);
+    
+    // Timeout after 10 seconds
+    setTimeout(() => {
+      ws.removeEventListener('message', handler);
+      resolve();
+    }, 10000);
+  });
 }
 
 serve(async (req) => {
@@ -1165,7 +804,6 @@ serve(async (req) => {
       links: { firstParty: new Set(), thirdParty: new Set() }
     };
     
-    let pageSessionId = '';
     let finalUrl = url;
 
     // Connect to Browserless WebSocket using THREE-PHASE EXECUTION
@@ -1309,7 +947,7 @@ serve(async (req) => {
           
           // ==================== ANALYSIS & OUTPUT ====================
           
-          // Get final URL
+          // Get final URL from pre-snapshot
           finalUrl = preSnapshot.finalUrl || url;
           
           // ==================== DATA ANALYSIS ====================
@@ -1468,306 +1106,7 @@ serve(async (req) => {
             trace_id: traceId
           });
         }
-          let postRejectSnapshot: any = null;
-          
-          const acceptResult = await cmpHunter.findAndClickCMP('accept', pageSessionId);
-          
-          if (acceptResult.clicked) {
-            phaseController.setAccept();
-            await logger.log('info', `✅ CMP Accept clicked: ${JSON.stringify(acceptResult.details)}`);
-            
-            // Wait for global idle (invariant)
-            await sessionManager.waitForGlobalIdle(1500, 8000);
-            
-            // Take post-accept snapshot
-            postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', pageSessionId);
-            
-            await logger.log('info', 'DBG cookies_hdr_counts_post_accept', {
-              pre: eventsPipeline.setCookieEvents_pre.length,
-              post_accept: eventsPipeline.setCookieEvents_post_accept.length,
-              post_reject: eventsPipeline.setCookieEvents_post_reject.length,
-              trace_id: traceId
-            });
-            
-            // POINT 1: PHASE 3 - NEW ISOLATED CONTEXT FOR REJECT FLOW
-            await logger.log('info', '🎯 PHASE 3: Creating new isolated context for reject flow');
-            
-            // Create a completely new page context for reject flow
-            const newPageResult: any = await sendCommand('Target.createTarget', {
-              url: 'about:blank'
-            });
-            
-            if (newPageResult?.result?.targetId) {
-              const rejectPageTarget = newPageResult.result.targetId;
-              await logger.log('info', `📎 Created new page target for reject: ${rejectPageTarget}`);
-              
-              // Attach to new target
-              const attachRejectResult: any = await sendCommand('Target.attachToTarget', {
-                targetId: rejectPageTarget,
-                flatten: true
-              });
-              
-              const rejectPageSessionId = attachRejectResult.result.sessionId;
-              await logger.log('info', `✅ Attached to reject page session: ${rejectPageSessionId}`);
-              
-              // Enable CDP domains on new session
-              await sendCommand('Page.enable', {}, rejectPageSessionId);
-              await sendCommand('Runtime.enable', {}, rejectPageSessionId);
-              await sendCommand('Network.enable', {
-                maxTotalBufferSize: 10_000_000,
-                maxResourceBufferSize: 5_000_000
-              }, rejectPageSessionId);
-              await sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, rejectPageSessionId);
-              await sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, rejectPageSessionId);
-              
-              // Navigate to URL in new context
-              phaseController.setReject();
-              await sendCommand('Page.navigate', { url }, rejectPageSessionId);
-              await onceLoadFired(ws, rejectPageSessionId).catch(async () => {
-                await logger.log('warn', '⏰ Reject navigation timeout, proceeding');
-              });
-              
-              // Wait for global idle
-              await sessionManager.waitForGlobalIdle(1500, 8000);
-              
-              // Try reject flow in new context
-              const rejectResult = await cmpHunter.findAndClickCMP('reject', rejectPageSessionId);
-              
-              if (rejectResult.clicked) {
-                await logger.log('info', `❌ CMP Reject clicked in new context: ${JSON.stringify(rejectResult.details)}`);
-                
-                // Wait for global idle
-                await sessionManager.waitForGlobalIdle(1500, 8000);
-                
-                // Take post-reject snapshot
-                postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', rejectPageSessionId);
-                
-                await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
-                  pre: eventsPipeline.setCookieEvents_pre.length,
-                  post_accept: eventsPipeline.setCookieEvents_post_accept.length,
-                  post_reject: eventsPipeline.setCookieEvents_post_reject.length,
-                  trace_id: traceId
-                });
-              } else {
-                await logger.log('info', '❌ CMP Reject click failed in new context - no reject button found');
-              }
-              
-              // Close reject context
-              await sendCommand('Target.closeTarget', { targetId: rejectPageTarget });
-            } else {
-              await logger.log('warn', '❌ Failed to create new target for reject flow - using fallback');
-            }
-          } else {
-            await logger.log('info', '❌ CMP Accept click failed - no CMP detected or button not found');
-          }
-          
-          // ==================== LEGACY DATA COMPATIBILITY ====================
-          // Build backward-compatible data structures for existing report logic
-          const cookies_pre = preSnapshot?.persistedCookies || [];
-          const cookies_post_accept = postAcceptSnapshot?.persistedCookies || [];
-          const cookies_post_reject = postRejectSnapshot?.persistedCookies || [];
-          const cookies_post_accept_extra: any[] = []; // Legacy compatibility
-          const cookies_post_reject_extra: any[] = []; // Legacy compatibility
-          const cookies_pre_load = cookies_pre;
-          const cookies_pre_idle = cookies_pre;
-          const cookies_pre_extra = cookies_pre;
-          
-          const requests_pre = preSnapshot?.requests || [];
-          const requests_post_accept = postAcceptSnapshot?.requests || [];
-          const requests_post_reject = postRejectSnapshot?.requests || [];
-          
-          // POINT 5: Fixed storage metrics using correct format
-          const storage_pre = preSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
-          const storage_post_accept = postAcceptSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
-          const storage_post_reject = postRejectSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
-          
-          // Use server-set cookies as primary data source
-          const setCookieEvents_pre = eventsPipeline.setCookieEvents_pre;
-          const setCookieEvents_post_accept = eventsPipeline.setCookieEvents_post_accept;
-          const setCookieEvents_post_reject = eventsPipeline.setCookieEvents_post_reject;
-          
-          // Build legacy-compatible maps
-          const requestMap = eventsPipeline.requestMap;
-          const postDataMap = eventsPipeline.postDataMap; // POINT 6: Use collected POST data
-          
-          // Phase 5: Calculate tracking parameters and data sending
-          const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
-          let thirdPartyDataSending = 0;
-          
-          // Process all requests for tracking analysis
-          const allRequests = [...requests_pre, ...requests_post_accept, ...requests_post_reject];
-          
-          for (const request of allRequests) {
-            try {
-              const requestHost = new URL(request.url).hostname;
-              const requestDomain = getETldPlusOneLite(requestHost);
-              const isFirstParty = requestDomain === mainDomain;
-              
-              // Update host map
-              if (isFirstParty) {
-                hostMap.requests.firstParty.add(requestHost);
-              } else {
-                hostMap.requests.thirdParty.add(requestHost);
-              }
-              
-              // Extract query parameters
-              const queryParams = parseQuery(request.url);
-              const significantQueryParams = Object.keys(queryParams).filter(key => 
-                SIGNIFICANT_PARAMS.includes(key)
-              );
-              
-              // Extract POST body parameters if available
-              const postData = postDataMap.get(request.requestId);
-              let significantPostParams: string[] = [];
-              
-              if (postData) {
-                const postParams = typeof postData === 'string' ? 
-                  parseFormUrlEncoded(postData) : 
-                  (typeof postData === 'object' ? postData : {});
-                  
-                significantPostParams = Object.keys(postParams).filter(key => 
-                  SIGNIFICANT_PARAMS.includes(key)
-                );
-              }
-              
-              // Track significant parameters
-              if (significantQueryParams.length > 0 || significantPostParams.length > 0) {
-                trackingParams.push({
-                  host: requestHost,
-                  path: new URL(request.url).pathname,
-                  method: request.method,
-                  params: Object.fromEntries(significantQueryParams.map(key => [key, queryParams[key]])),
-                  bodyKeys: significantPostParams,
-                  phase: request.phase,
-                  isFirstParty
-                });
-                
-                if (!isFirstParty) {
-                  thirdPartyDataSending++;
-                }
-              }
-            } catch {
-              // Ignore invalid URLs
-            }
-          }
-          
-          // Phase 6: Build host map and simplified metadata
-          const allCookies = [...cookies_pre, ...cookies_post_accept, ...cookies_post_reject];
-          
-          for (const cookie of allCookies) {
-            const cookieDomain = getETldPlusOneLite(cookie.domain);
-            const isFirstParty = cookieDomain === mainDomain;
-            
-            if (isFirstParty) {
-              hostMap.cookies.firstParty.add(cookie.domain);
-            } else {
-              hostMap.cookies.thirdParty.add(cookie.domain);
-            }
-          }
-          
-          // Create simplified metadata
-          const uniqueCookies = new Map();
-          allCookies.forEach(cookie => {
-            const key = `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
-            if (!uniqueCookies.has(key)) {
-              uniqueCookies.set(key, {
-                name: cookie.name,
-                domain: cookie.domain,
-                path: cookie.path || '/',
-                expires: cookie.expires !== -1 ? 'persistent' : 'session'
-              });
-            }
-          });
-          
-          const uniqueStorageKeys = new Set();
-          [...storage_pre, ...storage_post_accept, ...storage_post_reject].forEach(([key]) => {
-            uniqueStorageKeys.add(key);
-          });
-          
-          const beacons = trackingParams.map(tp => {
-            const url = new URL(`https://${tp.host}${tp.path}`);
-            return { urlNormalized: `${url.protocol}//${url.host}${url.pathname}` };
-          });
-          
-          const uniqueBeacons = Array.from(new Set(beacons.map(b => b.urlNormalized)))
-            .map(url => ({ urlNormalized: url }));
-          
-          // PATCH 4 - Create server-set cookies view from Set-Cookie headers
-          function toKey(c: ParsedCookie){ return `${c.name}|${normalizeDomain(c.domain)}|${c.path||'/'}`; }
-          const preFromHeaders = new Map(setCookieEvents_pre.map(c => [toKey(c), c]));
-          const postAcceptFromHeaders = new Map(setCookieEvents_post_accept.map(c => [toKey(c), c]));
-          const postRejectFromHeaders = new Map(setCookieEvents_post_reject.map(c => [toKey(c), c]));
-
-          // Server-set cookies (relevant even if storage 3P cookies are blocked)
-          const cookies_serverset_pre = Array.from(preFromHeaders.values());
-          const cookies_serverset_post_accept = Array.from(postAcceptFromHeaders.values());
-          const cookies_serverset_post_reject = Array.from(postRejectFromHeaders.values());
-
-          // Phase 7: Self-check gates (PATCH 4 - updated cookie detection)
-          const selfCheckReasons: string[] = [];
-          let isComplete = true;
-          
-          if (requests_pre.length === 0) {
-            selfCheckReasons.push('Network capture empty (CDP not bound)');
-            isComplete = false;
-          }
-          
-          // PATCH 4 - Updated cookie detection rule
-          if ((cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length) === 0
-              && (setCookieEvents_pre.length + setCookieEvents_post_accept.length + setCookieEvents_post_reject.length) === 0) {
-            selfCheckReasons.push('No cookies detected (storage + Set-Cookie empty)');
-            isComplete = false;
-          }
-          
-          if (trackingParams.length > 0 && thirdPartyDataSending === 0) {
-            selfCheckReasons.push('Tracking detected but data sending section empty');
-            isComplete = false;
-          }
-          
-          // Collect final metrics (PATCH 4 - add server-set metrics)
-          const metrics = {
-            requests_pre: requests_pre.length,
-            requests_post_accept: requests_post_accept.length,
-            requests_post_reject: requests_post_reject.length,
-            cookies_pre: cookies_pre.length,
-            cookies_post_accept: cookies_post_accept.length,
-            cookies_post_reject: cookies_post_reject.length,
-            cookies_serverset_pre: cookies_serverset_pre.length,
-            cookies_serverset_post_accept: cookies_serverset_post_accept.length,
-            cookies_serverset_post_reject: cookies_serverset_post_reject.length,
-            setCookie_pre: setCookieEvents_pre.length,
-            setCookie_post_accept: setCookieEvents_post_accept.length,
-            setCookie_post_reject: setCookieEvents_post_reject.length,
-            storage_pre_items: storage_pre.length,
-            storage_post_accept_items: storage_post_accept.length,
-            storage_post_reject_items: storage_post_reject.length,
-            data_sent_to_third_parties: thirdPartyDataSending,
-            third_party_hosts: hostMap.requests.thirdParty.size,
-            tracking_params_count: trackingParams.length
-          };
-          
-          await logger.log('info', `📤 data_sent_to_third_parties: ${thirdPartyDataSending}`);
-          await logger.log('info', `📊 Final collection summary: ${JSON.stringify(metrics)}`);
-          
-          // PATCH 3 - Final debug log
-          await logger.log('info', 'DBG inflight_done', { inflight: sessionManager.inflight, trace_id: traceId });
-          
-          ws.close();
-          
-          resolve(response);
-          
-        } catch (error) {
-          await logger.log('error', 'CDP analysis failed', { error: String(error) });
-          ws.close();
-          resolve({
-            success: false,
-            error_code: 'CDP_ANALYSIS_FAILED',
-            details: String(error)
-          });
-        }
       };
-      
-      // Event handling now done via addEventListener above - no ws.onmessage needed
       
       ws.onclose = async () => {
         await logger.log('info', '🔌 WebSocket connection closed');
@@ -1776,41 +1115,11 @@ serve(async (req) => {
       ws.onerror = (error) => {
         logger.log('error', 'WebSocket error', { error: String(error) });
         
-        // Build partial metrics from what we can access in this scope
-        const phase = phaseController?.get() || 'pre';
-        const preRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'pre') : [];
-        const postAcceptRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_accept') : [];
-        const postRejectRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_reject') : [];
-        
-        const partialMetrics = {
-          requests_pre: preRequests.length,
-          requests_post_accept: postAcceptRequests.length,
-          requests_post_reject: postRejectRequests.length,
-          cookies_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
-          cookies_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
-          cookies_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
-          setCookie_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
-          setCookie_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
-          setCookie_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
-          storage_pre_items: 0
-        };
-        
-        const totalRequests = partialMetrics.requests_pre + partialMetrics.requests_post_accept + partialMetrics.requests_post_reject;
-        const totalCookies = partialMetrics.cookies_pre + partialMetrics.cookies_post_accept + partialMetrics.cookies_post_reject;
-        
         resolve({
           success: false,
           error_code: 'WEBSOCKET_ERROR',
           details: String(error),
-          partial: totalRequests > 0 || totalCookies > 0 ? {
-            metrics: partialMetrics,
-            phase: phase,
-            data_collected: {
-              requests: totalRequests,
-              cookies: totalCookies,
-              storage: 0
-            }
-          } : undefined
+          trace_id: traceId
         });
       };
       
@@ -1818,65 +1127,11 @@ serve(async (req) => {
       setTimeout(async () => {
         await logger.log('error', '⏰ Global timeout after 60 seconds');
         
-        // Build partial metrics from collected data so far
-        const phase = phaseController?.get() || 'pre';
-        const preRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'pre') : [];
-        const postAcceptRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_accept') : [];
-        const postRejectRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_reject') : [];
-        const allRequests = [...preRequests, ...postAcceptRequests, ...postRejectRequests];
-        
-        const totalRequests = allRequests.length;
-        const totalCookies = (eventsPipeline?.setCookieEvents_pre?.length || 0) + 
-                           (eventsPipeline?.setCookieEvents_post_accept?.length || 0) + 
-                           (eventsPipeline?.setCookieEvents_post_reject?.length || 0);
-        
-        const partialMetrics = {
-          requests_pre: preRequests.length,
-          requests_post_accept: postAcceptRequests.length,
-          requests_post_reject: postRejectRequests.length,
-          cookies_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
-          cookies_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
-          cookies_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
-          setCookie_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
-          setCookie_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
-          setCookie_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
-          storage_pre_items: 0,
-          third_party_hosts: allRequests
-            .map((r: any) => { try { return getETldPlusOneLite(new URL(r.url).hostname); } catch { return ''; } })
-            .filter(h => h).length,
-          tracking_params_count: allRequests
-            .filter((r: any) => { 
-              try { 
-                const url = new URL(r.url);
-                return url.search && SIGNIFICANT_PARAMS.some(param => url.searchParams.has(param));
-              } catch { return false; }
-            }).length
-        };
-
-        // Log structured partial summary
-        await logger.log('error', '⏰ Global timeout - partial collection summary', {
-          url: url,
-          phase: phase,
-          partial_metrics: partialMetrics,
-          requests_collected: totalRequests,
-          cookies_collected: totalCookies,
-          storage_collected: 0
-        });
-        
-        ws.close();
         resolve({
           success: false,
           error_code: 'TIMEOUT',
-          details: 'Analysis timeout after 60 seconds',
-          partial: {
-            metrics: partialMetrics,
-            phase: phase,
-            data_collected: {
-              requests: totalRequests,
-              cookies: totalCookies,
-              storage: 0
-            }
-          }
+          details: 'Analysis timed out after 60 seconds',
+          trace_id: traceId
         });
       }, 60000);
     });
@@ -1884,76 +1139,25 @@ serve(async (req) => {
     const duration = Date.now() - startTime;
     
     if (!analysisResult.success) {
-      await logger.log('error', 'Analysis failed', analysisResult);
-      
-      // If partial data is available, log it and update audit_runs with partial metrics
-      if ((analysisResult as any).partial) {
-        const partial = (analysisResult as any).partial;
-        await logger.log('info', 'Final collection summary (partial)', {
-          url: url,
-          partial_data: partial,
-          phase: partial.phase,
-          metrics: partial.metrics
-        });
-        
-        // Update audit_runs with partial metrics
-        await supabase
-          .from('audit_runs')
-          .update({
-            status: 'failed',
-            error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
-            error_message: (analysisResult as any).details || 'Analysis failed',
-            ended_at: new Date().toISOString(),
-            duration_ms: duration,
-            bl_status_code: 500,
-            requests_total: partial.metrics?.requests_pre || 0,
-            requests_pre_consent: partial.metrics?.requests_pre || 0,
-            third_parties_count: partial.metrics?.third_party_hosts || 0,
-            beacons_count: partial.metrics?.tracking_params_count || 0,
-            cookies_pre_count: partial.metrics?.cookies_pre || 0,
-            cookies_post_count: Math.max(partial.metrics?.cookies_post_accept || 0, partial.metrics?.cookies_post_reject || 0),
-            meta: {
-              requests_post_accept: partial.metrics?.requests_post_accept || 0,
-              requests_post_reject: partial.metrics?.requests_post_reject || 0,
-              setCookie_pre: partial.metrics?.setCookie_pre || 0,
-              setCookie_post_accept: partial.metrics?.setCookie_post_accept || 0,
-              setCookie_post_reject: partial.metrics?.setCookie_post_reject || 0,
-              storage_items: partial.metrics?.storage_pre_items || 0,
-              phase_reached: partial.phase,
-              partial_data: true
-            }
-          })
-          .eq('trace_id', traceId);
-      } else {
-        // Update audit_runs with failure (no partial data)
-        await supabase
-          .from('audit_runs')
-          .update({
-            status: 'failed',
-            error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
-            error_message: (analysisResult as any).details || 'Analysis failed',
-            ended_at: new Date().toISOString(),
-            duration_ms: duration,
-            bl_status_code: 500
-          })
-          .eq('trace_id', traceId);
-      }
+      // Update audit_runs with failure
+      await supabase
+        .from('audit_runs')
+        .update({
+          status: 'failed',
+          error_code: analysisResult.error_code,
+          error_message: analysisResult.details,
+          ended_at: new Date().toISOString(),
+          duration_ms: duration
+        })
+        .eq('trace_id', traceId);
 
-      return new Response(JSON.stringify({
-        ...analysisResult,
-        trace_id: traceId,
-        duration_ms: duration
-      }), {
+      return new Response(JSON.stringify(analysisResult), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-
-    await logger.log('info', '✅ Analysis completed successfully');
     
-    // Extract key metrics for audit_runs update
-    const data = analysisResult.data;
-    const finalMetrics = data.metrics || {};
+    await logger.log('info', '✅ Analysis completed successfully');
     
     // Update audit_runs with success
     await supabase
@@ -1964,39 +1168,9 @@ serve(async (req) => {
         duration_ms: duration,
         bl_status_code: 200,
         bl_health_status: 'ok',
-        normalized_url: data.final_url || data.finalUrl,
-        requests_total: finalMetrics.requests_pre || 0,
-        requests_pre_consent: finalMetrics.requests_pre || 0,
-        third_parties_count: finalMetrics.third_party_hosts || 0,
-        beacons_count: finalMetrics.tracking_params_count || 0,
-        cookies_pre_count: finalMetrics.cookies_pre || 0,
-        cookies_post_count: Math.max(finalMetrics.cookies_post_accept || 0, finalMetrics.cookies_post_reject || 0),
-        meta: {
-          requests_post_accept: finalMetrics.requests_post_accept || 0,
-          requests_post_reject: finalMetrics.requests_post_reject || 0,
-          setCookie_pre: finalMetrics.setCookie_pre || 0,
-          setCookie_post_accept: finalMetrics.setCookie_post_accept || 0,
-          setCookie_post_reject: finalMetrics.setCookie_post_reject || 0,
-          storage_items: finalMetrics.storage_pre_items || 0,
-          cmp_detected: data.cmp?.detected || false,
-          cmp_type: data.cmp?.type,
-          self_check_complete: data.self_check?.complete || false,
-          self_check_reasons: data.self_check?.reasons || []
-        }
+        normalized_url: analysisResult.final_url || analysisResult.finalUrl
       })
       .eq('trace_id', traceId);
-
-    // Log structured final summary with collected data
-    await logger.log('info', 'Final collection summary', {
-      url: url,
-      metrics: data.metrics,
-      thirdParties: data.thirdParties?.length || 0,
-      beacons: data.beacons?.length || 0,
-      cookies: data.cookies?.length || 0,
-      storage: data.storage?.length || 0,
-      cmp: data.cmp,
-      verdict: data.verdict
-    });
 
     await logger.log('info', '✅ Analysis function completed successfully');
 
@@ -2006,7 +1180,7 @@ serve(async (req) => {
       trace_id: traceId,
       bl_status_code: 200,
       bl_health_status: 'ok',
-      data: analysisResult.data
+      data: analysisResult
     }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
