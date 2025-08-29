@@ -487,7 +487,9 @@ serve(async (req) => {
         }
       }, pageSessionId);
       
-      // Helper functions for data collection
+      // Helper functions for data collection with normalized domain
+      const norm = (d?: string) => (d || '').replace(/^\./, '');
+      
       const collectCookies = async (label) => {
         const cookies = [];
         
@@ -496,7 +498,8 @@ serve(async (req) => {
           if (cdpCookies.cookies) {
             cookies.push(...cdpCookies.cookies.map(c => ({
               ...c,
-              expiry_days: c.expires ? Math.round((c.expires - Date.now() / 1000) / (24 * 60 * 60)) : null,
+              domain: norm(c.domain), // Normalize domain here
+              expiry_days: c.expires ? Math.round((c.expires * 1000 - Date.now()) / (24 * 60 * 60 * 1000)) : null,
               source: 'cdp'
             })));
           }
@@ -959,17 +962,24 @@ serve(async (req) => {
     console.log('✅ Analysis function completed successfully');
 
     // Return the analysis results
-    return new Response(JSON.stringify({
-      success: true,
-      trace_id: traceId,
-      execution_time_ms: Date.now() - startTime,
-      bl_status_code: authCheck.details.tests?.query?.status ?? authCheck.details.tests?.header?.status ?? 200,
-      bl_health_status: authCheck.status, // 'ok' | 'invalid_token' | 'wrong_product' | 'network_error'
-      data: browserlessData
-    }), {
-      status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+        // Add metrics for self-checks
+        browserlessData.metrics = {
+          requests_pre: browserlessData.requests?.length || 0,
+          cookies_pre_count: browserlessData.cookies_pre?.length || 0,
+          set_cookie_events_pre_count: browserlessData.set_cookie_headers_pre?.length || 0
+        };
+
+        return new Response(JSON.stringify({
+          success: true,
+          trace_id: traceId,
+          execution_time_ms: Date.now() - startTime,
+          bl_status_code: authCheck.details.tests?.query?.status ?? authCheck.details.tests?.header?.status ?? 200,
+          bl_health_status: authCheck.status, // 'ok' | 'invalid_token' | 'wrong_product' | 'network_error'
+          data: browserlessData
+        }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
 
   } catch (error) {
     console.log('❌ Function error:', error.message, error.stack);

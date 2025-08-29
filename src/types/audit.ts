@@ -82,6 +82,11 @@ export interface InternalAuditJson {
   };
   verdict: 'COMPLIANT' | 'NON_COMPLIANT' | 'INCOMPLETE';
   reasons: string[];
+  metrics?: {
+    requests_pre: number;
+    cookies_pre_count: number;
+    set_cookie_events_pre_count: number;
+  };
 }
 
 export interface AuditData {

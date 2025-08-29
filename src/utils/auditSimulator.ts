@@ -2,6 +2,7 @@ import { AuditData, InternalAuditJson } from '@/types/audit';
 import { supabase } from '@/integrations/supabase/client';
 import { addQualityChecks } from './qualityChecks';
 import { performSelfCheck } from './selfCheck';
+import { getETldPlusOne, getHostFromUrl } from './domain';
 
 export interface ProgressCallback {
   (stepIndex: number, totalSteps: number): void;
@@ -281,28 +282,36 @@ async function transformRenderDataToInternalJson(
   
   await updateProgress?.(6);
 
-  // Extract data from renderData
+  // Extract data from renderData with HTTPS detection
   const finalUrl = renderData.finalUrl || 'unknown';
+  const urlObj = new URL(finalUrl);
+  const httpsConfigured = urlObj.protocol === 'https:';
+  
+  // Main domain using eTLD+1 parsing
+  const mainHost = urlObj.hostname.toLowerCase();
+  const mainDomain = getETldPlusOne(mainHost);
+  
   const allRequests = [...(renderData.requests_pre || []), ...(renderData.requests_post_accept || []), ...(renderData.requests_post_reject || [])];
   const allCookies = [...(renderData.cookies_pre || []), ...(renderData.cookies_post_accept || []), ...(renderData.cookies_post_reject || [])];
   
-  // Build third parties from network requests
+  // Build third parties using eTLD+1 for robust classification
   const thirdPartyHosts = new Set<string>();
-  const baseDomain = getDomain(finalUrl);
   
   allRequests.forEach((request: any) => {
     try {
-      const host = getDomain(request.url);
-      // Exclude first-party and its subdomains, and unknown hosts
-      if (host !== baseDomain && !host.endsWith(`.${baseDomain}`) && host !== 'unknown') {
-        thirdPartyHosts.add(host);
+      const requestHost = new URL(request.url).hostname.toLowerCase();
+      const requestDomain = getETldPlusOne(requestHost);
+      
+      // Only third-party if eTLD+1 differs
+      if (requestDomain !== mainDomain && requestHost !== 'unknown') {
+        thirdPartyHosts.add(requestHost);
       }
     } catch (e) {
       console.log('Error processing request URL:', e.message);
     }
   });
   
-  console.log(`🔍 Third-party analysis: baseDomain=${baseDomain}, thirdParties=${thirdPartyHosts.size}`);
+  console.log(`🔍 Third-party analysis: mainDomain=${mainDomain}, thirdParties=${thirdPartyHosts.size}`);
 
   const thirdParties = Array.from(thirdPartyHosts).map(host => ({
     host,
@@ -312,8 +321,8 @@ async function transformRenderDataToInternalJson(
   // Extract beacons from requests
   const beacons = extractBeaconsFromRequests(allRequests);
 
-  // Transform cookies with proper classification
-  const cookies = transformCookies(allCookies, baseDomain);
+  // Transform cookies with normalized domain handling
+  const cookies = transformCookiesWithNormalizedDomain(allCookies, mainDomain);
 
   // Transform storage (include all post-consent storage)
   const storagePost = { 
@@ -328,16 +337,24 @@ async function transformRenderDataToInternalJson(
   // Determine verdict
   const { verdict, reasons } = determineVerdict(thirdParties, beacons, cookies, storage, cmp, false);
 
+  // Store metrics for self-checks
+  const metrics = {
+    requests_pre: renderData.requests_pre?.length || 0,
+    cookies_pre_count: renderData.cookies_pre?.length || 0,
+    set_cookie_events_pre_count: renderData.set_cookie_events_pre?.length || 0
+  };
+
   return {
     final_url: finalUrl,
-    https: { supports: finalUrl.startsWith('https://'), redirects_http_to_https: true },
+    https: { supports: httpsConfigured, redirects_http_to_https: true },
     third_parties: thirdParties,
     beacons: beacons,
     cookies: cookies,
     storage: storage,
     cmp: cmp,
     verdict: verdict,
-    reasons: reasons
+    reasons: reasons,
+    metrics
   };
 }
 
@@ -397,44 +414,53 @@ function extractBeaconsFromRequests(requests: any[]): Array<{ host: string; samp
   return beacons;
 }
 
-function transformCookies(
+function transformCookiesWithNormalizedDomain(
   cookies: any[], 
-  baseDomain: string
+  mainDomain: string
 ): Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null; sources?: any; persisted?: boolean }> {
-  const transformedCookies: Array<{ name: string; domain: string; party: '1P' | '3P'; type: 'technical' | 'analytics' | 'marketing'; expiry_days: number | null; sources?: any; persisted?: boolean }> = [];
+  const norm = (d?: string) => (d || '').replace(/^\./, '');
+  
+  // Deduplicate using normalized domain key
+  const cookieMap = new Map<string, any>();
   
   cookies.forEach((cookie: any) => {
-    const cookieDomain = getDomain(cookie.domain || baseDomain);
-    const isFirstParty = cookieDomain === baseDomain || cookieDomain.endsWith(`.${baseDomain}`);
+    const normalizedDomain = norm(cookie.domain || mainDomain);
+    const key = `${cookie.name}|${normalizedDomain}|${cookie.path || '/'}`;
+    
+    // Use eTLD+1 for party classification
+    const cookieDomainETLD = getETldPlusOne(normalizedDomain);
+    const isFirstParty = cookieDomainETLD === mainDomain;
+    
+    // Calculate expiry in days with proper ms conversion
+    const cookieExpiryDays = cookie.expires ? Math.round((cookie.expires * 1000 - Date.now()) / 86400000) : null;
     
     // Classify cookie type
     let type: 'technical' | 'analytics' | 'marketing' = 'technical';
     
-    if (COOKIE_PATTERNS.analytics.some(pattern => cookie.name.includes(pattern))) {
-      type = 'analytics';
-    } else if (COOKIE_PATTERNS.marketing.some(pattern => cookie.name.includes(pattern))) {
-      type = 'marketing';
+    if (cookie.name) {
+      const lowerName = cookie.name.toLowerCase();
+      if (COOKIE_PATTERNS.marketing.some(pattern => lowerName.includes(pattern.toLowerCase()))) {
+        type = 'marketing';
+      } else if (COOKIE_PATTERNS.analytics.some(pattern => lowerName.includes(pattern.toLowerCase()))) {
+        type = 'analytics';
+      }
     }
-    
-    // Calculate expiry days
-    let expiryDays: number | null = null;
-    if (cookie.expires && cookie.expires > 0) {
-      const now = Date.now() / 1000;
-      expiryDays = Math.round((cookie.expires - now) / (24 * 60 * 60));
+
+    const existing = cookieMap.get(key);
+    if (!existing || (cookieExpiryDays && (!existing.expiry_days || cookieExpiryDays > existing.expiry_days))) {
+      cookieMap.set(key, {
+        name: cookie.name || 'unknown',
+        domain: normalizedDomain,
+        party: isFirstParty ? '1P' : '3P',
+        type: type,
+        expiry_days: cookieExpiryDays,
+        sources: { cdp: true },
+        persisted: true
+      });
     }
-    
-    transformedCookies.push({
-      name: cookie.name,
-      domain: cookieDomain,
-      party: isFirstParty ? '1P' : '3P',
-      type: type,
-      expiry_days: expiryDays,
-      sources: cookie.sources || { jar: true, setCookie: false, document: false },
-      persisted: cookie.persisted !== false
-    });
   });
 
-  return transformedCookies;
+  return Array.from(cookieMap.values());
 }
 
 function transformStorage(

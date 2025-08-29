@@ -1,5 +1,6 @@
-// Quality checks and INCOMPLETE banner generation
+// Quality checks and INCOMPLETE banner generation using proper data sources
 import { InternalAuditJson } from '@/types/audit';
+import { getETldPlusOne, getHostFromUrl } from './domain';
 
 export function addQualityChecks(
   managementSummary: any,
@@ -9,20 +10,28 @@ export function addQualityChecks(
   const issues: string[] = [];
   let isIncomplete = false;
 
-  // Quality Check 1: Network capture validation
+  // Quality Check 1: Network capture validation - use proper metrics
   const reqsPre = renderData?.requests_pre?.length || 0;
-  const reqsPostAccept = renderData?.requests_post_accept?.length || 0;
-  const reqsPostReject = renderData?.requests_post_reject?.length || 0;
+  const requestsTotal = renderData?.requests?.length || 0;
+  const networkOk = reqsPre > 0 || requestsTotal > 0;
   
-  if (reqsPre === 0 && reqsPostAccept === 0 && reqsPostReject === 0) {
+  if (!networkOk) {
     issues.push('Network capture empty (CDP not bound)');
     isIncomplete = true;
   }
 
-  // Quality Check 2: Cookie enumeration consistency
-  const cookiesSummaryCount = (renderData?.cookies_pre?.length || 0) + 
-                             (renderData?.cookies_post_accept?.length || 0) + 
-                             (renderData?.cookies_post_reject?.length || 0);
+  // Quality Check 2: Cookie enumeration consistency - normalized counting
+  const norm = (d?: string) => (d || '').replace(/^\./, '');
+  const mergedCookieMap = new Map<string, any>();
+  
+  // Merge cookies with normalized domains
+  [...(renderData?.cookies_pre || []), ...(renderData?.cookies_post_accept || []), ...(renderData?.cookies_post_reject || [])]
+    .forEach(cookie => {
+      const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
+      mergedCookieMap.set(key, cookie);
+    });
+  
+  const cookiesSummaryCount = mergedCookieMap.size;
   const cookiesTableCount = internalJson.cookies.length;
   
   if (cookiesSummaryCount !== cookiesTableCount) {
@@ -30,15 +39,16 @@ export function addQualityChecks(
     isIncomplete = true;
   }
 
-  // Quality Check 3: Third parties consistency  
-  const firstPartyDomain = getDomain(internalJson.final_url);
+  // Quality Check 3: Third parties consistency using eTLD+1
+  const mainHost = getHostFromUrl(internalJson.final_url);
+  const mainDomain = getETldPlusOne(mainHost);
   const thirdPartyDomains = new Set(
     [...(renderData?.requests_pre || []), ...(renderData?.requests_post_accept || []), ...(renderData?.requests_post_reject || [])]
-      .map((req: any) => getDomain(req.url))
-      .filter((domain: string) => {
-        if (domain === 'unknown') return false;
-        // Exclude first-party and its subdomains
-        return domain !== firstPartyDomain && !domain.endsWith('.' + firstPartyDomain);
+      .map((req: any) => getHostFromUrl(req.url))
+      .filter((host: string) => {
+        if (host === 'unknown') return false;
+        const hostDomain = getETldPlusOne(host);
+        return hostDomain !== mainDomain;
       })
   );
   
@@ -51,11 +61,11 @@ export function addQualityChecks(
 
   // Quality Check 4: Data sending validation (only flag for third-party tracking)
   const hasThirdPartyTracking = internalJson.beacons.some(beacon => {
-    const beaconDomain = getDomain(beacon.sample_url);
+    const beaconHost = getHostFromUrl(beacon.sample_url);
+    const beaconDomain = getETldPlusOne(beaconHost);
     return beacon.params.length > 0 && 
-           beaconDomain !== firstPartyDomain && 
-           !beaconDomain.endsWith('.' + firstPartyDomain) &&
-           beaconDomain !== 'unknown';
+           beaconDomain !== mainDomain &&
+           beaconHost !== 'unknown';
   });
   const hasDataSending = renderData?.data_sent_to_third_parties?.length > 0;
   
@@ -76,12 +86,4 @@ export function addQualityChecks(
   return managementSummary;
 }
 
-// Helper function to extract domain
-function getDomain(url: string): string {
-  try {
-    const urlObj = new URL(url);
-    return urlObj.hostname.toLowerCase().replace(/^www\./, '');
-  } catch {
-    return 'unknown';
-  }
-}
+// Helper function to extract domain - REMOVED, using domain.ts utilities
