@@ -331,6 +331,503 @@ async function checkBrowserlessAuth(token: string) {
   return { status, details: result };
 }
 
+// =================== MODULAR ARCHITECTURE ===================
+
+// ==== Phase Controller ====
+class PhaseController {
+  private phase: 'pre' | 'post_accept' | 'post_reject' = 'pre';
+  
+  setPre() { this.phase = 'pre'; }
+  setAccept() { this.phase = 'post_accept'; }
+  setReject() { this.phase = 'post_reject'; }
+  get() { return this.phase; }
+}
+
+// ==== Session Manager ====
+class SessionManager {
+  sessions = new Map<string, { type: 'page' | 'iframe' | 'worker'; frameId?: string; url?: string }>();
+  inflight = 0;
+  ws: WebSocket | null = null;
+  logger: any;
+  
+  constructor(ws: WebSocket, logger: any) {
+    this.ws = ws;
+    this.logger = logger;
+  }
+  
+  async attachHandlers() {
+    if (!this.ws) return;
+    
+    // Auto-attach to all targets
+    await this.sendCommand('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      filter: [
+        { type: 'page' },
+        { type: 'iframe' },
+        { type: 'worker' }
+      ]
+    });
+    await this.logger.log('info', '🎯 Auto-attach configured for page/iframe/worker');
+  }
+  
+  async onAttachedToTarget(sessionId: string, type: string, targetId?: string) {
+    this.sessions.set(sessionId, { type: type as any });
+    await this.logger.log('info', `📎 Attached to ${type} session: ${sessionId}`);
+    
+    // Enable required domains for each session
+    await this.sendCommand('Runtime.enable', {}, sessionId);
+    await this.sendCommand('Network.enable', {
+      maxTotalBufferSize: 10000000,
+      maxResourceBufferSize: 5000000
+    }, sessionId);
+    await this.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    
+    if (type === 'page') {
+      await this.sendCommand('Page.enable', {}, sessionId);
+      await this.sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, sessionId);
+    }
+    
+    await this.logger.log('info', `✅ Domains enabled for ${type} session: ${sessionId}`);
+  }
+  
+  onNetworkRequestStart() {
+    this.inflight++;
+  }
+  
+  onNetworkRequestEnd() {
+    this.inflight = Math.max(0, this.inflight - 1);
+  }
+  
+  async waitForGlobalIdle(minQuietMs = 1500, timeoutMs = 15000): Promise<void> {
+    return new Promise((resolve) => {
+      let quietStart = 0;
+      const checkInterval = 100;
+      let totalWaited = 0;
+      
+      const check = () => {
+        totalWaited += checkInterval;
+        
+        if (this.inflight === 0) {
+          if (quietStart === 0) {
+            quietStart = Date.now();
+          } else if (Date.now() - quietStart >= minQuietMs) {
+            resolve();
+            return;
+          }
+        } else {
+          quietStart = 0;
+        }
+        
+        if (totalWaited >= timeoutMs) {
+          resolve();
+          return;
+        }
+        
+        setTimeout(check, checkInterval);
+      };
+      
+      setTimeout(check, checkInterval);
+    });
+  }
+  
+  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
+    if (!this.ws) return null;
+    
+    return new Promise((resolve) => {
+      const id = Date.now() + Math.random();
+      const message = sessionId 
+        ? { id, method, params, sessionId }
+        : { id, method, params };
+      
+      const timeout = setTimeout(() => resolve(null), 5000);
+      
+      const onMessage = (event: MessageEvent) => {
+        try {
+          const response = JSON.parse(event.data);
+          if (response.id === id) {
+            clearTimeout(timeout);
+            this.ws!.removeEventListener('message', onMessage);
+            resolve(response);
+          }
+        } catch {}
+      };
+      
+      this.ws!.addEventListener('message', onMessage);
+      this.ws!.send(JSON.stringify(message));
+    });
+  }
+}
+
+// ==== Events Pipeline ====
+class EventsPipeline {
+  phaseController: PhaseController;
+  sessionManager: SessionManager;
+  logger: any;
+  
+  // Storage for events by phase
+  setCookieEvents_pre: ParsedCookie[] = [];
+  setCookieEvents_post_accept: ParsedCookie[] = [];
+  setCookieEvents_post_reject: ParsedCookie[] = [];
+  
+  requestMap = new Map();
+  responseInfo = new Map();
+  
+  constructor(phaseController: PhaseController, sessionManager: SessionManager, logger: any) {
+    this.phaseController = phaseController;
+    this.sessionManager = sessionManager;
+    this.logger = logger;
+  }
+  
+  onNetworkRequestWillBeSent(event: any, sessionId: string) {
+    this.sessionManager.onNetworkRequestStart();
+    
+    const requestData = {
+      ...event,
+      sessionId,
+      phase: this.phaseController.get(),
+      timestamp: Date.now()
+    };
+    
+    this.requestMap.set(event.requestId, requestData);
+  }
+  
+  onNetworkResponseReceived(event: any, sessionId: string) {
+    this.responseInfo.set(event.requestId, {
+      ...event,
+      sessionId,
+      phase: this.phaseController.get()
+    });
+  }
+  
+  onNetworkResponseReceivedExtraInfo(event: any, sessionId: string) {
+    const headers = normalizeHeaderKeys(event.headers);
+    const setCookieHeaders = ensureArray(headers['set-cookie']);
+    
+    if (setCookieHeaders.length > 0) {
+      const responseData = this.responseInfo.get(event.requestId);
+      const responseUrl = responseData?.response?.url || 'unknown';
+      
+      for (const setCookieValue of setCookieHeaders) {
+        const cookie = parseSetCookieHeader(setCookieValue, responseUrl);
+        
+        const phase = this.phaseController.get();
+        if (phase === 'pre') {
+          this.setCookieEvents_pre.push(cookie);
+        } else if (phase === 'post_accept') {
+          this.setCookieEvents_post_accept.push(cookie);
+        } else if (phase === 'post_reject') {
+          this.setCookieEvents_post_reject.push(cookie);
+        }
+      }
+    }
+  }
+  
+  onNetworkLoadingFinished(event: any, sessionId: string) {
+    this.sessionManager.onNetworkRequestEnd();
+  }
+  
+  onNetworkLoadingFailed(event: any, sessionId: string) {
+    this.sessionManager.onNetworkRequestEnd();
+  }
+}
+
+// ==== Snapshot Builder ====
+class SnapshotBuilder {
+  eventsPipeline: EventsPipeline;
+  sessionManager: SessionManager;
+  logger: any;
+  
+  constructor(eventsPipeline: EventsPipeline, sessionManager: SessionManager, logger: any) {
+    this.eventsPipeline = eventsPipeline;
+    this.sessionManager = sessionManager;
+    this.logger = logger;
+  }
+  
+  async buildSnapshot(phase: 'pre' | 'post_accept' | 'post_reject', pageSessionId: string) {
+    await this.logger.log('info', `📸 Building ${phase} snapshot`);
+    
+    // Get persisted cookies as secondary data
+    const persistedCookies = await this.getPersistedCookies(pageSessionId);
+    
+    // Get storage data
+    const storage = await this.getStorageData(pageSessionId);
+    
+    // Get requests for this phase
+    const requests = Array.from(this.eventsPipeline.requestMap.values())
+      .filter((r: any) => r.phase === phase);
+    
+    // Get server-set cookies for this phase (primary)
+    let serverSetCookies: ParsedCookie[] = [];
+    if (phase === 'pre') {
+      serverSetCookies = this.eventsPipeline.setCookieEvents_pre;
+    } else if (phase === 'post_accept') {
+      serverSetCookies = this.eventsPipeline.setCookieEvents_post_accept;
+    } else if (phase === 'post_reject') {
+      serverSetCookies = this.eventsPipeline.setCookieEvents_post_reject;
+    }
+    
+    await this.logger.log('info', `📊 ${phase} snapshot: ${serverSetCookies.length} server-set cookies, ${persistedCookies.length} persisted, ${requests.length} requests`);
+    
+    return {
+      serverSetCookies,
+      persistedCookies,
+      storage,
+      requests
+    };
+  }
+  
+  private async getPersistedCookies(pageSessionId: string) {
+    try {
+      const result = await this.sessionManager.sendCommand('Network.getAllCookies', {}, pageSessionId) as any;
+      return result?.result?.cookies || [];
+    } catch {
+      return [];
+    }
+  }
+  
+  private async getStorageData(pageSessionId: string) {
+    try {
+      // Get localStorage and sessionStorage
+      const localStorageResult = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: `(() => {
+          try {
+            const items = {};
+            for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key) items[key] = localStorage.getItem(key);
+            }
+            return { type: 'localStorage', items };
+          } catch (e) {
+            return { type: 'localStorage', items: {}, error: e.message };
+          }
+        })()`
+      }, pageSessionId) as any;
+      
+      const sessionStorageResult = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: `(() => {
+          try {
+            const items = {};
+            for (let i = 0; i < sessionStorage.length; i++) {
+              const key = sessionStorage.key(i);
+              if (key) items[key] = sessionStorage.getItem(key);
+            }
+            return { type: 'sessionStorage', items };
+          } catch (e) {
+            return { type: 'sessionStorage', items: {}, error: e.message };
+          }
+        })()`
+      }, pageSessionId) as any;
+      
+      return {
+        localStorage: localStorageResult?.result?.value?.items || {},
+        sessionStorage: sessionStorageResult?.result?.value?.items || {}
+      };
+    } catch {
+      return { localStorage: {}, sessionStorage: {} };
+    }
+  }
+  
+  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
+    return this.sessionManager.sendCommand(method, params, sessionId);
+  }
+}
+
+// ==== CMP Hunter ====
+class CMPHunter {
+  sessionManager: SessionManager;
+  logger: any;
+  
+  constructor(sessionManager: SessionManager, logger: any) {
+    this.sessionManager = sessionManager;
+    this.logger = logger;
+  }
+  
+  async findAndClickCMP(action: 'accept' | 'reject', pageSessionId: string): Promise<{ clicked: boolean; details?: any }> {
+    await this.logger.log('info', `🎯 Hunting for CMP ${action} button across all frames`);
+    
+    // Get frame tree
+    const frameTreeResult = await this.sendCommand('Page.getFrameTree', {}, pageSessionId) as any;
+    const frames = this.extractAllFrames(frameTreeResult?.result?.frameTree);
+    
+    // Try each frame
+    for (const frame of frames) {
+      const result = await this.tryClickInFrame(action, frame.id, pageSessionId);
+      if (result.clicked) {
+        await this.logger.log('info', `✅ CMP ${action} clicked in frame ${frame.id}`);
+        return result;
+      }
+    }
+    
+    // Try with MutationObserver fallback
+    await this.logger.log('info', '🔍 Setting up MutationObserver for dynamic CMP detection');
+    const observerResult = await this.setupMutationObserver(action, pageSessionId);
+    
+    return observerResult;
+  }
+  
+  private extractAllFrames(frameTree: any): any[] {
+    if (!frameTree) return [];
+    
+    const frames = [frameTree.frame];
+    if (frameTree.childFrames) {
+      for (const child of frameTree.childFrames) {
+        frames.push(...this.extractAllFrames(child));
+      }
+    }
+    return frames;
+  }
+  
+  private async tryClickInFrame(action: 'accept' | 'reject', frameId: string, pageSessionId: string) {
+    const expression = this.buildCMPFinderExpression(action);
+    
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression,
+        contextId: frameId
+      }, pageSessionId) as any;
+      
+      if (result?.result?.value?.clicked) {
+        return { clicked: true, details: result.result.value };
+      }
+    } catch (error) {
+      await this.logger.log('debug', `Frame ${frameId} evaluation failed: ${error}`);
+    }
+    
+    return { clicked: false };
+  }
+  
+  private buildCMPFinderExpression(action: 'accept' | 'reject'): string {
+    return `(() => {
+      const selectors = {
+        onetrust: {
+          banner: '#onetrust-banner-sdk, .ot-sdk-container',
+          accept: '#onetrust-accept-btn-handler, .ot-pc-refuse-all-handler',
+          reject: '#onetrust-reject-all-handler, #onetrust-pc-btn-handler, .ot-pc-refuse-all-handler'
+        },
+        cookiescript: {
+          banner: '#cookiescript_injected, [data-cs-c]',
+          accept: '[data-cs-accept-all], .cs-accept-all',
+          reject: '[data-cs-reject-all], .cs-reject-all'
+        },
+        cookiebot: {
+          banner: '#CybotCookiebotDialog, .CybotCookiebotDialog',
+          accept: '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll, .CybotCookiebotDialogBodyButton[data-cookie-level="all"]',
+          reject: '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowallSelection, .CybotCookiebotDialogBodyButton[data-cookie-level="functional"]'
+        },
+        generic: {
+          banner: '[id*="cookie"], [class*="consent"], [data-testid*="consent"]',
+          accept: '[id*="accept"], [class*="accept"], [data-testid*="accept"]',
+          reject: '[id*="reject"], [class*="reject"], [data-testid*="reject"]'
+        }
+      };
+      
+      function isVisible(el) {
+        return el && (el.offsetParent !== null || el.getClientRects().length > 0);
+      }
+      
+      function searchInShadowRoots(root, selector) {
+        const elements = Array.from(root.querySelectorAll(selector));
+        const shadowHosts = Array.from(root.querySelectorAll('*')).filter(el => el.shadowRoot);
+        
+        for (const host of shadowHosts) {
+          elements.push(...searchInShadowRoots(host.shadowRoot, selector));
+        }
+        
+        return elements;
+      }
+      
+      function findByText(action) {
+        const patterns = action === 'accept' 
+          ? [/accept.*all/i, /accept.*cookies/i, /allow.*all/i, /súhlas/i, /prijať/i]
+          : [/reject.*all/i, /decline/i, /refuse/i, /odmietnuť/i, /zamietnuť/i];
+        
+        const allElements = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"]'));
+        
+        return allElements.find(el => {
+          const text = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+          return patterns.some(pattern => pattern.test(text)) && isVisible(el);
+        });
+      }
+      
+      // Try known CMP selectors first
+      for (const [cmpName, config] of Object.entries(selectors)) {
+        const targetSelector = action === 'accept' ? config.accept : config.reject;
+        const elements = searchInShadowRoots(document, targetSelector);
+        
+        for (const el of elements) {
+          if (isVisible(el)) {
+            el.click();
+            return { 
+              clicked: true, 
+              cmp: cmpName, 
+              selector: targetSelector,
+              method: 'selector'
+            };
+          }
+        }
+      }
+      
+      // Fallback to text-based search
+      const textElement = findByText('${action}');
+      if (textElement) {
+        textElement.click();
+        return { 
+          clicked: true, 
+          cmp: 'unknown', 
+          selector: textElement.tagName + (textElement.id ? '#' + textElement.id : ''),
+          method: 'text',
+          text: textElement.textContent.trim().slice(0, 50)
+        };
+      }
+      
+      return { clicked: false };
+    })()`;
+  }
+  
+  private async setupMutationObserver(action: 'accept' | 'reject', pageSessionId: string) {
+    const observerExpression = `
+      new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          observer.disconnect();
+          resolve({ clicked: false, reason: 'timeout' });
+        }, 10000);
+        
+        const observer = new MutationObserver(() => {
+          ${this.buildCMPFinderExpression(action).slice(8, -4)} // Remove wrapper
+          const result = (() => { ${this.buildCMPFinderExpression(action).slice(8, -4)} })();
+          if (result.clicked) {
+            clearTimeout(timeout);
+            observer.disconnect();
+            resolve(result);
+          }
+        });
+        
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true,
+          attributes: false
+        });
+      })
+    `;
+    
+    try {
+      const result = await this.sendCommand('Runtime.evaluate', {
+        expression: observerExpression,
+        awaitPromise: true
+      }, pageSessionId) as any;
+      
+      return result?.result?.value || { clicked: false };
+    } catch {
+      return { clicked: false };
+    }
+  }
+  
+  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
+    return this.sessionManager.sendCommand(method, params, sessionId);
+  }
+}
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -461,11 +958,16 @@ serve(async (req) => {
       });
     }
 
-    // Initialize data collection structures
-    const requestMap = new Map();
-    const responseInfo = new Map();
-    const responseExtraInfo = new Map();
-    const postDataMap = new Map(); // For POST body tracking
+    // Initialize new modular architecture
+    await logger.log('info', '🏗️ Initializing modular three-phase architecture');
+    
+    const phaseController = new PhaseController();
+    let sessionManager: SessionManager;
+    let eventsPipeline: EventsPipeline;
+    let snapshotBuilder: SnapshotBuilder;
+    let cmpHunter: CMPHunter;
+    
+    // Legacy data structures for backward compatibility
     const trackingParams: any[] = [];
     const hostMap = {
       requests: { firstParty: new Set(), thirdParty: new Set() },
@@ -474,16 +976,12 @@ serve(async (req) => {
       links: { firstParty: new Set(), thirdParty: new Set() }
     };
     
-    const setCookieEvents_pre: ParsedCookie[] = [];
-    const setCookieEvents_post_accept: ParsedCookie[] = [];
-    const setCookieEvents_post_reject: ParsedCookie[] = [];
     let pageSessionId = '';
-    let currentPhase: 'pre' | 'post_accept' | 'post_reject' = 'pre';
     let finalUrl = url;
 
-    // Connect to Browserless WebSocket
+    // Connect to Browserless WebSocket using new modular architecture
     await logger.log('info', '🔗 Connecting to Browserless WebSocket...');
-    await logger.log('info', '🌐 Starting Raw WebSocket CDP analysis...');
+    await logger.log('info', '🌐 Starting modular three-phase CDP analysis...');
 
     const baseUrl = new URL(BROWSERLESS_BASE);
     const wsUrl = `wss://${baseUrl.host}?token=${token}`;
@@ -493,42 +991,25 @@ serve(async (req) => {
       let messageId = 1;
       const pendingCommands = new Map();
       
-      // Collection data
-      const cookies_pre_load: any[] = [];
-      const cookies_pre_idle: any[] = [];
-      const cookies_pre_extra: any[] = [];
-      const cookies_post_accept: any[] = [];
-      const cookies_post_accept_extra: any[] = [];
-      const cookies_post_reject: any[] = [];
-      const cookies_post_reject_extra: any[] = [];
-      const storage_pre: any[] = [];
-      const storage_post_accept: any[] = [];
-      const storage_post_reject: any[] = [];
-      let requests_pre: any[] = [];
-      let requests_post_accept: any[] = [];
-      let requests_post_reject: any[] = [];
+      // Initialize modular components
+      sessionManager = new SessionManager(ws, logger);
+      eventsPipeline = new EventsPipeline(phaseController, sessionManager, logger);
+      snapshotBuilder = new SnapshotBuilder(eventsPipeline, sessionManager, logger);
+      cmpHunter = new CMPHunter(sessionManager, logger);
 
-      // PATCH 3 - Network idle monitoring
-      let inflight = 0;
-      function onReqStart() { inflight++; }
-      function onReqEnd()   { inflight = Math.max(0, inflight - 1); }
-
-      function waitForNetworkIdle(minMs = 1500, totalTimeout = 15000) {
-        return new Promise<void>((resolve) => {
-          const start = Date.now();
-          let idleSince = Date.now();
-          const check = () => {
-            if (inflight === 0) {
-              if (Date.now() - idleSince >= minMs) return resolve();
-            } else {
-              idleSince = Date.now();
-            }
-            if (Date.now() - start > totalTimeout) return resolve();
-            setTimeout(check, 100);
-          };
-          check();
+      const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
+        const id = messageId++;
+        const message = sessionId ? 
+          { id, method, params, sessionId } : 
+          { id, method, params };
+        ws.send(JSON.stringify(message));
+        return new Promise((resolve, reject) => {
+          pendingCommands.set(id, { resolve, reject });
         });
-      }
+      };
+      
+      // Integrate sendCommand into SessionManager
+      (sessionManager as any).sendCommand = sendCommand;
 
       const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
         const id = messageId++;
@@ -541,7 +1022,7 @@ serve(async (req) => {
         });
       };
 
-      // Add permanent CDP event handler using addEventListener to prevent overwrites
+      // Add permanent CDP event handler using modular architecture
       ws.addEventListener('message', (event) => {
         try {
           const message = JSON.parse(event.data);
@@ -558,74 +1039,26 @@ serve(async (req) => {
             return;
           }
           
-          // PATCH 2 - Tolerant sessionId filter for Network events
-          if (message.method?.startsWith('Network.')) {
-            // If has sessionId and it's not our pageSession, ignore
-            if (message.sessionId && message.sessionId !== pageSessionId) return;
-            // If sessionId is missing, let it pass (some extraInfo events don't have stable sessionId)
-          } else {
-            if (message.sessionId && message.sessionId !== pageSessionId) return;
+          // Handle Target.attachedToTarget events
+          if (message.method === 'Target.attachedToTarget') {
+            const { sessionId, targetInfo } = message.params;
+            sessionManager.onAttachedToTarget(sessionId, targetInfo.type, targetInfo.targetId);
+            return;
           }
           
-          // PATCH 3 - Add network idle tracking hooks
-          if (message.method === 'Network.requestWillBeSent') onReqStart();
-          if (message.method === 'Network.loadingFinished' || message.method === 'Network.loadingFailed') onReqEnd();
-
-          // Handle Network events for request tracking
+          // Route all Network events to the pipeline (no sessionId filtering for cross-frame support)
+          const sessionId = message.sessionId || pageSessionId;
+          
           if (message.method === 'Network.requestWillBeSent') {
+            eventsPipeline.onNetworkRequestWillBeSent(message.params, sessionId);
+            
+            // Legacy tracking for backward compatibility
             const params = message.params;
             const requestHost = new URL(params.request.url).hostname;
             const mainHost = new URL(finalUrl || url).hostname;
             const mainDomain = getETldPlusOneLite(mainHost);
             const requestDomain = getETldPlusOneLite(requestHost);
             const isFirstParty = requestDomain === mainDomain;
-            
-            requestMap.set(params.requestId, {
-              requestId: params.requestId,
-              url: params.request.url,
-              method: params.request.method,
-              host: requestHost,
-              phase: currentPhase,
-              isFirstParty,
-              timestamp: params.timestamp,
-              type: params.type,
-              headers: params.request.headers
-            });
-            
-            // Extract POST data if available
-            if (params.request.postData) {
-              try {
-                const contentType = params.request.headers['Content-Type'] || params.request.headers['content-type'] || '';
-                if (contentType.includes('application/json')) {
-                  postDataMap.set(params.requestId, safeJsonParse(params.request.postData));
-                } else if (contentType.includes('application/x-www-form-urlencoded')) {
-                  postDataMap.set(params.requestId, parseFormUrlEncoded(params.request.postData));
-                } else {
-                  postDataMap.set(params.requestId, params.request.postData);
-                }
-              } catch {
-                // Ignore POST data parsing errors
-              }
-            } else if (params.request.hasPostData) {
-              // POST fallback: fetch post data using Network.getRequestPostData
-              const headers = params.request.headers || {};
-              const ct = (headers['Content-Type'] || headers['content-type'] || '').toLowerCase();
-              
-              sendCommand('Network.getRequestPostData', { requestId: params.requestId }, pageSessionId)
-                .then((res: any) => {
-                  const body = res.result?.postData ?? '';
-                  if (ct.includes('application/json')) {
-                    postDataMap.set(params.requestId, safeJsonParse(body));
-                  } else if (ct.includes('application/x-www-form-urlencoded')) {
-                    postDataMap.set(params.requestId, parseFormUrlEncoded(body));
-                  } else {
-                    postDataMap.set(params.requestId, body);
-                  }
-                })
-                .catch(async () => {
-                  await logger.log('warn', 'POST fallback getRequestPostData failed', { trace_id: traceId, requestId: params.requestId });
-                });
-            }
             
             if (isFirstParty) {
               hostMap.requests.firstParty.add(requestHost);
@@ -634,45 +1067,20 @@ serve(async (req) => {
             }
           }
           
-          // Handle response info
           if (message.method === 'Network.responseReceived') {
-            const params = message.params;
-            responseInfo.set(params.requestId, {
-              url: params.response.url,
-              status: params.response.status,
-              headers: params.response.headers,
-              mimeType: params.response.mimeType
-            });
+            eventsPipeline.onNetworkResponseReceived(message.params, sessionId);
           }
           
-          // PATCH 1 - Handle Set-Cookie headers with normalized keys
           if (message.method === 'Network.responseReceivedExtraInfo') {
-            const params = message.params;
-            responseExtraInfo.set(params.requestId, params);
-
-            const headersNorm = normalizeHeaderKeys(params.headers);
-            const setCookieValues = ensureArray(headersNorm['set-cookie']); // key is always lowercase
-            const respUrl = responseInfo.get(params.requestId)?.url || finalUrl;
-
-            for (const raw of setCookieValues) {
-              const parsed = parseSetCookieHeader(String(raw), respUrl);
-              if (currentPhase === 'pre') setCookieEvents_pre.push(parsed);
-              else if (currentPhase === 'post_accept') setCookieEvents_post_accept.push(parsed);
-              else setCookieEvents_post_reject.push(parsed);
-            }
+            eventsPipeline.onNetworkResponseReceivedExtraInfo(message.params, sessionId);
           }
           
-          // Handle POST data
-          if (message.method === 'Network.requestWillBeSentExtraInfo') {
-            const params = message.params;
-            if (params.headers && params.headers['content-type']?.includes('application/x-www-form-urlencoded')) {
-              // We'll get the actual POST data in a separate event
-            }
+          if (message.method === 'Network.loadingFinished') {
+            eventsPipeline.onNetworkLoadingFinished(message.params, sessionId);
           }
           
-          // Handle request POST data
-          if (message.method === 'Network.getRequestPostData') {
-            // This is a response to our manual getRequestPostData call
+          if (message.method === 'Network.loadingFailed') {
+            eventsPipeline.onNetworkLoadingFailed(message.params, sessionId);
           }
           
         } catch (error) {
@@ -684,28 +1092,14 @@ serve(async (req) => {
         try {
           await logger.log('info', '🔗 WebSocket connected to Browserless');
           
+          // Initialize session manager and set up auto-attach
+          await sessionManager.attachHandlers();
+          
           // Phase 1: Get targets and attach to page
           await logger.log('info', '🎯 Getting browser targets...');
           const targets: any = await sendCommand('Target.getTargets');
           
           await logger.log('info', `TARGET CHECK ${JSON.stringify(targets.result.targetInfos.map((t: any) => ({ type: t.type, url: t.url })))}`);
-          
-          // Set auto-attach for new page targets with fallback
-          try {
-            await sendCommand('Target.setAutoAttach', {
-              autoAttach: true,
-              flatten: true,
-              waitForDebuggerOnStart: false,
-              filter: [{ type: 'page' }]
-            });
-          } catch (error) {
-            await logger.log('warn', 'Target.setAutoAttach with filter failed, retrying without filter', { error: String(error) });
-            await sendCommand('Target.setAutoAttach', {
-              autoAttach: true,
-              flatten: true,
-              waitForDebuggerOnStart: false
-            });
-          }
           
           // Find existing page target
           const pageTarget = targets.result.targetInfos.find((t: any) => t.type === 'page');
@@ -723,19 +1117,15 @@ serve(async (req) => {
           await logger.log('info', `📎 Target attached: page [${pageTarget.targetId}]`);
           await logger.log('info', `✅ Attached to page target: ${pageSessionId}`);
           
-          // Enable CDP domains on page session
-          await logger.log('info', `🔧 Enabling CDP domains on page session: ${pageSessionId}`);
+          // Enable CDP domains on page session (handled by SessionManager for new attachments)
           await sendCommand('Page.enable', {}, pageSessionId);
           await sendCommand('Runtime.enable', {}, pageSessionId);
           await sendCommand('Network.enable', {
             maxTotalBufferSize: 10_000_000,
             maxResourceBufferSize: 5_000_000
           }, pageSessionId);
-          
-          // PATCH 3 - Disable cache and enable lifecycle events
           await sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId);
           await sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, pageSessionId);
-          
           await sendCommand('DOMStorage.enable', {}, pageSessionId);
           
           await logger.log('info', `📍 CDP_bound: true`);
@@ -754,6 +1144,12 @@ serve(async (req) => {
             }
           }, pageSessionId);
           
+          // ==================== THREE-PHASE EXECUTION ====================
+          
+          // PHASE 1: PRE-CONSENT
+          phaseController.setPre();
+          await logger.log('info', '🚀 PHASE 1: Pre-consent data collection');
+          
           // Navigate to URL
           await logger.log('info', '🌐 Navigating to URL...');
           await sendCommand('Page.navigate', { url }, pageSessionId);
@@ -762,34 +1158,11 @@ serve(async (req) => {
           });
           await logger.log('info', '✅ Page load event fired');
           
-          // PATCH 3 - Use network idle instead of static timeouts
-          await waitForNetworkIdle(1500, 15000);
+          // Wait for global idle (invariant: before every snapshot)
+          await sessionManager.waitForGlobalIdle(1500, 15000);
           
-          // Phase 2: Multi-timing cookie collection
-          
-          // M1: Post-load cookies
-          await logger.log('info', '🍪 Collecting pre-consent cookies (M1: post-load)...');
-          const postLoadCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-          cookies_pre_load.push(...(postLoadCookies.result?.cookies || []));
-          await logger.log('info', `Cookies pre-load: ${cookies_pre_load.length}`);
-          
-          // PATCH 3 - Use network idle for cookie collection timing
-          await waitForNetworkIdle(800, 8000);
-          
-          // M2: Post-idle cookies
-          await logger.log('info', '🍪 Collecting pre-consent cookies (M2: post-idle)...');
-          const postIdleCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-          cookies_pre_idle.push(...(postIdleCookies.result?.cookies || []));
-          await logger.log('info', `Cookies pre-idle: ${cookies_pre_idle.length}`);
-          
-          // Wait for extra idle period
-          await waitForNetworkIdle(800, 8000);
-          
-          // M3: Extra-idle cookies
-          await logger.log('info', '🍪 Collecting pre-consent cookies (M3: extra-idle)...');
-          const extraIdleCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-          cookies_pre_extra.push(...(extraIdleCookies.result?.cookies || []));
-          await logger.log('info', `Cookies pre-extra: ${cookies_pre_extra.length}`);
+          // Take pre-consent snapshot
+          const preSnapshot = await snapshotBuilder.buildSnapshot('pre', pageSessionId);
           
           // Get final URL
           const pageInfo: any = await sendCommand('Runtime.evaluate', {
@@ -800,195 +1173,86 @@ serve(async (req) => {
             finalUrl = pageInfo.result.result.value;
           }
           
-          // Merge and deduplicate cookies
-          await logger.log('info', '🍪 Merging pre-consent cookies from multiple collections...');
-          const allPreCookies = [...cookies_pre_load, ...cookies_pre_idle, ...cookies_pre_extra];
-          const cookieMap = new Map();
+          // PHASE 2: CMP INTERACTION (ACCEPT)
+          await logger.log('info', '🎯 PHASE 2: CMP hunting and accept flow');
           
-          for (const cookie of allPreCookies) {
-            const key = buildCookieKey({
-              name: cookie.name,
-              domain: cookie.domain,
-              path: cookie.path
+          const acceptResult = await cmpHunter.findAndClickCMP('accept', pageSessionId);
+          
+          if (acceptResult.clicked) {
+            phaseController.setAccept();
+            await logger.log('info', `✅ CMP Accept clicked: ${JSON.stringify(acceptResult.details)}`);
+            
+            // Wait for global idle (invariant)
+            await sessionManager.waitForGlobalIdle(1500, 8000);
+            
+            // Take post-accept snapshot
+            const postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', pageSessionId);
+            
+            await logger.log('info', 'DBG cookies_hdr_counts_post_accept', {
+              pre: eventsPipeline.setCookieEvents_pre.length,
+              post_accept: eventsPipeline.setCookieEvents_post_accept.length,
+              post_reject: eventsPipeline.setCookieEvents_post_reject.length,
+              trace_id: traceId
             });
             
-            if (!cookieMap.has(key)) {
-              // Calculate expiry days
-              let expiryDays: number | undefined;
-              if (cookie.expires !== -1) {
-                expiryDays = Math.round((cookie.expires * 1000 - Date.now()) / (1000 * 60 * 60 * 24));
-              }
-              
-              cookieMap.set(key, {
-                ...cookie,
-                expiryDays,
-                valueMasked: maskValue(cookie.value)
-              });
-            }
-          }
-          
-          const cookies_pre = Array.from(cookieMap.values());
-          await logger.log('info', `Cookies merged pre-consent: ${cookies_pre.length}`);
-          
-          // Collect current requests
-          requests_pre = Array.from(requestMap.values());
-          await logger.log('info', `REQUESTS PRE counts { cdp: ${requests_pre.length} }`);
-          
-          // Get current page state
-          const pageState: any = await sendCommand('Runtime.evaluate', {
-            expression: `({ url: window.location.href, ready: document.readyState })`
-          }, pageSessionId);
-          
-          await logger.log('info', `CDP ok ${JSON.stringify(pageState.result?.result?.value)}`);
-          
-          // Collect storage
-          try {
-            const origin: any = await sendCommand('Runtime.evaluate', {
-              expression: 'window.location.origin'
-            }, pageSessionId);
+            // PHASE 3: CMP INTERACTION (REJECT)
+            await logger.log('info', '🎯 PHASE 3: Reloading for reject flow');
             
-            const localStorage: any = await sendCommand('DOMStorage.getDOMStorageItems', {
-              storageId: { securityOrigin: origin.result.result.value, isLocalStorage: true }
-            }, pageSessionId);
+            // Reset to pre-phase and clear data
+            phaseController.setPre();
+            eventsPipeline.requestMap.clear();
             
-            const sessionStorage: any = await sendCommand('DOMStorage.getDOMStorageItems', {
-              storageId: { securityOrigin: origin.result.result.value, isLocalStorage: false }
-            }, pageSessionId);
+            // Reload page
+            await sendCommand('Page.reload', {}, pageSessionId);
+            await onceLoadFired(ws, pageSessionId).catch(async () => {
+              await logger.log('warn', '⏰ Reload timeout, proceeding');
+            });
             
-            storage_pre.push(...(localStorage.result?.entries || []), ...(sessionStorage.result?.entries || []));
-          } catch (error) {
-            await logger.log('warn', 'Storage collection failed', { error: String(error) });
-          }
-          
-          await logger.log('info', `Storage pre-consent: ${storage_pre.length} items`);
-          await logger.log('info', '✅ Pre-consent data collected');
-          await logger.log('info', `📊 Pre-consent stats: { cookies: ${cookies_pre.length}, setCookieEvents: ${setCookieEvents_pre.length}, storage: ${storage_pre.length}, requests: ${requests_pre.length} }`);
-          
-          // PATCH 3 - Debug logs for verification
-          await logger.log('info', 'DBG cookies_hdr_counts', {
-            pre: setCookieEvents_pre.length,
-            post_accept: setCookieEvents_post_accept.length,
-            post_reject: setCookieEvents_post_reject.length,
-            trace_id: traceId
-          });
-          
-          // Phase 4: CMP Detection and interaction
-          await logger.log('info', '🔍 Detecting CMP...');
-          
-          const cmpResult: any = await sendCommand('Runtime.evaluate', {
-            expression: `
-              (() => {
-                // OneTrust detection
-                if (window.OneTrust || document.querySelector('#onetrust-banner-sdk')) {
-                  return { detected: true, type: 'onetrust' };
-                }
-                
-                // CookieScript detection
-                if (window.CookieScript || document.querySelector('#cookiescript_injected')) {
-                  return { detected: true, type: 'cookiescript' };
-                }
-                
-                // Generic CMP detection
-                const genericSelectors = ['[id*="cookie"]', '[class*="consent"]', '[data-testid*="consent"]'];
-                for (const selector of genericSelectors) {
-                  if (document.querySelector(selector)) {
-                    return { detected: true, type: 'generic' };
-                  }
-                }
-                
-                return { detected: false };
-              })()
-            `
-          }, pageSessionId);
-          
-          await logger.log('info', `🔍 CMP detection result: ${JSON.stringify(cmpResult.result?.result?.value)}`);
-          
-          const cmpDetected = cmpResult.result?.result?.value?.detected;
-          const cmpType = cmpResult.result?.result?.value?.type;
-          
-          // Phase 4: CMP Interaction (Accept/Reject flows)
-          if (cmpDetected) {
-            await logger.log('info', `🤖 CMP detected (${cmpType}), attempting interactions...`);
+            // Wait for global idle
+            await sessionManager.waitForGlobalIdle(1500, 8000);
             
-            // Try Accept flow
-            currentPhase = 'post_accept';
-            const acceptResult: any = await sendCommand('Runtime.evaluate', {
-              expression: `
-                (() => {
-                  const selectors = ${JSON.stringify(CMP_SELECTORS[cmpType as keyof typeof CMP_SELECTORS] || CMP_SELECTORS.generic)};
-                  const acceptSelectors = [selectors.accept];
-                  
-                  for (const selector of acceptSelectors) {
-                    const elements = document.querySelectorAll(selector);
-                    for (const element of elements) {
-                      if (element.offsetParent !== null) { // visible check
-                        element.click();
-                        return { clicked: true, selector, text: element.textContent?.trim() };
-                      }
-                    }
-                  }
-                  return { clicked: false };
-                })()
-              `
-            }, pageSessionId);
+            // Try reject flow
+            const rejectResult = await cmpHunter.findAndClickCMP('reject', pageSessionId);
             
-            if (acceptResult.result?.result?.value?.clicked) {
-              await logger.log('info', `✅ Clicked Accept: ${acceptResult.result.result.value.selector}`);
+            if (rejectResult.clicked) {
+              phaseController.setReject();
+              await logger.log('info', `❌ CMP Reject clicked: ${JSON.stringify(rejectResult.details)}`);
               
-              // Wait and collect post-accept data
-              await waitForNetworkIdle(800, 8000);
+              // Wait for global idle
+              await sessionManager.waitForGlobalIdle(1500, 8000);
               
-              const postAcceptCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-              cookies_post_accept.push(...(postAcceptCookies.result?.cookies || []));
-              requests_post_accept = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_accept');
+              // Take post-reject snapshot
+              const postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', pageSessionId);
               
-              // Extra wait and collect post-accept-extra data
-              await waitForNetworkIdle(800, 8000);
-              
-              const postAcceptExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-              cookies_post_accept_extra.push(...(postAcceptExtraCookies.result?.cookies || []));
-              
-              await logger.log('info', `📊 Post-accept: cookies=${cookies_post_accept.length}, extra=${cookies_post_accept_extra.length}, requests=${requests_post_accept.length}`);
-              
-              // Debug log for post-accept phase
-              await logger.log('info', 'DBG cookies_hdr_counts_post_accept', {
-                pre: setCookieEvents_pre.length,
-                post_accept: setCookieEvents_post_accept.length,
-                post_reject: setCookieEvents_post_reject.length,
+              await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
+                pre: eventsPipeline.setCookieEvents_pre.length,
+                post_accept: eventsPipeline.setCookieEvents_post_accept.length,
+                post_reject: eventsPipeline.setCookieEvents_post_reject.length,
                 trace_id: traceId
               });
-              
-              // Reload page for reject test
-              currentPhase = 'pre';
-              requestMap.clear();
-              await sendCommand('Page.reload', {}, pageSessionId);
-              await onceLoadFired(ws, pageSessionId).catch(async () => {
-                await logger.log('warn', '⏰ Reload timeout, proceeding');
-              });
-              await waitForNetworkIdle(800, 8000);  // idle
-              await waitForNetworkIdle(800, 8000);  // extra-idle
-              
-              // Try Reject flow
-              currentPhase = 'post_reject';
-              const rejectResult: any = await sendCommand('Runtime.evaluate', {
-                expression: `
-                  (() => {
-                    const selectors = ${JSON.stringify(CMP_SELECTORS[cmpType as keyof typeof CMP_SELECTORS] || CMP_SELECTORS.generic)};
-                    const rejectSelectors = [selectors.reject];
-                    
-                    for (const selector of rejectSelectors) {
-                      const elements = document.querySelectorAll(selector);
-                      for (const element of elements) {
-                        if (element.offsetParent !== null) {
-                          element.click();
-                          return { clicked: true, selector, text: element.textContent?.trim() };
-                        }
-                      }
-                    }
-                    return { clicked: false };
-                  })()
-                `
-              }, pageSessionId);
+            } else {
+              await logger.log('info', '❌ CMP Reject click failed - no reject button found');
+            }
+          } else {
+            await logger.log('info', '❌ CMP Accept click failed - no CMP detected or button not found');
+          }
+          
+          // ==================== LEGACY DATA COMPATIBILITY ====================
+          // Build backward-compatible data structures for existing report logic
+          const cookies_pre = preSnapshot.persistedCookies;
+          const cookies_post_accept = postAcceptSnapshot?.persistedCookies || [];
+          const cookies_post_reject = postRejectSnapshot?.persistedCookies || [];
+          const requests_pre = preSnapshot.requests;
+          const requests_post_accept = postAcceptSnapshot?.requests || [];
+          const requests_post_reject = postRejectSnapshot?.requests || [];
+          const storage_pre = [preSnapshot.storage];
+          const storage_post_accept = postAcceptSnapshot ? [postAcceptSnapshot.storage] : [];
+          const storage_post_reject = postRejectSnapshot ? [postRejectSnapshot.storage] : [];
+          
+          // Use server-set cookies as primary data source
+          const setCookieEvents_pre = eventsPipeline.setCookieEvents_pre;
+          const setCookieEvents_post_accept = eventsPipeline.setCookieEvents_post_accept;
+          const setCookieEvents_post_reject = eventsPipeline.setCookieEvents_post_reject;
               
               if (rejectResult.result?.result?.value?.clicked) {
                 await logger.log('info', `❌ Clicked Reject: ${rejectResult.result.result.value.selector}`);
