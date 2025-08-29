@@ -380,7 +380,7 @@ serve(async (req) => {
             const { sessionId, targetInfo } = data.params;
             sessions.set(sessionId, targetInfo);
             console.log(`📎 Target attached: ${targetInfo.type} [${targetInfo.targetId}]`);
-          } else if (data.method === 'Network.requestWillBeSent' && data.sessionId === 'browser') {
+          } else if (data.method === 'Network.requestWillBeSent' && data.sessionId === pageSessionId) {
             requestCounter++;
             
             const params = data.params;
@@ -433,10 +433,6 @@ serve(async (req) => {
         }
       });
 
-      // A) Setup browser-level auto-attach
-      console.log('🌐 Setting up browser-level auto-attach...');
-      await sendCDPCommand('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, filter: [{ type: 'page' }] });
-      console.log('✅ Browser-level auto-attach enabled');
 
       // B) Get targets and attach to page
       console.log('🎯 Getting browser targets...');
@@ -670,10 +666,11 @@ serve(async (req) => {
       console.log('REQUESTS PRE counts', { cdp: Array.from(requestMap.values()).length });
       
       // Merge all pre-consent cookies (deduplicate by name+domain+path)
+      const norm = (d) => (d || '').replace(/^\./, '');
       const cookieMap = new Map();
       [cookies_pre_load, cookies_pre_idle, cookies_pre_extra].forEach(cookieList => {
         cookieList.forEach(cookie => {
-          const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+          const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
           if (!cookieMap.has(key)) {
             cookieMap.set(key, cookie);
           }
@@ -772,25 +769,31 @@ serve(async (req) => {
           await sendCDPCommand('Runtime.evaluate', {
             expression: `
               (() => {
-                const selectors = [
-                  'button[data-testid="accept-all"]',
-                  'button[aria-label*="Accept all"]',
-                  'button:contains("Accept all")',
-                  'button:contains("Prijať všetko")',
-                  'button:contains("Súhlasiť")',
-                  '.cookie-accept-all',
-                  '.accept-all-cookies',
-                  '[data-cy="accept-all"]'
-                ];
-                
-                for (const selector of selectors) {
-                  const btn = document.querySelector(selector);
-                  if (btn && btn.offsetParent !== null) {
-                    btn.click();
-                    return 'clicked: ' + selector;
+                function clickByText(selectors, texts) {
+                  // 1) priame CSS selektory
+                  for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null) { el.click(); return 'clicked:' + sel; }
                   }
+                  // 2) text v ľubovoľnom <button>
+                  const btns = Array.from(document.querySelectorAll('button'));
+                  for (const b of btns) {
+                    const t = (b.textContent || '').toLowerCase();
+                    if (texts.some(x => t.includes(x))) { b.click(); return 'clicked:text:' + t; }
+                  }
+                  // 3) XPath fallback
+                  const xp = texts.map(t => \`//button[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÄČĎÉÍĽĹŇÓÔŘŠŤÚÝŽ','abcdefghijklmnopqrstuvwxyzáäčďéíľĺňóôřšťúýž'),'\${t.toLowerCase()}')]\`).join(' | ');
+                  try {
+                    const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                    const node = r.singleNodeValue;
+                    if (node && node.offsetParent !== null) { node.click(); return 'clicked:xpath'; }
+                  } catch {}
+                  return 'no_button_found';
                 }
-                return 'no_button_found';
+                
+                const acceptSelectors = ['button[data-testid="accept-all"]','.cookie-accept-all','.accept-all-cookies','[data-cy="accept-all"]'];
+                const acceptTexts = ['accept all','prijať všetko','súhlasiť','prijať','allow all'];
+                return clickByText(acceptSelectors, acceptTexts);
               })()
             `
           }, pageSessionId);
@@ -809,7 +812,7 @@ serve(async (req) => {
           const postAcceptMap = new Map();
           [cookies_post_accept_1, cookies_post_accept_2].forEach(cookieList => {
             cookieList.forEach(cookie => {
-              const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+              const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
               if (!postAcceptMap.has(key)) {
                 postAcceptMap.set(key, cookie);
               }
@@ -835,25 +838,31 @@ serve(async (req) => {
             await sendCDPCommand('Runtime.evaluate', {
               expression: `
                 (() => {
-                  const selectors = [
-                    'button[data-testid="reject-all"]',
-                    'button[aria-label*="Reject all"]',
-                    'button:contains("Reject all")',
-                    'button:contains("Odmietnuť všetko")',
-                    'button:contains("Zamietnuť")',
-                    '.cookie-reject-all',
-                    '.reject-all-cookies',
-                    '[data-cy="reject-all"]'
-                  ];
-                  
-                  for (const selector of selectors) {
-                    const btn = document.querySelector(selector);
-                    if (btn && btn.offsetParent !== null) {
-                      btn.click();
-                      return 'clicked: ' + selector;
+                  function clickByText(selectors, texts) {
+                    // 1) priame CSS selektory
+                    for (const sel of selectors) {
+                      const el = document.querySelector(sel);
+                      if (el && el.offsetParent !== null) { el.click(); return 'clicked:' + sel; }
                     }
+                    // 2) text v ľubovoľnom <button>
+                    const btns = Array.from(document.querySelectorAll('button'));
+                    for (const b of btns) {
+                      const t = (b.textContent || '').toLowerCase();
+                      if (texts.some(x => t.includes(x))) { b.click(); return 'clicked:text:' + t; }
+                    }
+                    // 3) XPath fallback
+                    const xp = texts.map(t => \`//button[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÄČĎÉÍĽĹŇÓÔŘŠŤÚÝŽ','abcdefghijklmnopqrstuvwxyzáäčďéíľĺňóôřšťúýž'),'\${t.toLowerCase()}')]\`).join(' | ');
+                    try {
+                      const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                      const node = r.singleNodeValue;
+                      if (node && node.offsetParent !== null) { node.click(); return 'clicked:xpath'; }
+                    } catch {}
+                    return 'no_button_found';
                   }
-                  return 'no_button_found';
+                  
+                  const rejectSelectors = ['button[data-testid="reject-all"]','.cookie-reject-all','.reject-all-cookies','[data-cy="reject-all"]'];
+                  const rejectTexts = ['reject all','odmietnuť všetko','zamietnuť','reject'];
+                  return clickByText(rejectSelectors, rejectTexts);
                 })()
               `
             }, pageSessionId);
@@ -872,7 +881,7 @@ serve(async (req) => {
             const postRejectMap = new Map();
             [cookies_post_reject_1, cookies_post_reject_2].forEach(cookieList => {
               cookieList.forEach(cookie => {
-                const key = `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`;
+                const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
                 if (!postRejectMap.has(key)) {
                   postRejectMap.set(key, cookie);
                 }
@@ -954,8 +963,8 @@ serve(async (req) => {
       success: true,
       trace_id: traceId,
       execution_time_ms: Date.now() - startTime,
-      bl_status_code: healthStatusCode,
-      bl_health_status: healthStatus,
+      bl_status_code: authCheck.details.tests?.query?.status ?? authCheck.details.tests?.header?.status ?? 200,
+      bl_health_status: authCheck.status, // 'ok' | 'invalid_token' | 'wrong_product' | 'network_error'
       data: browserlessData
     }), {
       status: 200,
@@ -994,11 +1003,11 @@ serve(async (req) => {
       success: false,
       trace_id: traceId,
       execution_time_ms: Date.now() - startTime,
-      bl_status_code: isBrowserlessTokenError ? (healthStatusCode || 403) : 0,
+      bl_status_code: isBrowserlessTokenError ? 403 : 0,
       bl_health_status: isBrowserlessTokenError ? 'token_error' : 'unknown',
       error: error.message
     }), {
-      status: 500,
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
