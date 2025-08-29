@@ -1194,6 +1194,18 @@ serve(async (req) => {
       })
       .eq('trace_id', traceId);
 
+    // Log structured final summary with collected data
+    await logger.log('info', 'Final collection summary', {
+      url: inputUrl,
+      metrics: data.metrics,
+      thirdParties: data.thirdParties?.length || 0,
+      beacons: data.beacons?.length || 0,
+      cookies: data.cookies?.length || 0,
+      storage: data.storage?.length || 0,
+      cmp: data.cmp,
+      verdict: data.verdict
+    });
+
     await logger.log('info', '✅ Analysis function completed successfully');
 
     return new Response(JSON.stringify({
@@ -1202,7 +1214,7 @@ serve(async (req) => {
       trace_id: traceId,
       bl_status_code: 200,
       bl_health_status: 'ok',
-      ...analysisResult.data
+      data: analysisResult.data
     }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
