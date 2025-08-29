@@ -1754,6 +1754,7 @@ serve(async (req) => {
           
           ws.close();
           
+          resolve(response);
           
         } catch (error) {
           await logger.log('error', 'CDP analysis failed', { error: String(error) });
