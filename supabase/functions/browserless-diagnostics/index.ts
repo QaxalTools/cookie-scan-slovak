@@ -7,6 +7,14 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, OPTIONS'
 };
 
+// Browserless configuration
+const BROWSERLESS_BASE = Deno.env.get('BROWSERLESS_BASE')?.trim() || 'https://production-sfo.browserless.io';
+
+function normalizeToken(token?: string): string {
+  if (!token) return '';
+  return token.trim().replace(/^["']|["']$/g, '');
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -15,21 +23,24 @@ serve(async (req) => {
   try {
     console.log('🔍 Running Browserless diagnostics...');
 
-    // Get tokens from both possible variables
-    const browserlessToken = Deno.env.get('BROWSERLESS_TOKEN');
-    const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
+    // Get and normalize tokens
+    const rawBrowserlessToken = Deno.env.get('BROWSERLESS_TOKEN');
+    const rawBrowserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
+    const browserlessToken = normalizeToken(rawBrowserlessToken);
+    const browserlessApiKey = normalizeToken(rawBrowserlessApiKey);
     
     const diagnostics = {
       timestamp: new Date().toISOString(),
+      base: BROWSERLESS_BASE,
       tokens: {
         BROWSERLESS_TOKEN: browserlessToken ? {
           present: true,
-          masked: `${browserlessToken.slice(0, 8)}...${browserlessToken.slice(-4)}`,
+          masked: `${browserlessToken.slice(0, 4)}...${browserlessToken.slice(-4)}`,
           length: browserlessToken.length
         } : { present: false },
         BROWSERLESS_API_KEY: browserlessApiKey ? {
           present: true,
-          masked: `${browserlessApiKey.slice(0, 8)}...${browserlessApiKey.slice(-4)}`,
+          masked: `${browserlessApiKey.slice(0, 4)}...${browserlessApiKey.slice(-4)}`,
           length: browserlessApiKey.length
         } : { present: false }
       },
@@ -52,13 +63,15 @@ serve(async (req) => {
     // Test 1: Query parameter authentication
     try {
       console.log('Testing query parameter authentication...');
-      const queryParamResponse = await fetch(`https://chrome.browserless.io/health?token=${activeToken}`);
+      const queryParamResponse = await fetch(`${BROWSERLESS_BASE}/json/version?token=${activeToken}`);
+      const responseText = await queryParamResponse.text();
       
       diagnostics.health_checks.push({
         method: 'query_param',
         status: queryParamResponse.status,
         ok: queryParamResponse.ok,
-        statusText: queryParamResponse.statusText
+        statusText: queryParamResponse.statusText,
+        responseText: responseText.slice(0, 256)
       });
       
       console.log(`Query param auth: ${queryParamResponse.status}`);
@@ -69,24 +82,26 @@ serve(async (req) => {
       });
     }
 
-    // Test 2: Header-based authentication
+    // Test 2: X-API-Key header authentication
     try {
-      console.log('Testing header-based authentication...');
-      const headerResponse = await fetch('https://chrome.browserless.io/health', {
-        headers: { 'Authorization': `Bearer ${activeToken}` }
+      console.log('Testing X-API-Key header authentication...');
+      const headerResponse = await fetch(`${BROWSERLESS_BASE}/json/version`, {
+        headers: { 'X-API-Key': activeToken }
       });
+      const responseText = await headerResponse.text();
       
       diagnostics.health_checks.push({
-        method: 'header_auth',
+        method: 'x_api_key',
         status: headerResponse.status,
         ok: headerResponse.ok,
-        statusText: headerResponse.statusText
+        statusText: headerResponse.statusText,
+        responseText: responseText.slice(0, 256)
       });
       
-      console.log(`Header auth: ${headerResponse.status}`);
+      console.log(`X-API-Key auth: ${headerResponse.status}`);
     } catch (error) {
       diagnostics.health_checks.push({
-        method: 'header_auth',
+        method: 'x_api_key',
         error: error.message
       });
     }
@@ -100,7 +115,8 @@ serve(async (req) => {
         }, 5000);
 
         try {
-          const wsSocket = new WebSocket(`wss://chrome.browserless.io?token=${activeToken}`);
+          const baseUrl = new URL(BROWSERLESS_BASE);
+          const wsSocket = new WebSocket(`wss://${baseUrl.host}?token=${activeToken}`);
           
           wsSocket.onopen = () => {
             clearTimeout(timeout);

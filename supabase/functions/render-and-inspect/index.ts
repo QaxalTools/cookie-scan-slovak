@@ -8,6 +8,94 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// Browserless configuration
+const BROWSERLESS_BASE = Deno.env.get('BROWSERLESS_BASE')?.trim() || 'https://production-sfo.browserless.io';
+
+function normalizeToken(token?: string): string {
+  if (!token) return '';
+  return token.trim().replace(/^["']|["']$/g, '');
+}
+
+async function checkBrowserlessAuth(token: string) {
+  const baseUrl = new URL(BROWSERLESS_BASE);
+  const result: any = { 
+    base: BROWSERLESS_BASE, 
+    host: baseUrl.host,
+    tests: {} 
+  };
+
+  // A) Query param health check
+  try {
+    const response = await fetch(`${BROWSERLESS_BASE}/json/version?token=${token}`);
+    const text = await response.text();
+    result.tests.query = { 
+      status: response.status, 
+      ok: response.ok, 
+      text: text.slice(0, 256) 
+    };
+  } catch (error) { 
+    result.tests.query = { error: String(error) }; 
+  }
+
+  // B) X-API-Key header
+  try {
+    const response = await fetch(`${BROWSERLESS_BASE}/json/version`, { 
+      headers: { 'X-API-Key': token } 
+    });
+    const text = await response.text();
+    result.tests.header = { 
+      status: response.status, 
+      ok: response.ok, 
+      text: text.slice(0, 256) 
+    };
+  } catch (error) { 
+    result.tests.header = { error: String(error) }; 
+  }
+
+  // C) WebSocket CDP test
+  result.tests.ws = await new Promise((resolve) => {
+    try {
+      const wsUrl = `wss://${baseUrl.host}?token=${token}`;
+      const ws = new WebSocket(wsUrl);
+      const timeout = setTimeout(() => { 
+        try { ws.close(); } catch {} 
+        resolve({ error: 'timeout' }); 
+      }, 8000);
+      
+      ws.onopen = () => { 
+        clearTimeout(timeout); 
+        ws.close(); 
+        resolve({ open: true }); 
+      };
+      
+      ws.onclose = (event) => { 
+        clearTimeout(timeout); 
+        resolve({ open: false, code: event.code }); 
+      };
+      
+      ws.onerror = () => { 
+        clearTimeout(timeout); 
+        resolve({ open: false, code: 'onerror' }); 
+      };
+    } catch (error) { 
+      resolve({ error: String(error) }); 
+    }
+  });
+
+  // Determine auth status
+  let status: 'ok' | 'invalid_token' | 'wrong_product' | 'network_error' = 'network_error';
+  
+  if (result.tests.query?.ok || result.tests.header?.ok || result.tests.ws?.open) {
+    status = 'ok';
+  } else if ([401, 403].includes(result.tests.query?.status) || [401, 403].includes(result.tests.header?.status)) {
+    status = 'invalid_token';
+  } else if (result.tests.ws?.open === false && (result.tests.ws?.code === 1008 || result.tests.ws?.code === 1006)) {
+    status = 'wrong_product';
+  }
+
+  return { status, details: result };
+}
+
 // Handle CORS preflight requests
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -36,66 +124,56 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Get Browserless token from either variable
-    const browserlessToken = Deno.env.get('BROWSERLESS_TOKEN') || Deno.env.get('BROWSERLESS_API_KEY');
+    // Get and normalize Browserless token
+    const rawToken = Deno.env.get('BROWSERLESS_TOKEN') || Deno.env.get('BROWSERLESS_API_KEY');
+    const browserlessToken = normalizeToken(rawToken);
+    
     if (!browserlessToken) {
-      throw new Error('Missing Browserless token - check BROWSERLESS_TOKEN or BROWSERLESS_API_KEY');
+      return new Response(JSON.stringify({
+        success: false,
+        error_code: 'NO_TOKEN',
+        error: 'Browserless token not found in environment variables',
+        trace_id: traceId,
+        execution_time: Date.now() - startTime
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
-
-    const BROWSERLESS_WS_URL = 'wss://chrome.browserless.io';
-    const REQUEST_TIMEOUT = 45000;
 
     console.log(`🔑 Using Browserless token: ${browserlessToken.slice(0, 8)}...${browserlessToken.slice(-4)}`);
     console.log(`📝 Analyzing URL: ${url}`);
 
-    // Check Browserless health with multiple auth methods
-    console.log('🏥 Checking Browserless health...');
-    let healthCheckPassed = false;
-    let healthStatus = 'unknown';
-    let healthStatusCode = 0;
-    let authMethod = 'unknown';
+    // Check Browserless authentication
+    console.log('🏥 Checking Browserless authentication...');
+    const authCheck = await checkBrowserlessAuth(browserlessToken);
     
-    // Try query parameter authentication first
-    try {
-      const healthResponse = await fetch(`https://chrome.browserless.io/health?token=${browserlessToken}`);
-      healthStatusCode = healthResponse.status;
+    await logToDatabase('info', 'Browserless auth check', {
+      auth_status: authCheck.status,
+      base: BROWSERLESS_BASE,
+      tests: authCheck.details.tests
+    });
+
+    if (authCheck.status !== 'ok') {
+      console.log(`❌ Browserless auth failed: ${authCheck.status}`);
       
-      if (healthResponse.ok) {
-        healthCheckPassed = true;
-        healthStatus = 'ok';
-        authMethod = 'query_param';
-        console.log('✅ Browserless health check passed (query param auth)');
-      } else if (healthResponse.status === 401 || healthResponse.status === 403) {
-        // Try header-based authentication
-        console.log('🔄 Trying header-based authentication...');
-        const headerHealthResponse = await fetch('https://chrome.browserless.io/health', {
-          headers: { 'Authorization': `Bearer ${browserlessToken}` }
-        });
-        
-        if (headerHealthResponse.ok) {
-          healthCheckPassed = true;
-          healthStatus = 'ok';
-          authMethod = 'header';
-          healthStatusCode = headerHealthResponse.status;
-          console.log('✅ Browserless health check passed (header auth)');
-        } else {
-          healthStatus = 'token_error';
-          healthStatusCode = headerHealthResponse.status;
-          console.log(`❌ Both auth methods failed. Token may be invalid or for wrong product.`);
-          await logToDatabase('error', `Browserless token authentication failed: ${headerHealthResponse.status}`, { 
-            status: headerHealthResponse.status,
-            auth_methods_tried: ['query_param', 'header']
-          });
-        }
-      } else {
-        healthStatus = 'failed';
-        console.log(`⚠️ Browserless health check failed with status ${healthResponse.status}, but continuing to WebSocket attempt...`);
-        await logToDatabase('warn', `Browserless health check failed: ${healthResponse.status}`, { status: healthResponse.status });
-      }
-    } catch (error) {
-      healthStatus = 'error';
-      console.log(`⚠️ Browserless health check error: ${error.message}, but continuing to WebSocket attempt...`);
-      await logToDatabase('warn', `Browserless health check error: ${error.message}`);
+      return new Response(JSON.stringify({
+        success: false,
+        error_code: 'BROWSERLESS_AUTH_FAILED',
+        auth_status: authCheck.status,
+        base: BROWSERLESS_BASE,
+        details: authCheck.details,
+        hints: [
+          'Použi production-<region>.browserless.io (nie chrome.browserless.io).',
+          'Token musí mať Chromium/WebSocket CDP prístup (nie len BQL/REST).',
+          'Preferuj ?token= alebo hlavičku X-API-Key.'
+        ],
+        trace_id: traceId,
+        execution_time: Date.now() - startTime
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     // Main data collection object
@@ -141,7 +219,8 @@ serve(async (req) => {
       console.log('🌐 Starting Raw WebSocket CDP analysis...');
       console.log('🔗 Connecting to Browserless WebSocket...');
       
-      const wsSocket = new WebSocket(`${BROWSERLESS_WS_URL}?token=${browserlessToken}&--no-sandbox&--disable-setuid-sandbox&--disable-dev-shm-usage&--disable-background-timer-throttling&--disable-backgrounding-occluded-windows&--disable-renderer-backgrounding&--disable-features=TranslateUI&--disable-ipc-flooding-protection&--disable-crash-reporter&--disable-breakpad&--disable-client-side-phishing-detection&--disable-background-networking&--disable-default-apps&--disable-component-extensions-with-background-pages&--disable-logging&--silent`);
+      const baseUrl = new URL(BROWSERLESS_BASE);
+      const wsSocket = new WebSocket(`wss://${baseUrl.host}?token=${browserlessToken}`);
       
       const sessions = new Map();
       let pageSessionId = null;

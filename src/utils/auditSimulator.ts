@@ -164,8 +164,26 @@ export async function performLiveAudit(
         });
       }
       
-      // Handle specific Browserless token errors with detailed messages
-      if (data?.bl_health_status === 'token_error') {
+      // Enhanced Slovak error messages based on error_code and auth_status from new structure
+      if (data?.error_code === 'NO_TOKEN') {
+        throw new Error('❌ Browserless token nie je nakonfigurovaný. Skontrolujte nastavenia v Supabase.');
+      } else if (data?.error_code === 'BROWSERLESS_AUTH_FAILED') {
+        switch (data?.auth_status) {
+          case 'invalid_token':
+            throw new Error('❌ Neplatný Browserless token alebo nesprávny produkt (Chrome vs. Playwright). Skontrolujte nastavenie v Browserless dashboard.');
+          case 'wrong_product':
+            throw new Error('❌ Token nie je pre správny produkt. Potrebujete Chromium/WebSocket CDP prístup (nie len BQL/REST plán).');
+          case 'network_error':
+            throw new Error('🔧 Problém s pripojením k Browserless službe. Skontrolujte internetové pripojenie.');
+          default:
+            throw new Error(`❌ Browserless autentifikácia zlyhala: ${data?.auth_status} (endpoint: ${data?.base || 'unknown'})`);
+        }
+      } else if (data?.error_code === 'FUNCTION_ERROR') {
+        throw new Error(`❌ Chyba funkcie: ${data?.error}`);
+      }
+      
+      // Legacy fallback for backward compatibility
+      else if (data?.bl_health_status === 'token_error') {
         throw new Error('❌ Browserless token je neplatný alebo pre nesprávny produkt (Chrome vs. Playwright). Skontrolujte nastavenie v Browserless dashboard.');
       } else if (data?.bl_status_code === 401 || data?.bl_status_code === 403) {
         throw new Error('❌ Browserless autentifikácia zlyhala. Token môže byť zamietnutý kvôli IP allowlist alebo iným obmedzeniam.');
