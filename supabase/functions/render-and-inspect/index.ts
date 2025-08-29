@@ -431,7 +431,7 @@ class SessionManager {
     });
   }
   
-  private async sendCommand(method: string, params: any = {}, sessionId?: string) {
+  async sendCommand(method: string, params: any = {}, sessionId?: string) {
     if (!this.ws) return null;
     
     return new Promise((resolve) => {
@@ -682,13 +682,33 @@ class CMPHunter {
     const expression = this.buildCMPFinderExpression(action);
     
     try {
-      const result = await this.sendCommand('Runtime.evaluate', {
-        expression,
-        contextId: frameId
+      // Create isolated world for frame execution
+      const worldResult = await this.sendCommand('Page.createIsolatedWorld', {
+        frameId: frameId,
+        worldName: `cmp-hunter-${Date.now()}`,
+        grantUniveralAccess: true
       }, pageSessionId) as any;
       
-      if (result?.result?.value?.clicked) {
-        return { clicked: true, details: result.result.value };
+      const executionContextId = worldResult?.result?.executionContextId;
+      
+      if (executionContextId) {
+        const result = await this.sendCommand('Runtime.evaluate', {
+          expression,
+          contextId: executionContextId
+        }, pageSessionId) as any;
+        
+        if (result?.result?.value?.clicked) {
+          return { clicked: true, details: result.result.value };
+        }
+      } else {
+        // Fallback to main context if isolated world creation fails
+        const result = await this.sendCommand('Runtime.evaluate', {
+          expression
+        }, pageSessionId) as any;
+        
+        if (result?.result?.value?.clicked) {
+          return { clicked: true, details: result.result.value };
+        }
       }
     } catch (error) {
       await this.logger.log('debug', `Frame ${frameId} evaluation failed: ${error}`);
@@ -786,20 +806,24 @@ class CMPHunter {
   }
   
   private async setupMutationObserver(action: 'accept' | 'reject', pageSessionId: string) {
+    const cmpFinderCode = this.buildCMPFinderExpression(action);
     const observerExpression = `
       new Promise((resolve) => {
         const timeout = setTimeout(() => {
-          observer.disconnect();
+          if (typeof observer !== 'undefined') observer.disconnect();
           resolve({ clicked: false, reason: 'timeout' });
         }, 10000);
         
         const observer = new MutationObserver(() => {
-          ${this.buildCMPFinderExpression(action).slice(8, -4)} // Remove wrapper
-          const result = (() => { ${this.buildCMPFinderExpression(action).slice(8, -4)} })();
-          if (result.clicked) {
-            clearTimeout(timeout);
-            observer.disconnect();
-            resolve(result);
+          try {
+            const result = ${cmpFinderCode};
+            if (result && result.clicked) {
+              clearTimeout(timeout);
+              observer.disconnect();
+              resolve(result);
+            }
+          } catch (e) {
+            // Ignore errors during CMP check
           }
         });
         
@@ -808,6 +832,18 @@ class CMPHunter {
           subtree: true,
           attributes: false
         });
+        
+        // Also try immediately
+        try {
+          const result = ${cmpFinderCode};
+          if (result && result.clicked) {
+            clearTimeout(timeout);
+            observer.disconnect();
+            resolve(result);
+          }
+        } catch (e) {
+          // Continue with observer
+        }
       })
     `;
     
@@ -1010,17 +1046,6 @@ serve(async (req) => {
       
       // Integrate sendCommand into SessionManager
       (sessionManager as any).sendCommand = sendCommand;
-
-      const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
-        const id = messageId++;
-        const message = sessionId ? 
-          { id, method, params, sessionId } : 
-          { id, method, params };
-        ws.send(JSON.stringify(message));
-        return new Promise((resolve, reject) => {
-          pendingCommands.set(id, { resolve, reject });
-        });
-      };
 
       // Add permanent CDP event handler using modular architecture
       ws.addEventListener('message', (event) => {
@@ -1528,20 +1553,25 @@ serve(async (req) => {
         logger.log('error', 'WebSocket error', { error: String(error) });
         
         // Build partial metrics from what we can access in this scope
+        const phase = phaseController?.get() || 'pre';
+        const preRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'pre') : [];
+        const postAcceptRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_accept') : [];
+        const postRejectRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_reject') : [];
+        
         const partialMetrics = {
-          requests_pre: requests_pre.length,
-          requests_post_accept: requests_post_accept.length,
-          requests_post_reject: requests_post_reject.length,
-          cookies_pre: cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length,
-          cookies_post_accept: cookies_post_accept.length,
-          cookies_post_reject: cookies_post_reject.length,
-          setCookie_pre: setCookieEvents_pre.length,
-          setCookie_post_accept: setCookieEvents_post_accept.length,
-          setCookie_post_reject: setCookieEvents_post_reject.length,
-          storage_pre_items: storage_pre.length
+          requests_pre: preRequests.length,
+          requests_post_accept: postAcceptRequests.length,
+          requests_post_reject: postRejectRequests.length,
+          cookies_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
+          cookies_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
+          cookies_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
+          setCookie_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
+          setCookie_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
+          setCookie_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
+          storage_pre_items: 0
         };
         
-        const totalRequests = requests_pre.length + requests_post_accept.length + requests_post_reject.length;
+        const totalRequests = partialMetrics.requests_pre + partialMetrics.requests_post_accept + partialMetrics.requests_post_reject;
         const totalCookies = partialMetrics.cookies_pre + partialMetrics.cookies_post_accept + partialMetrics.cookies_post_reject;
         
         resolve({
@@ -1550,11 +1580,11 @@ serve(async (req) => {
           details: String(error),
           partial: totalRequests > 0 || totalCookies > 0 ? {
             metrics: partialMetrics,
-            phase: currentPhase,
+            phase: phase,
             data_collected: {
               requests: totalRequests,
               cookies: totalCookies,
-              storage: storage_pre.length
+              storage: 0
             }
           } : undefined
         });
@@ -1565,26 +1595,33 @@ serve(async (req) => {
         await logger.log('error', '⏰ Global timeout after 60 seconds');
         
         // Build partial metrics from collected data so far
-        const totalRequests = requests_pre.length + requests_post_accept.length + requests_post_reject.length;
-        const totalCookies = (cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length) + 
-                           cookies_post_accept.length + cookies_post_reject.length;
+        const phase = phaseController?.get() || 'pre';
+        const preRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'pre') : [];
+        const postAcceptRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_accept') : [];
+        const postRejectRequests = eventsPipeline?.requestMap ? Array.from(eventsPipeline.requestMap.values()).filter((r: any) => r.phase === 'post_reject') : [];
+        const allRequests = [...preRequests, ...postAcceptRequests, ...postRejectRequests];
+        
+        const totalRequests = allRequests.length;
+        const totalCookies = (eventsPipeline?.setCookieEvents_pre?.length || 0) + 
+                           (eventsPipeline?.setCookieEvents_post_accept?.length || 0) + 
+                           (eventsPipeline?.setCookieEvents_post_reject?.length || 0);
         
         const partialMetrics = {
-          requests_pre: requests_pre.length,
-          requests_post_accept: requests_post_accept.length,
-          requests_post_reject: requests_post_reject.length,
-          cookies_pre: cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length,
-          cookies_post_accept: cookies_post_accept.length,
-          cookies_post_reject: cookies_post_reject.length,
-          setCookie_pre: setCookieEvents_pre.length,
-          setCookie_post_accept: setCookieEvents_post_accept.length,
-          setCookie_post_reject: setCookieEvents_post_reject.length,
-          storage_pre_items: storage_pre.length,
-          third_party_hosts: requests_pre.concat(requests_post_accept, requests_post_reject)
-            .map(r => { try { return getETldPlusOneLite(new URL(r.url).hostname); } catch { return ''; } })
+          requests_pre: preRequests.length,
+          requests_post_accept: postAcceptRequests.length,
+          requests_post_reject: postRejectRequests.length,
+          cookies_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
+          cookies_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
+          cookies_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
+          setCookie_pre: eventsPipeline?.setCookieEvents_pre?.length || 0,
+          setCookie_post_accept: eventsPipeline?.setCookieEvents_post_accept?.length || 0,
+          setCookie_post_reject: eventsPipeline?.setCookieEvents_post_reject?.length || 0,
+          storage_pre_items: 0,
+          third_party_hosts: allRequests
+            .map((r: any) => { try { return getETldPlusOneLite(new URL(r.url).hostname); } catch { return ''; } })
             .filter(h => h).length,
-          tracking_params_count: requests_pre.concat(requests_post_accept, requests_post_reject)
-            .filter(r => { 
+          tracking_params_count: allRequests
+            .filter((r: any) => { 
               try { 
                 const url = new URL(r.url);
                 return url.search && SIGNIFICANT_PARAMS.some(param => url.searchParams.has(param));
@@ -1595,11 +1632,11 @@ serve(async (req) => {
         // Log structured partial summary
         await logger.log('error', '⏰ Global timeout - partial collection summary', {
           url: url,
-          phase: currentPhase,
+          phase: phase,
           partial_metrics: partialMetrics,
           requests_collected: totalRequests,
           cookies_collected: totalCookies,
-          storage_collected: storage_pre.length
+          storage_collected: 0
         });
         
         ws.close();
@@ -1609,11 +1646,11 @@ serve(async (req) => {
           details: 'Analysis timeout after 60 seconds',
           partial: {
             metrics: partialMetrics,
-            phase: currentPhase,
+            phase: phase,
             data_collected: {
               requests: totalRequests,
               cookies: totalCookies,
-              storage: storage_pre.length
+              storage: 0
             }
           }
         });
