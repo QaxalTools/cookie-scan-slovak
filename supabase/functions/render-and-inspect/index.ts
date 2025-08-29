@@ -36,6 +36,20 @@ const corsHeaders = {
 // =================== SINGLE SOURCE OF TRUTH HELPERS ===================
 // These functions are defined once and used throughout the Edge function
 
+// PATCH 1 - Header normalization utilities
+function normalizeHeaderKeys(h: Record<string, string | string[]> | undefined): Record<string, string | string[]> {
+  if (!h) return {};
+  const out: Record<string, string | string[]> = {};
+  for (const k of Object.keys(h)) out[k.toLowerCase()] = h[k] as any;
+  return out;
+}
+
+function ensureArray<T>(v: T | T[] | undefined): T[] {
+  if (!v) return [];
+  return Array.isArray(v) ? v : [v];
+}
+// These functions are defined once and used throughout the Edge function
+
 function onceLoadFired(ws: WebSocket, sessionId: string, timeoutMs = 20000) {
   return new Promise<void>((resolve, reject) => {
     const onMsg = (event: MessageEvent) => {
@@ -494,6 +508,28 @@ serve(async (req) => {
       let requests_post_accept: any[] = [];
       let requests_post_reject: any[] = [];
 
+      // PATCH 3 - Network idle monitoring
+      let inflight = 0;
+      function onReqStart() { inflight++; }
+      function onReqEnd()   { inflight = Math.max(0, inflight - 1); }
+
+      function waitForNetworkIdle(minMs = 1500, totalTimeout = 15000) {
+        return new Promise<void>((resolve) => {
+          const start = Date.now();
+          let idleSince = Date.now();
+          const check = () => {
+            if (inflight === 0) {
+              if (Date.now() - idleSince >= minMs) return resolve();
+            } else {
+              idleSince = Date.now();
+            }
+            if (Date.now() - start > totalTimeout) return resolve();
+            setTimeout(check, 100);
+          };
+          check();
+        });
+      }
+
       const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
         const id = messageId++;
         const message = sessionId ? 
@@ -522,11 +558,19 @@ serve(async (req) => {
             return;
           }
           
-          // Filter events by sessionId (only handle page session events)
-          if (message.sessionId && message.sessionId !== pageSessionId) {
-            return;
+          // PATCH 2 - Tolerant sessionId filter for Network events
+          if (message.method?.startsWith('Network.')) {
+            // If has sessionId and it's not our pageSession, ignore
+            if (message.sessionId && message.sessionId !== pageSessionId) return;
+            // If sessionId is missing, let it pass (some extraInfo events don't have stable sessionId)
+          } else {
+            if (message.sessionId && message.sessionId !== pageSessionId) return;
           }
           
+          // PATCH 3 - Add network idle tracking hooks
+          if (message.method === 'Network.requestWillBeSent') onReqStart();
+          if (message.method === 'Network.loadingFinished' || message.method === 'Network.loadingFailed') onReqEnd();
+
           // Handle Network events for request tracking
           if (message.method === 'Network.requestWillBeSent') {
             const params = message.params;
@@ -601,30 +645,20 @@ serve(async (req) => {
             });
           }
           
-          // Handle Set-Cookie headers
+          // PATCH 1 - Handle Set-Cookie headers with normalized keys
           if (message.method === 'Network.responseReceivedExtraInfo') {
             const params = message.params;
             responseExtraInfo.set(params.requestId, params);
-            
-            if (params.headers && params.headers['set-cookie']) {
-              const setCookieHeaders = Array.isArray(params.headers['set-cookie']) 
-                ? params.headers['set-cookie'] 
-                : [params.headers['set-cookie']];
-              
-              const responseUrl = responseInfo.get(params.requestId)?.url || url;
-              
-              for (const setCookieValue of setCookieHeaders) {
-                const parsedCookie = parseSetCookieHeader(setCookieValue, responseUrl);
-                
-                // Store in appropriate phase array
-                if (currentPhase === 'pre') {
-                  setCookieEvents_pre.push(parsedCookie);
-                } else if (currentPhase === 'post_accept') {
-                  setCookieEvents_post_accept.push(parsedCookie);
-                } else if (currentPhase === 'post_reject') {
-                  setCookieEvents_post_reject.push(parsedCookie);
-                }
-              }
+
+            const headersNorm = normalizeHeaderKeys(params.headers);
+            const setCookieValues = ensureArray(headersNorm['set-cookie']); // key is always lowercase
+            const respUrl = responseInfo.get(params.requestId)?.url || finalUrl;
+
+            for (const raw of setCookieValues) {
+              const parsed = parseSetCookieHeader(String(raw), respUrl);
+              if (currentPhase === 'pre') setCookieEvents_pre.push(parsed);
+              else if (currentPhase === 'post_accept') setCookieEvents_post_accept.push(parsed);
+              else setCookieEvents_post_reject.push(parsed);
             }
           }
           
@@ -697,6 +731,11 @@ serve(async (req) => {
             maxTotalBufferSize: 10_000_000,
             maxResourceBufferSize: 5_000_000
           }, pageSessionId);
+          
+          // PATCH 3 - Disable cache and enable lifecycle events
+          await sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId);
+          await sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, pageSessionId);
+          
           await sendCommand('DOMStorage.enable', {}, pageSessionId);
           
           await logger.log('info', `📍 CDP_bound: true`);
@@ -722,8 +761,9 @@ serve(async (req) => {
             await logger.log('warn', '⏰ Navigation timeout, proceeding');
           });
           await logger.log('info', '✅ Page load event fired');
-          await new Promise(r => setTimeout(r, 3000));  // idle
-          await new Promise(r => setTimeout(r, 6000));  // extra-idle
+          
+          // PATCH 3 - Use network idle instead of static timeouts
+          await waitForNetworkIdle(1500, 15000);
           
           // Phase 2: Multi-timing cookie collection
           
@@ -733,9 +773,8 @@ serve(async (req) => {
           cookies_pre_load.push(...(postLoadCookies.result?.cookies || []));
           await logger.log('info', `Cookies pre-load: ${cookies_pre_load.length}`);
           
-          // Wait for network idle
-          await logger.log('info', '⏳ Waiting for network idle...');
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // PATCH 3 - Use network idle for cookie collection timing
+          await waitForNetworkIdle(800, 8000);
           
           // M2: Post-idle cookies
           await logger.log('info', '🍪 Collecting pre-consent cookies (M2: post-idle)...');
@@ -744,8 +783,7 @@ serve(async (req) => {
           await logger.log('info', `Cookies pre-idle: ${cookies_pre_idle.length}`);
           
           // Wait for extra idle period
-          await logger.log('info', '⏳ Waiting for extra idle period...');
-          await new Promise(resolve => setTimeout(resolve, 6000));
+          await waitForNetworkIdle(800, 8000);
           
           // M3: Extra-idle cookies
           await logger.log('info', '🍪 Collecting pre-consent cookies (M3: extra-idle)...');
@@ -825,6 +863,14 @@ serve(async (req) => {
           await logger.log('info', `Storage pre-consent: ${storage_pre.length} items`);
           await logger.log('info', '✅ Pre-consent data collected');
           await logger.log('info', `📊 Pre-consent stats: { cookies: ${cookies_pre.length}, setCookieEvents: ${setCookieEvents_pre.length}, storage: ${storage_pre.length}, requests: ${requests_pre.length} }`);
+          
+          // PATCH 3 - Debug logs for verification
+          await logger.log('info', 'DBG cookies_hdr_counts', {
+            pre: setCookieEvents_pre.length,
+            post_accept: setCookieEvents_post_accept.length,
+            post_reject: setCookieEvents_post_reject.length,
+            trace_id: traceId
+          });
           
           // Phase 4: CMP Detection and interaction
           await logger.log('info', '🔍 Detecting CMP...');
@@ -1058,7 +1104,18 @@ serve(async (req) => {
           const uniqueBeacons = Array.from(new Set(beacons.map(b => b.urlNormalized)))
             .map(url => ({ urlNormalized: url }));
           
-          // Phase 7: Self-check gates
+          // PATCH 4 - Create server-set cookies view from Set-Cookie headers
+          function toKey(c: ParsedCookie){ return `${c.name}|${normalizeDomain(c.domain)}|${c.path||'/'}`; }
+          const preFromHeaders = new Map(setCookieEvents_pre.map(c => [toKey(c), c]));
+          const postAcceptFromHeaders = new Map(setCookieEvents_post_accept.map(c => [toKey(c), c]));
+          const postRejectFromHeaders = new Map(setCookieEvents_post_reject.map(c => [toKey(c), c]));
+
+          // Server-set cookies (relevant even if storage 3P cookies are blocked)
+          const cookies_serverset_pre = Array.from(preFromHeaders.values());
+          const cookies_serverset_post_accept = Array.from(postAcceptFromHeaders.values());
+          const cookies_serverset_post_reject = Array.from(postRejectFromHeaders.values());
+
+          // Phase 7: Self-check gates (PATCH 4 - updated cookie detection)
           const selfCheckReasons: string[] = [];
           let isComplete = true;
           
@@ -1067,8 +1124,10 @@ serve(async (req) => {
             isComplete = false;
           }
           
-          if (allCookies.length === 0 && setCookieEvents_pre.length === 0) {
-            selfCheckReasons.push('No cookies detected (possible collection failure)');
+          // PATCH 4 - Updated cookie detection rule
+          if ((cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length) === 0
+              && (setCookieEvents_pre.length + setCookieEvents_post_accept.length + setCookieEvents_post_reject.length) === 0) {
+            selfCheckReasons.push('No cookies detected (storage + Set-Cookie empty)');
             isComplete = false;
           }
           
@@ -1077,7 +1136,7 @@ serve(async (req) => {
             isComplete = false;
           }
           
-          // Collect final metrics
+          // Collect final metrics (PATCH 4 - add server-set metrics)
           const metrics = {
             requests_pre: requests_pre.length,
             requests_post_accept: requests_post_accept.length,
@@ -1085,6 +1144,9 @@ serve(async (req) => {
             cookies_pre: cookies_pre.length,
             cookies_post_accept: cookies_post_accept.length,
             cookies_post_reject: cookies_post_reject.length,
+            cookies_serverset_pre: cookies_serverset_pre.length,
+            cookies_serverset_post_accept: cookies_serverset_post_accept.length,
+            cookies_serverset_post_reject: cookies_serverset_post_reject.length,
             setCookie_pre: setCookieEvents_pre.length,
             setCookie_post_accept: setCookieEvents_post_accept.length,
             setCookie_post_reject: setCookieEvents_post_reject.length,
@@ -1098,6 +1160,9 @@ serve(async (req) => {
           
           await logger.log('info', `📤 data_sent_to_third_parties: ${thirdPartyDataSending}`);
           await logger.log('info', `📊 Final collection summary: ${JSON.stringify(metrics)}`);
+          
+          // PATCH 3 - Final debug log
+          await logger.log('info', 'DBG inflight_done', { inflight, trace_id: traceId });
           
           ws.close();
           
