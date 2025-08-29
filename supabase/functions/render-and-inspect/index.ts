@@ -936,19 +936,27 @@ serve(async (req) => {
               await logger.log('info', `✅ Clicked Accept: ${acceptResult.result.result.value.selector}`);
               
               // Wait and collect post-accept data
-              await new Promise(resolve => setTimeout(resolve, 3000));
+              await waitForNetworkIdle(800, 8000);
               
               const postAcceptCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
               cookies_post_accept.push(...(postAcceptCookies.result?.cookies || []));
               requests_post_accept = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_accept');
               
               // Extra wait and collect post-accept-extra data
-              await new Promise(resolve => setTimeout(resolve, 6000));
+              await waitForNetworkIdle(800, 8000);
               
               const postAcceptExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
               cookies_post_accept_extra.push(...(postAcceptExtraCookies.result?.cookies || []));
               
               await logger.log('info', `📊 Post-accept: cookies=${cookies_post_accept.length}, extra=${cookies_post_accept_extra.length}, requests=${requests_post_accept.length}`);
+              
+              // Debug log for post-accept phase
+              await logger.log('info', 'DBG cookies_hdr_counts_post_accept', {
+                pre: setCookieEvents_pre.length,
+                post_accept: setCookieEvents_post_accept.length,
+                post_reject: setCookieEvents_post_reject.length,
+                trace_id: traceId
+              });
               
               // Reload page for reject test
               currentPhase = 'pre';
@@ -957,8 +965,8 @@ serve(async (req) => {
               await onceLoadFired(ws, pageSessionId).catch(async () => {
                 await logger.log('warn', '⏰ Reload timeout, proceeding');
               });
-              await new Promise(r => setTimeout(r, 3000));  // idle
-              await new Promise(r => setTimeout(r, 6000));  // extra-idle
+              await waitForNetworkIdle(800, 8000);  // idle
+              await waitForNetworkIdle(800, 8000);  // extra-idle
               
               // Try Reject flow
               currentPhase = 'post_reject';
@@ -985,19 +993,27 @@ serve(async (req) => {
               if (rejectResult.result?.result?.value?.clicked) {
                 await logger.log('info', `❌ Clicked Reject: ${rejectResult.result.result.value.selector}`);
                 
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                await waitForNetworkIdle(800, 8000);
                 
                 const postRejectCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
                 cookies_post_reject.push(...(postRejectCookies.result?.cookies || []));
                 requests_post_reject = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_reject');
                 
                 // Extra wait and collect post-reject-extra data
-                await new Promise(resolve => setTimeout(resolve, 6000));
+                await waitForNetworkIdle(800, 8000);
                 
                 const postRejectExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
                 cookies_post_reject_extra.push(...(postRejectExtraCookies.result?.cookies || []));
                 
                 await logger.log('info', `📊 Post-reject: cookies=${cookies_post_reject.length}, extra=${cookies_post_reject_extra.length}, requests=${requests_post_reject.length}`);
+                
+                // Debug log for post-reject phase
+                await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
+                  pre: setCookieEvents_pre.length,
+                  post_accept: setCookieEvents_post_accept.length,
+                  post_reject: setCookieEvents_post_reject.length,
+                  trace_id: traceId
+                });
               }
             }
           }
