@@ -8,6 +8,11 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// --- helpers (global, single source of truth) ---
+function normalizeDomain(input?: string): string {
+  return (input ?? '').trim().replace(/^\./, '');
+}
+
 // Browserless configuration
 const BROWSERLESS_BASE = Deno.env.get('BROWSERLESS_BASE')?.trim() || 'https://production-sfo.browserless.io';
 
@@ -488,8 +493,6 @@ serve(async (req) => {
       }, pageSessionId);
       
       // Helper functions for data collection with normalized domain
-      const norm = (d?: string) => (d || '').replace(/^\./, '');
-      
       const collectCookies = async (label) => {
         const cookies = [];
         
@@ -498,7 +501,7 @@ serve(async (req) => {
           if (cdpCookies.cookies) {
             cookies.push(...cdpCookies.cookies.map(c => ({
               ...c,
-              domain: norm(c.domain), // Normalize domain here
+              domain: normalizeDomain(c.domain), // Normalize domain here
               expiry_days: c.expires ? Math.round((c.expires * 1000 - Date.now()) / (24 * 60 * 60 * 1000)) : null,
               source: 'cdp'
             })));
@@ -669,11 +672,10 @@ serve(async (req) => {
       console.log('REQUESTS PRE counts', { cdp: Array.from(requestMap.values()).length });
       
       // Merge all pre-consent cookies (deduplicate by name+domain+path)
-      const norm = (d) => (d || '').replace(/^\./, '');
       const cookieMap = new Map();
       [cookies_pre_load, cookies_pre_idle, cookies_pre_extra].forEach(cookieList => {
         cookieList.forEach(cookie => {
-          const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
+          const key = `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
           if (!cookieMap.has(key)) {
             cookieMap.set(key, cookie);
           }
@@ -815,7 +817,7 @@ serve(async (req) => {
           const postAcceptMap = new Map();
           [cookies_post_accept_1, cookies_post_accept_2].forEach(cookieList => {
             cookieList.forEach(cookie => {
-              const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
+              const key = `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
               if (!postAcceptMap.has(key)) {
                 postAcceptMap.set(key, cookie);
               }
@@ -884,10 +886,10 @@ serve(async (req) => {
             const postRejectMap = new Map();
             [cookies_post_reject_1, cookies_post_reject_2].forEach(cookieList => {
               cookieList.forEach(cookie => {
-                const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
-                if (!postRejectMap.has(key)) {
-                  postRejectMap.set(key, cookie);
-                }
+              const key = `${cookie.name}|${normalizeDomain(cookie.domain)}|${cookie.path || '/'}`;
+              if (!postRejectMap.has(key)) {
+                postRejectMap.set(key, cookie);
+              }
               });
             });
             const cookies_post_reject = Array.from(postRejectMap.values());
