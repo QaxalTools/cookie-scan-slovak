@@ -562,6 +562,25 @@ serve(async (req) => {
               } catch {
                 // Ignore POST data parsing errors
               }
+            } else if (params.request.hasPostData) {
+              // POST fallback: fetch post data using Network.getRequestPostData
+              const headers = params.request.headers || {};
+              const ct = (headers['Content-Type'] || headers['content-type'] || '').toLowerCase();
+              
+              sendCommand('Network.getRequestPostData', { requestId: params.requestId }, pageSessionId)
+                .then((res: any) => {
+                  const body = res.result?.postData ?? '';
+                  if (ct.includes('application/json')) {
+                    postDataMap.set(params.requestId, safeJsonParse(body));
+                  } else if (ct.includes('application/x-www-form-urlencoded')) {
+                    postDataMap.set(params.requestId, parseFormUrlEncoded(body));
+                  } else {
+                    postDataMap.set(params.requestId, body);
+                  }
+                })
+                .catch(async () => {
+                  await logger.log('warn', 'POST fallback getRequestPostData failed', { trace_id: traceId, requestId: params.requestId });
+                });
             }
             
             if (isFirstParty) {
@@ -1125,7 +1144,35 @@ serve(async (req) => {
                 reasons: selfCheckReasons
               },
               cmp: cmpResult.result?.result?.value || {},
-              metrics
+              metrics,
+              raw: {
+                requests: Array.from(requestMap.values()).map(r => ({ 
+                  ...r, 
+                  postData: postDataMap.get(r.requestId) 
+                })),
+                cookies: {
+                  pre_load: cookies_pre_load,
+                  pre_idle: cookies_pre_idle,
+                  pre_extra: cookies_pre_extra,
+                  post_accept: cookies_post_accept,
+                  post_reject: cookies_post_reject
+                },
+                set_cookie_headers: {
+                  pre: setCookieEvents_pre,
+                  post_accept: setCookieEvents_post_accept,
+                  post_reject: setCookieEvents_post_reject
+                },
+                beacons: trackingParams.map(tp => {
+                  const u = new URL(`https://${tp.host}${tp.path}`);
+                  return {
+                    host: tp.host,
+                    path: tp.path,
+                    method: tp.method,
+                    url: `https://${tp.host}${tp.path}`,
+                    url_normalized: `${u.protocol}//${u.host}${u.pathname}`
+                  };
+                })
+              }
             }
           });
           
