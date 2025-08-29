@@ -298,7 +298,7 @@ function mergeSegmentResults(acceptData: any, rejectData: any): any {
 }
   
   // Add quality checks and INCOMPLETE banners
-  auditData.managementSummary = addQualityChecks(auditData.managementSummary, renderData, internalJson);
+  auditData.managementSummary = addQualityChecks(auditData.managementSummary, mergedRenderData, internalJson);
   
   // Minimum duration for UX
   const elapsed = Date.now() - startTime;
@@ -307,21 +307,17 @@ function mergeSegmentResults(acceptData: any, rejectData: any): any {
   }
   
   return auditData;
-
   } catch (error) {
     console.error('❌ performLiveAudit: Live analysis failed, falling back to basic analysis:', error);
     
     // Fallback to basic simulation
     await updateProgress(4);
     const internalJson = await generateInternalAuditJson(input, false, updateProgress);
-    await updateProgress(7);
+    await updateProgress(5);
     
     // Add error info to audit data
     const syntheticRenderData = buildSyntheticRenderData(internalJson);
     const auditData = convertToDisplayFormat(internalJson, input, syntheticRenderData);
-    auditData.managementSummary.data_source = `Záložný režim (Live analýza zlyhala: ${error.message})`;
-    
-    console.log('🔄 performLiveAudit: Fallback analysis completed, verdict:', auditData.managementSummary.verdict);
     
     return auditData;
   }
