@@ -1110,21 +1110,83 @@ serve(async (req) => {
       
       ws.onerror = (error) => {
         logger.log('error', 'WebSocket error', { error: String(error) });
+        
+        // Build partial metrics if any data was collected
+        const partialMetrics = {
+          requests_pre: allRequests.filter(r => r.phase === 'pre').length,
+          requests_post_accept: allRequests.filter(r => r.phase === 'post_accept').length,
+          requests_post_reject: allRequests.filter(r => r.phase === 'post_reject').length,
+          cookies_pre: cookies_pre.length,
+          cookies_post_accept: cookies_post_accept.length,
+          cookies_post_reject: cookies_post_reject.length,
+          setCookie_pre: setCookieEvents_pre.length,
+          setCookie_post_accept: setCookieEvents_post_accept.length,
+          setCookie_post_reject: setCookieEvents_post_reject.length,
+          storage_pre_items: storage_pre.length
+        };
+        
         resolve({
           success: false,
           error_code: 'WEBSOCKET_ERROR',
-          details: String(error)
+          details: String(error),
+          partial: allRequests.length > 0 || cookies_pre.length > 0 ? {
+            metrics: partialMetrics,
+            phase: currentPhase,
+            data_collected: {
+              requests: allRequests.length,
+              cookies: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+              storage: storage_pre.length
+            }
+          } : undefined
         });
       };
       
       // Timeout
       setTimeout(async () => {
         await logger.log('error', '⏰ Global timeout after 60 seconds');
+        
+        // Build partial metrics from collected data so far
+        const partialMetrics = {
+          requests_pre: allRequests.filter(r => r.phase === 'pre').length,
+          requests_post_accept: allRequests.filter(r => r.phase === 'post_accept').length,
+          requests_post_reject: allRequests.filter(r => r.phase === 'post_reject').length,
+          cookies_pre: cookies_pre.length,
+          cookies_post_accept: cookies_post_accept.length,
+          cookies_post_reject: cookies_post_reject.length,
+          setCookie_pre: setCookieEvents_pre.length,
+          setCookie_post_accept: setCookieEvents_post_accept.length,
+          setCookie_post_reject: setCookieEvents_post_reject.length,
+          storage_pre_items: storage_pre.length,
+          third_party_hosts: new Set(allRequests.map(r => getETldPlusOneLite(new URL(r.url).hostname))).size,
+          tracking_params_count: allRequests.filter(r => 
+            new URL(r.url).search && SIGNIFICANT_PARAMS.some(param => new URL(r.url).searchParams.has(param))
+          ).length
+        };
+
+        // Log structured partial summary
+        await logger.log('error', '⏰ Global timeout - partial collection summary', {
+          url: inputUrl,
+          phase: currentPhase,
+          partial_metrics: partialMetrics,
+          requests_collected: allRequests.length,
+          cookies_collected: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+          storage_collected: storage_pre.length
+        });
+        
         ws.close();
         resolve({
           success: false,
           error_code: 'TIMEOUT',
-          details: 'Analysis timeout after 60 seconds'
+          details: 'Analysis timeout after 60 seconds',
+          partial: {
+            metrics: partialMetrics,
+            phase: currentPhase,
+            data_collected: {
+              requests: allRequests.length,
+              cookies: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+              storage: storage_pre.length
+            }
+          }
         });
       }, 60000);
     });
@@ -1134,18 +1196,58 @@ serve(async (req) => {
     if (!analysisResult.success) {
       await logger.log('error', 'Analysis failed', analysisResult);
       
-      // Update audit_runs with failure
-      await supabase
-        .from('audit_runs')
-        .update({
-          status: 'failed',
-          error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
-          error_message: (analysisResult as any).details || 'Analysis failed',
-          ended_at: new Date().toISOString(),
-          duration_ms: duration,
-          bl_status_code: 500 // Since analysis failed
-        })
-        .eq('trace_id', traceId);
+      // If partial data is available, log it and update audit_runs with partial metrics
+      if ((analysisResult as any).partial) {
+        const partial = (analysisResult as any).partial;
+        await logger.log('info', 'Final collection summary (partial)', {
+          url: inputUrl,
+          partial_data: partial,
+          phase: partial.phase,
+          metrics: partial.metrics
+        });
+        
+        // Update audit_runs with partial metrics
+        await supabase
+          .from('audit_runs')
+          .update({
+            status: 'failed',
+            error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
+            error_message: (analysisResult as any).details || 'Analysis failed',
+            ended_at: new Date().toISOString(),
+            duration_ms: duration,
+            bl_status_code: 500,
+            requests_total: partial.metrics?.requests_pre || 0,
+            requests_pre_consent: partial.metrics?.requests_pre || 0,
+            third_parties_count: partial.metrics?.third_party_hosts || 0,
+            beacons_count: partial.metrics?.tracking_params_count || 0,
+            cookies_pre_count: partial.metrics?.cookies_pre || 0,
+            cookies_post_count: Math.max(partial.metrics?.cookies_post_accept || 0, partial.metrics?.cookies_post_reject || 0),
+            meta: {
+              requests_post_accept: partial.metrics?.requests_post_accept || 0,
+              requests_post_reject: partial.metrics?.requests_post_reject || 0,
+              setCookie_pre: partial.metrics?.setCookie_pre || 0,
+              setCookie_post_accept: partial.metrics?.setCookie_post_accept || 0,
+              setCookie_post_reject: partial.metrics?.setCookie_post_reject || 0,
+              storage_items: partial.metrics?.storage_pre_items || 0,
+              phase_reached: partial.phase,
+              partial_data: true
+            }
+          })
+          .eq('trace_id', traceId);
+      } else {
+        // Update audit_runs with failure (no partial data)
+        await supabase
+          .from('audit_runs')
+          .update({
+            status: 'failed',
+            error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
+            error_message: (analysisResult as any).details || 'Analysis failed',
+            ended_at: new Date().toISOString(),
+            duration_ms: duration,
+            bl_status_code: 500
+          })
+          .eq('trace_id', traceId);
+      }
 
       return new Response(JSON.stringify({
         ...analysisResult,
