@@ -1,13 +1,13 @@
-import { useState, useEffect } from 'react';
-import { Card, CardContent } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import { CheckCircle, Circle, Loader2 } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { CheckCircle, Clock, AlertCircle } from "lucide-react";
+import { useEffect, useState } from "react";
 
-export interface ProgressStep {
+interface ProgressStep {
   id: string;
   title: string;
   description: string;
-  status: 'pending' | 'current' | 'completed';
+  status: 'pending' | 'current' | 'completed' | 'error';
 }
 
 interface AnalysisProgressProps {
@@ -17,54 +17,66 @@ interface AnalysisProgressProps {
 }
 
 export const AnalysisProgress = ({ steps, currentStepIndex, isVisible }: AnalysisProgressProps) => {
-  const [progress, setProgress] = useState(0);
+  const [progressValue, setProgressValue] = useState(0);
 
   useEffect(() => {
-    if (isVisible && currentStepIndex >= 0) {
-      const progressValue = ((currentStepIndex + 1) / steps.length) * 100;
-      setProgress(progressValue);
+    if (isVisible) {
+      const progress = Math.round((currentStepIndex / steps.length) * 100);
+      setProgressValue(progress);
     }
   }, [currentStepIndex, steps.length, isVisible]);
 
   if (!isVisible) return null;
 
   return (
-    <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <Card className="w-full max-w-md mx-4">
-        <CardContent className="p-6">
-          <div className="text-center mb-6">
-            <h2 className="text-xl font-semibold mb-2">Analyzujem webovú stránku</h2>
-            <p className="text-muted-foreground text-sm">
-              Vykonávam kompletnú analýzu GDPR súladu...
-            </p>
+        <CardHeader>
+          <CardTitle className="text-center">Analýza prebieha</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm">
+              <span>Postup</span>
+              <span>{progressValue}%</span>
+            </div>
+            <Progress value={progressValue} className="w-full" />
           </div>
-
-          <Progress value={progress} className="mb-6" />
-
+          
           <div className="space-y-3">
-            {steps.map((step, index) => (
-              <div key={step.id} className="flex items-start gap-3">
-                <div className="mt-0.5">
-                  {index < currentStepIndex ? (
-                    <CheckCircle className="h-5 w-5 text-success" />
-                  ) : index === currentStepIndex ? (
-                    <Loader2 className="h-5 w-5 text-primary animate-spin" />
-                  ) : (
-                    <Circle className="h-5 w-5 text-muted-foreground" />
-                  )}
+            {steps.map((step, index) => {
+              const isCurrent = index === currentStepIndex;
+              const isCompleted = index < currentStepIndex;
+              const isPending = index > currentStepIndex;
+              
+              return (
+                <div key={step.id} className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5">
+                    {isCompleted && (
+                      <CheckCircle className="h-5 w-5 text-green-500" />
+                    )}
+                    {isCurrent && (
+                      <Clock className="h-5 w-5 text-blue-500 animate-pulse" />
+                    )}
+                    {isPending && (
+                      <div className="h-5 w-5 rounded-full border-2 border-muted-foreground/30" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-medium ${
+                      isCurrent ? 'text-blue-600 dark:text-blue-400' : 
+                      isCompleted ? 'text-green-600 dark:text-green-400' :
+                      'text-muted-foreground'
+                    }`}>
+                      {step.title}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {step.description}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex-1">
-                  <p className={`text-sm font-medium ${
-                    index <= currentStepIndex ? 'text-foreground' : 'text-muted-foreground'
-                  }`}>
-                    {step.title}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {step.description}
-                  </p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </CardContent>
       </Card>
@@ -74,51 +86,39 @@ export const AnalysisProgress = ({ steps, currentStepIndex, isVisible }: Analysi
 
 export const DEFAULT_AUDIT_STEPS: ProgressStep[] = [
   {
-    id: 'fetch',
-    title: 'Načítavam stránku',
-    description: 'Sťahujem HTML obsah a analyzujem štruktúru',
+    id: 'initialize',
+    title: 'Spúšťam analýzu',
+    description: 'Inicializujem paralelné analýzy pre oba scenáre',
     status: 'pending'
   },
   {
-    id: 'https',
-    title: 'Kontrola HTTPS',
-    description: 'Overujem zabezpečenie SSL certifikátu',
+    id: 'accept_path',
+    title: 'Accept analýza',
+    description: 'Analyzujem správanie pri prijatí súhlasu',
     status: 'pending'
   },
   {
-    id: 'third-parties',
-    title: 'Detekcia tretích strán',
-    description: 'Identifikujem externé domény a služby',
+    id: 'reject_path',
+    title: 'Reject analýza', 
+    description: 'Analyzujem správanie pri odmietnutí súhlasu',
     status: 'pending'
   },
   {
-    id: 'trackers',
-    title: 'Analýza trackerov',
-    description: 'Hľadám tracking pixely a beacony',
+    id: 'merge_results',
+    title: 'Spájam výsledky',
+    description: 'Kombinujem dáta z oboch analýz',
     status: 'pending'
   },
   {
-    id: 'cookies',
-    title: 'Sken cookies',
-    description: 'Kategorizujem a analyzujem cookies',
+    id: 'data_processing',
+    title: 'Spracovávam dáta',
+    description: 'Analyzujem compliance vzory a porušenia',
     status: 'pending'
   },
   {
-    id: 'storage',
-    title: 'Kontrola úložiska',
-    description: 'Skúmam localStorage a sessionStorage',
-    status: 'pending'
-  },
-  {
-    id: 'consent',
-    title: 'Consent management',
-    description: 'Overujem súhlas používateľa a CMP',
-    status: 'pending'
-  },
-  {
-    id: 'verdict',
-    title: 'Generujem výsledok',
-    description: 'Vyhodnocujem súlad a vytváram report',
+    id: 'report_generation',
+    title: 'Generujem report',
+    description: 'Zostavujem finálny compliance report',
     status: 'pending'
   }
 ];

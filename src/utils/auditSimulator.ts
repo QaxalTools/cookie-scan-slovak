@@ -162,100 +162,140 @@ export async function performLiveAudit(
     }
 
     if (!acceptResponse.data?.success && !rejectResponse.data?.success) {
-      console.warn('⚠️ performLiveAudit: Edge function returned non-success, using fallback. Error:', data?.error);
-      console.log('Trace ID:', data?.trace_id);
-      console.log('Browserless Status:', data?.bl_status_code, data?.bl_health_status);
+      console.warn('⚠️ performLiveAudit: Both analysis paths failed, using fallback');
       
       // Log enhanced error info for debugging
+      const errorData = acceptResponse.data || rejectResponse.data;
       if ((window as any).debugLog?.addLog) {
         (window as any).debugLog.addLog({
           type: 'error',
-          message: `Audit failed: ${data?.error}`,
+          message: `Both audit paths failed: ${errorData?.error}`,
           source: 'audit-simulator',
-          traceId: data?.trace_id,
-          blStatusCode: data?.bl_status_code,
-          blHealthStatus: data?.bl_health_status
+          traceId: errorData?.trace_id
         });
       }
       
-      // Enhanced Slovak error messages based on error_code and auth_status from new structure
-      if (data?.error_code === 'NO_TOKEN') {
-        throw new Error('❌ Browserless token nie je nakonfigurovaný. Skontrolujte nastavenia v Supabase.');
-      } else if (data?.error_code === 'BROWSERLESS_AUTH_FAILED') {
-        switch (data?.auth_status) {
-          case 'invalid_token':
-            throw new Error('❌ Neplatný Browserless token alebo nesprávny produkt (Chrome vs. Playwright). Skontrolujte nastavenie v Browserless dashboard.');
-          case 'wrong_product':
-            throw new Error('❌ Token nie je pre správny produkt. Potrebujete Chromium/WebSocket CDP prístup (nie len BQL/REST plán).');
-          case 'network_error':
-            throw new Error('🔧 Problém s pripojením k Browserless službe. Skontrolujte internetové pripojenie.');
-          default:
-            throw new Error(`❌ Browserless autentifikácia zlyhala: ${data?.auth_status} (endpoint: ${data?.base || 'unknown'})`);
-        }
-      } else if (data?.error_code === 'FUNCTION_ERROR') {
-        throw new Error(`❌ Chyba funkcie: ${data?.error}`);
+      // Enhanced Slovak error messages based on error_code
+      if (errorData?.error_code === 'BROWSERLESS_AUTH_FAILED') {
+        throw new Error('❌ Browserless autentifikácia zlyhala. Skontrolujte nastavenia tokenu.');
+      } else if (errorData?.error_code === 'TIMEOUT') {
+        throw new Error('⏰ Analýza trvá príliš dlho. Skúste jednoduchšiu stránku alebo to skúste neskôr.');
+      } else if (errorData?.error_code === 'NETWORK_ERROR') {
+        throw new Error('🌐 Problém so sieťou pri analýze stránky. Skontrolujte dostupnosť URL.');
       }
       
-      // Legacy fallback for backward compatibility
-      else if (data?.bl_health_status === 'token_error') {
-        throw new Error('❌ Browserless token je neplatný alebo pre nesprávny produkt (Chrome vs. Playwright). Skontrolujte nastavenie v Browserless dashboard.');
-      } else if (data?.bl_status_code === 401 || data?.bl_status_code === 403) {
-        throw new Error('❌ Browserless autentifikácia zlyhala. Token môže byť zamietnutý kvôli IP allowlist alebo iným obmedzeniam.');
-      } else if (data?.bl_health_status === 'failed') {
-        throw new Error('⚠️ Browserless služba nedostupná alebo preťažená. Skúste znovu o chvíľu.');
-      } else if (data?.bl_health_status === 'error') {
-        throw new Error('🔧 Problém s pripojením k Browserless službe. Skontrolujte internetové pripojenie.');
-      }
+      // Enhanced fallback for live analysis failures
+      console.log('🔄 performLiveAudit: Live analysis failed, using fallback simulation...');
+      await updateProgress(3);
       
-      // Fall back to basic analysis
-      const internalJson = await generateInternalAuditJson(input, false, updateProgress);
-      await updateProgress(7);
-      const syntheticRenderData = buildSyntheticRenderData(internalJson);
-      const fallbackData = convertToDisplayFormat(internalJson, input, syntheticRenderData);
-      fallbackData.managementSummary.data_source = `Záložný režim (Edge function error: ${data?.error || 'Unknown error'})`;
-      return fallbackData;
+      const fallbackJson = await generateInternalAuditJson(normalizedUrl, false, updateProgress);
+      await updateProgress(5);
+      const fallbackRenderData = buildSyntheticRenderData(fallbackJson);
+      const fallbackResult = convertToDisplayFormat(fallbackJson, normalizedUrl, fallbackRenderData);
+      
+      // Add partial flag and failure notice for live failures
+      (fallbackResult as any).isPartial = true;
+      (fallbackResult as any).notices = (fallbackResult as any).notices || [];
+      (fallbackResult as any).notices.unshift({
+        type: 'warning' as const,
+        title: 'Simulovaná analýza',
+        message: 'Live analýza zlyhala, používam simulované dáta. Výsledky môžu byť neúplné.'
+      });
+      
+      return fallbackResult;
     }
 
-    console.log('✅ performLiveAudit: Live data received from Edge Function');
-    console.log('Trace ID:', data?.trace_id);
-    console.log('Browserless Status:', data?.bl_status_code, data?.bl_health_status);
-    
-    // Log success info for debugging  
-    if ((window as any).debugLog?.addLog) {
-      (window as any).debugLog.addLog({
-        type: 'info',
-        message: `Audit completed successfully`,
-        source: 'audit-simulator',
-        traceId: data?.trace_id,
-        blStatusCode: data?.bl_status_code,
-        blHealthStatus: data?.bl_health_status
-      });
-    }
-    
-    if (data.data) {
-      console.log('📊 performLiveAudit: Data stats:', {
-        finalUrl: data.data.finalUrl,
-        cookiesPre: data.data.cookies_pre?.length || 0,
-        cookiesPostAccept: data.data.cookies_post_accept?.length || 0,
-        cookiesPostReject: data.data.cookies_post_reject?.length || 0,
-        requestsPre: data.data.requests_pre?.length || 0,
-        requestsPostAccept: data.data.requests_post_accept?.length || 0,
-        requestsPostReject: data.data.requests_post_reject?.length || 0,
-        cmpDetected: data.data.cmp_detected,
-        consentClicked: data.data.consent_clicked,
-        hasError: !!data.data._error
-      });
-    }
+    // Step 4: Merge the two segments into unified renderData
+    await updateProgress(4);
+    const mergedRenderData = mergeSegmentResults(acceptResponse.data, rejectResponse.data);
+    console.log('Merged render data:', mergedRenderData);
+
+    // Step 5: Transform to internal format  
+    const internalJson = transformRenderDataToInternalJson(mergedRenderData);
+    console.log('Transformed internal JSON:', internalJson);
+
+    // Step 6: Convert to display format
     await updateProgress(5);
+    const auditData = convertToDisplayFormat(internalJson, mergedRenderData);
+    console.log('Final audit data:', auditData);
 
-    // Transform live data to internal format
-    const renderData = data.data;
-    const internalJson = await transformRenderDataToInternalJson(renderData, updateProgress);
-    
-    await updateProgress(7);
-    
-  // Convert to display format with real renderData
-  const auditData = convertToDisplayFormat(internalJson, input, renderData);
+    return auditData;
+  } catch (error) {
+    console.error('Live audit error:', error);
+    throw error;
+  }
+}
+
+// Merge two segment results into unified renderData format
+function mergeSegmentResults(acceptData: any, rejectData: any): any {
+  // Prefer accept data for primary fields, fallback to reject
+  const primary = acceptData?.success ? acceptData : rejectData;
+  const secondary = acceptData?.success ? rejectData : acceptData;
+  
+  if (!primary?.success) {
+    throw new Error('No successful analysis results to merge');
+  }
+
+  // Use accept segment's pre-consent data as baseline
+  const preData = primary.data?.pre || {
+    cookies: primary.cookies_pre || [],
+    storage: primary.storage_pre || [],
+    requests: primary.requests_pre || [],
+    set_cookie_headers: primary.set_cookie_headers_pre || []
+  };
+
+  // Extract post-consent data from both paths
+  const acceptPostData = acceptData?.success && acceptData.data?.post?.kind === 'accept' 
+    ? acceptData.data.post 
+    : {
+        cookies: acceptData?.cookies_post_accept || [],
+        storage: acceptData?.storage_post_accept || [],
+        requests: acceptData?.requests_post_accept || [],
+        set_cookie_headers: acceptData?.set_cookie_headers_post_accept || []
+      };
+
+  const rejectPostData = rejectData?.success && rejectData.data?.post?.kind === 'reject'
+    ? rejectData.data.post
+    : {
+        cookies: rejectData?.cookies_post_reject || [],
+        storage: rejectData?.storage_post_reject || [],
+        requests: rejectData?.requests_post_reject || [],
+        set_cookie_headers: rejectData?.set_cookie_headers_post_reject || []
+      };
+
+  // Build unified response in legacy format for compatibility
+  return {
+    success: true,
+    final_url: primary.final_url,
+    trace_id: primary.trace_id,
+    metrics: {
+      ...primary.metrics,
+      segment: 'merged'
+    },
+    // Unified data structure
+    cookies_pre: preData.cookies,
+    cookies_post_accept: acceptPostData.cookies,
+    cookies_post_reject: rejectPostData.cookies,
+    storage_pre: preData.storage,
+    storage_post_accept: acceptPostData.storage,
+    storage_post_reject: rejectPostData.storage,
+    requests_pre: preData.requests,
+    requests_post_accept: acceptPostData.requests,
+    requests_post_reject: rejectPostData.requests,
+    set_cookie_headers_pre: preData.set_cookie_headers,
+    set_cookie_headers_post_accept: acceptPostData.set_cookie_headers,
+    set_cookie_headers_post_reject: rejectPostData.set_cookie_headers,
+    phase_durations: {
+      phase_a: Math.max(
+        primary.phase_durations?.phase_a || 0,
+        secondary?.phase_durations?.phase_a || 0
+      ),
+      phase_b: (primary.phase_durations?.phase_b || 0) + (secondary?.phase_durations?.phase_b || 0),
+      total: (primary.phase_durations?.total || 0) + (secondary?.phase_durations?.total || 0)
+    },
+    partial: (primary.partial || false) || (secondary?.partial || false)
+  };
+}
   
   // Add quality checks and INCOMPLETE banners
   auditData.managementSummary = addQualityChecks(auditData.managementSummary, renderData, internalJson);
