@@ -1020,7 +1020,7 @@ serve(async (req) => {
         }
       };
       
-      ws.onclose = () => {
+      ws.onclose = async () => {
         await logger.log('info', '🔌 WebSocket connection closed');
       };
       
