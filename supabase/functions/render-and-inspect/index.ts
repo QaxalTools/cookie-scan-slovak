@@ -336,7 +336,7 @@ serve(async (req) => {
     await logger.log('info', `📝 Analyzing URL: ${url}`);
 
     if (!url) {
-      const error = { success: false, error_code: 'MISSING_URL', details: 'URL parameter is required' };
+      const error = { success: false, error_code: 'MISSING_URL', details: 'URL parameter is required', trace_id: traceId };
       await logger.log('error', 'Missing URL parameter', error);
       return new Response(JSON.stringify(error), {
         status: 200,
@@ -344,14 +344,50 @@ serve(async (req) => {
       });
     }
 
+    // Create initial audit_runs entry
+    const { data: auditRun, error: insertError } = await supabase
+      .from('audit_runs')
+      .insert({
+        trace_id: traceId,
+        input_url: url,
+        status: 'running',
+        started_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      const error = { success: false, error_code: 'DB_INSERT_FAILED', details: 'Database initialization failed', trace_id: traceId };
+      await logger.log('error', 'Failed to create audit_runs entry', { error: insertError });
+      return new Response(JSON.stringify(error), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    await logger.log('info', `📝 Created audit run record: ${auditRun?.id}`);
+
     // Get and validate Browserless token
     const rawToken = Deno.env.get('BROWSERLESS_TOKEN') || Deno.env.get('BROWSERLESS_API_KEY');
     const token = normalizeToken(rawToken);
     await logger.log('info', `🔑 Using Browserless token: ${token.slice(0, 8)}...${token.slice(-4)}`);
 
     if (!token) {
-      const error = { success: false, error_code: 'BROWSERLESS_AUTH_FAILED', details: 'No Browserless token configured' };
+      const error = { success: false, error_code: 'BROWSERLESS_AUTH_FAILED', details: 'No Browserless token configured', trace_id: traceId };
       await logger.log('error', 'Missing Browserless token', error);
+      
+      // Update audit_runs with failure
+      await supabase
+        .from('audit_runs')
+        .update({
+          status: 'failed',
+          error_code: 'BROWSERLESS_AUTH_FAILED',
+          error_message: 'No Browserless token configured',
+          ended_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime
+        })
+        .eq('trace_id', traceId);
+
       return new Response(JSON.stringify(error), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -367,9 +403,24 @@ serve(async (req) => {
         success: false, 
         error_code: 'BROWSERLESS_AUTH_FAILED', 
         details: `Auth status: ${authCheck.status}`,
-        auth_details: authCheck.details 
+        auth_details: authCheck.details,
+        trace_id: traceId
       };
       await logger.log('error', 'Browserless authentication failed', error);
+      
+      // Update audit_runs with failure
+      await supabase
+        .from('audit_runs')
+        .update({
+          status: 'failed',
+          error_code: 'BROWSERLESS_AUTH_FAILED',
+          error_message: `Auth status: ${authCheck.status}`,
+          ended_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+          bl_health_status: authCheck.status
+        })
+        .eq('trace_id', traceId);
+
       return new Response(JSON.stringify(error), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -1067,7 +1118,8 @@ serve(async (req) => {
       };
       
       // Timeout
-      setTimeout(() => {
+      setTimeout(async () => {
+        await logger.log('error', '⏰ Global timeout after 60 seconds');
         ws.close();
         resolve({
           success: false,
@@ -1081,20 +1133,75 @@ serve(async (req) => {
     
     if (!analysisResult.success) {
       await logger.log('error', 'Analysis failed', analysisResult);
-      return new Response(JSON.stringify(analysisResult), {
+      
+      // Update audit_runs with failure
+      await supabase
+        .from('audit_runs')
+        .update({
+          status: 'failed',
+          error_code: (analysisResult as any).error_code || 'UNKNOWN_ERROR',
+          error_message: (analysisResult as any).details || 'Analysis failed',
+          ended_at: new Date().toISOString(),
+          duration_ms: duration,
+          bl_status_code: 500 // Since analysis failed
+        })
+        .eq('trace_id', traceId);
+
+      return new Response(JSON.stringify({
+        ...analysisResult,
+        trace_id: traceId,
+        duration_ms: duration
+      }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
     await logger.log('info', '✅ Analysis completed successfully');
+    
+    // Extract key metrics for audit_runs update
+    const data = analysisResult.data;
+    const finalMetrics = data.metrics || {};
+    
+    // Update audit_runs with success
+    await supabase
+      .from('audit_runs')
+      .update({
+        status: 'completed',
+        ended_at: new Date().toISOString(),
+        duration_ms: duration,
+        bl_status_code: 200,
+        bl_health_status: 'ok',
+        normalized_url: data.final_url || data.finalUrl,
+        requests_total: finalMetrics.requests_pre || 0,
+        requests_pre_consent: finalMetrics.requests_pre || 0,
+        third_parties_count: finalMetrics.third_party_hosts || 0,
+        beacons_count: finalMetrics.tracking_params_count || 0,
+        cookies_pre_count: finalMetrics.cookies_pre || 0,
+        cookies_post_count: Math.max(finalMetrics.cookies_post_accept || 0, finalMetrics.cookies_post_reject || 0),
+        meta: {
+          requests_post_accept: finalMetrics.requests_post_accept || 0,
+          requests_post_reject: finalMetrics.requests_post_reject || 0,
+          setCookie_pre: finalMetrics.setCookie_pre || 0,
+          setCookie_post_accept: finalMetrics.setCookie_post_accept || 0,
+          setCookie_post_reject: finalMetrics.setCookie_post_reject || 0,
+          storage_items: finalMetrics.storage_pre_items || 0,
+          cmp_detected: data.cmp?.detected || false,
+          cmp_type: data.cmp?.type,
+          self_check_complete: data.self_check?.complete || false,
+          self_check_reasons: data.self_check?.reasons || []
+        }
+      })
+      .eq('trace_id', traceId);
+
     await logger.log('info', '✅ Analysis function completed successfully');
 
     return new Response(JSON.stringify({
       success: true,
       duration_ms: duration,
       trace_id: traceId,
-      browserless_status: 'ok',
+      bl_status_code: 200,
+      bl_health_status: 'ok',
       ...analysisResult.data
     }), {
       status: 200,
@@ -1112,6 +1219,23 @@ serve(async (req) => {
     };
     
     await logger.log('error', 'Unexpected error in analysis function', errorResponse);
+    
+    // Update audit_runs with unexpected error
+    try {
+      await supabase
+        .from('audit_runs')
+        .update({
+          status: 'failed',
+          error_code: 'UNEXPECTED_ERROR',
+          error_message: String(error),
+          ended_at: new Date().toISOString(),
+          duration_ms: duration,
+          bl_status_code: 500
+        })
+        .eq('trace_id', traceId);
+    } catch (updateError) {
+      await logger.log('error', 'Failed to update audit_runs on unexpected error', { updateError: String(updateError) });
+    }
     
     return new Response(JSON.stringify(errorResponse), {
       status: 200,
