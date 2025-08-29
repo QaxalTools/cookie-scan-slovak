@@ -211,7 +211,7 @@ export async function performLiveAudit(
     console.log('Merged render data:', mergedRenderData);
 
     // Step 5: Transform to internal format  
-    const internalJson = transformRenderDataToInternalJson(mergedRenderData);
+    const internalJson = await transformRenderDataToInternalJson(mergedRenderData);
     console.log('Transformed internal JSON:', internalJson);
 
     // Step 6: Convert to display format
@@ -296,33 +296,6 @@ function mergeSegmentResults(acceptData: any, rejectData: any): any {
     partial: (primary.partial || false) || (secondary?.partial || false)
   };
 }
-  
-  // Add quality checks and INCOMPLETE banners
-  auditData.managementSummary = addQualityChecks(auditData.managementSummary, mergedRenderData, internalJson);
-  
-  // Minimum duration for UX
-  const elapsed = Date.now() - startTime;
-  if (elapsed < minDurationMs) {
-    await new Promise(resolve => setTimeout(resolve, minDurationMs - elapsed));
-  }
-  
-  return auditData;
-  } catch (error) {
-    console.error('❌ performLiveAudit: Live analysis failed, falling back to basic analysis:', error);
-    
-    // Fallback to basic simulation
-    await updateProgress(4);
-    const internalJson = await generateInternalAuditJson(input, false, updateProgress);
-    await updateProgress(5);
-    
-    // Add error info to audit data
-    const syntheticRenderData = buildSyntheticRenderData(internalJson);
-    const auditData = convertToDisplayFormat(internalJson, input, syntheticRenderData);
-    
-    return auditData;
-  }
-}
-
 async function transformRenderDataToInternalJson(
   renderData: any,
   updateProgress?: (stepIndex: number) => Promise<void>
