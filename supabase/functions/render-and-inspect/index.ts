@@ -912,6 +912,7 @@ serve(async (req) => {
       browserlessData.storage_pre = storage_pre;
       browserlessData.cmp = cmpResult.result?.value || {};
       browserlessData.final_url = finalUrl;
+      browserlessData.finalUrl = finalUrl; // Backward compatibility
       
       // Store Set-Cookie events
       browserlessData.set_cookie_headers_pre = setCookieEvents_pre;

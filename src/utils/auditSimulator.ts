@@ -282,10 +282,24 @@ async function transformRenderDataToInternalJson(
   
   await updateProgress?.(6);
 
-  // Extract data from renderData with HTTPS detection
-  const finalUrl = renderData.finalUrl || 'unknown';
-  const urlObj = new URL(finalUrl);
-  const httpsConfigured = urlObj.protocol === 'https:';
+  // Extract data from renderData with HTTPS detection - robust URL handling
+  const finalUrl = renderData.final_url || renderData.finalUrl || 'https://unknown.example.com';
+  console.log('🔍 Frontend finalUrl source:', { 
+    final_url: renderData.final_url, 
+    finalUrl: renderData.finalUrl, 
+    chosen: finalUrl 
+  });
+  
+  let urlObj;
+  let httpsConfigured = false;
+  try {
+    urlObj = new URL(finalUrl);
+    httpsConfigured = urlObj.protocol === 'https:';
+  } catch (error) {
+    console.warn('⚠️ Invalid finalUrl, using fallback:', finalUrl, error.message);
+    urlObj = new URL('https://unknown.example.com');
+    httpsConfigured = false;
+  }
   
   // Main domain using eTLD+1 parsing
   const mainHost = urlObj.hostname.toLowerCase();
