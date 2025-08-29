@@ -358,17 +358,12 @@ class SessionManager {
   async attachHandlers() {
     if (!this.ws) return;
     
-    // Auto-attach to all targets
+    // Auto-attach to all targets (fixed parameters)
     await this.sendCommand('Target.setAutoAttach', {
       autoAttach: true,
-      flatten: true,
-      filter: [
-        { type: 'page' },
-        { type: 'iframe' },
-        { type: 'worker' }
-      ]
+      flatten: true
     });
-    await this.logger.log('info', '🎯 Auto-attach configured for page/iframe/worker');
+    await this.logger.log('info', '🎯 Auto-attach configured for page/worker');
   }
   
   async onAttachedToTarget(sessionId: string, type: string, targetId?: string) {
@@ -479,7 +474,12 @@ class EventsPipeline {
     this.logger = logger;
   }
   
-  onNetworkRequestWillBeSent(event: any, sessionId: string) {
+  onNetworkRequestWillBeSent(event: any, sessionId: string, activeSessionId?: string) {
+    // POINT 2: Strict session ID filter - only process events for current active session
+    if (activeSessionId && sessionId !== activeSessionId) {
+      return; // Ignore events from other sessions
+    }
+    
     this.sessionManager.onNetworkRequestStart();
     
     const requestData = {
@@ -492,7 +492,12 @@ class EventsPipeline {
     this.requestMap.set(event.requestId, requestData);
   }
   
-  onNetworkResponseReceived(event: any, sessionId: string) {
+  onNetworkResponseReceived(event: any, sessionId: string, activeSessionId?: string) {
+    // POINT 2: Strict session ID filter
+    if (activeSessionId && sessionId !== activeSessionId) {
+      return;
+    }
+    
     this.responseInfo.set(event.requestId, {
       ...event,
       sessionId,
@@ -500,7 +505,12 @@ class EventsPipeline {
     });
   }
   
-  onNetworkResponseReceivedExtraInfo(event: any, sessionId: string) {
+  onNetworkResponseReceivedExtraInfo(event: any, sessionId: string, activeSessionId?: string) {
+    // POINT 2: Strict session ID filter
+    if (activeSessionId && sessionId !== activeSessionId) {
+      return;
+    }
+    
     const headers = normalizeHeaderKeys(event.headers);
     const setCookieHeaders = ensureArray(headers['set-cookie']);
     
@@ -523,12 +533,34 @@ class EventsPipeline {
     }
   }
   
-  onNetworkLoadingFinished(event: any, sessionId: string) {
+  onNetworkLoadingFinished(event: any, sessionId: string, activeSessionId?: string) {
+    // POINT 2: Strict session ID filter
+    if (activeSessionId && sessionId !== activeSessionId) {
+      return;
+    }
     this.sessionManager.onNetworkRequestEnd();
   }
   
-  onNetworkLoadingFailed(event: any, sessionId: string) {
+  onNetworkLoadingFailed(event: any, sessionId: string, activeSessionId?: string) {
+    // POINT 2: Strict session ID filter
+    if (activeSessionId && sessionId !== activeSessionId) {
+      return;
+    }
     this.sessionManager.onNetworkRequestEnd();
+  }
+  
+  // POINT 6: Stable POST body collection
+  postDataMap = new Map<string, any>();
+  
+  async collectPostData(requestId: string, sessionId: string): Promise<void> {
+    try {
+      const result = await this.sessionManager.sendCommand('Network.getRequestPostData', { requestId }, sessionId) as any;
+      if (result?.result?.postData) {
+        this.postDataMap.set(requestId, result.result.postData);
+      }
+    } catch {
+      // Ignore failures - POST data collection is best effort
+    }
   }
 }
 
@@ -588,18 +620,22 @@ class SnapshotBuilder {
   
   private async getStorageData(pageSessionId: string) {
     try {
-      // Get localStorage and sessionStorage
+      // POINT 5: Correct storage metrics - get raw counts and unique keys
       const localStorageResult = await this.sessionManager.sendCommand('Runtime.evaluate', {
         expression: `(() => {
           try {
             const items = {};
+            const keys = [];
             for (let i = 0; i < localStorage.length; i++) {
               const key = localStorage.key(i);
-              if (key) items[key] = localStorage.getItem(key);
+              if (key) {
+                keys.push(key);
+                items[key] = localStorage.getItem(key);
+              }
             }
-            return { type: 'localStorage', items };
+            return { type: 'localStorage', items, count: keys.length, uniqueKeys: keys };
           } catch (e) {
-            return { type: 'localStorage', items: {}, error: e.message };
+            return { type: 'localStorage', items: {}, count: 0, uniqueKeys: [], error: e.message };
           }
         })()`
       }, pageSessionId) as any;
@@ -608,23 +644,49 @@ class SnapshotBuilder {
         expression: `(() => {
           try {
             const items = {};
+            const keys = [];
             for (let i = 0; i < sessionStorage.length; i++) {
               const key = sessionStorage.key(i);
-              if (key) items[key] = sessionStorage.getItem(key);
+              if (key) {
+                keys.push(key);
+                items[key] = sessionStorage.getItem(key);
+              }
             }
-            return { type: 'sessionStorage', items };
+            return { type: 'sessionStorage', items, count: keys.length, uniqueKeys: keys };
           } catch (e) {
-            return { type: 'sessionStorage', items: {}, error: e.message };
+            return { type: 'sessionStorage', items: {}, count: 0, uniqueKeys: [], error: e.message };
           }
         })()`
       }, pageSessionId) as any;
       
+      const localStorage = localStorageResult?.result?.value?.items || {};
+      const sessionStorage = sessionStorageResult?.result?.value?.items || {};
+      const localStorageCount = localStorageResult?.result?.value?.count || 0;
+      const sessionStorageCount = sessionStorageResult?.result?.value?.count || 0;
+      const localStorageKeys = localStorageResult?.result?.value?.uniqueKeys || [];
+      const sessionStorageKeys = sessionStorageResult?.result?.value?.uniqueKeys || [];
+      
       return {
-        localStorage: localStorageResult?.result?.value?.items || {},
-        sessionStorage: sessionStorageResult?.result?.value?.items || {}
+        localStorage,
+        sessionStorage,
+        storageMetrics: {
+          localStorageCount,
+          sessionStorageCount,
+          totalItems: localStorageCount + sessionStorageCount,
+          uniqueKeys: [...new Set([...localStorageKeys, ...sessionStorageKeys])]
+        }
       };
     } catch {
-      return { localStorage: {}, sessionStorage: {} };
+      return { 
+        localStorage: {}, 
+        sessionStorage: {},
+        storageMetrics: {
+          localStorageCount: 0,
+          sessionStorageCount: 0,
+          totalItems: 0,
+          uniqueKeys: []
+        }
+      };
     }
   }
   
@@ -1071,11 +1133,19 @@ serve(async (req) => {
             return;
           }
           
-          // Route all Network events to the pipeline (no sessionId filtering for cross-frame support)
+          // POINT 2: Route Network events with strict session filtering
           const sessionId = message.sessionId || pageSessionId;
           
           if (message.method === 'Network.requestWillBeSent') {
-            eventsPipeline.onNetworkRequestWillBeSent(message.params, sessionId);
+            eventsPipeline.onNetworkRequestWillBeSent(message.params, sessionId, pageSessionId);
+            
+            // POINT 6: Collect POST data for tracking analysis
+            if (message.params.request?.method === 'POST' && message.params.request?.postData) {
+              eventsPipeline.postDataMap.set(message.params.requestId, message.params.request.postData);
+            } else if (message.params.request?.method === 'POST') {
+              // Try to get POST data asynchronously
+              eventsPipeline.collectPostData(message.params.requestId, sessionId);
+            }
             
             // Legacy tracking for backward compatibility
             const params = message.params;
@@ -1093,19 +1163,19 @@ serve(async (req) => {
           }
           
           if (message.method === 'Network.responseReceived') {
-            eventsPipeline.onNetworkResponseReceived(message.params, sessionId);
+            eventsPipeline.onNetworkResponseReceived(message.params, sessionId, pageSessionId);
           }
           
           if (message.method === 'Network.responseReceivedExtraInfo') {
-            eventsPipeline.onNetworkResponseReceivedExtraInfo(message.params, sessionId);
+            eventsPipeline.onNetworkResponseReceivedExtraInfo(message.params, sessionId, pageSessionId);
           }
           
           if (message.method === 'Network.loadingFinished') {
-            eventsPipeline.onNetworkLoadingFinished(message.params, sessionId);
+            eventsPipeline.onNetworkLoadingFinished(message.params, sessionId, pageSessionId);
           }
           
           if (message.method === 'Network.loadingFailed') {
-            eventsPipeline.onNetworkLoadingFailed(message.params, sessionId);
+            eventsPipeline.onNetworkLoadingFailed(message.params, sessionId, pageSessionId);
           }
           
         } catch (error) {
@@ -1223,43 +1293,73 @@ serve(async (req) => {
               trace_id: traceId
             });
             
-            // PHASE 3: CMP INTERACTION (REJECT)
-            await logger.log('info', '🎯 PHASE 3: Reloading for reject flow');
+            // POINT 1: PHASE 3 - NEW ISOLATED CONTEXT FOR REJECT FLOW
+            await logger.log('info', '🎯 PHASE 3: Creating new isolated context for reject flow');
             
-            // Reset to pre-phase and clear data
-            phaseController.setPre();
-            eventsPipeline.requestMap.clear();
-            
-            // Reload page
-            await sendCommand('Page.reload', {}, pageSessionId);
-            await onceLoadFired(ws, pageSessionId).catch(async () => {
-              await logger.log('warn', '⏰ Reload timeout, proceeding');
+            // Create a completely new page context for reject flow
+            const newPageResult: any = await sendCommand('Target.createTarget', {
+              url: 'about:blank'
             });
             
-            // Wait for global idle
-            await sessionManager.waitForGlobalIdle(1500, 8000);
-            
-            // Try reject flow
-            const rejectResult = await cmpHunter.findAndClickCMP('reject', pageSessionId);
-            
-            if (rejectResult.clicked) {
+            if (newPageResult?.result?.targetId) {
+              const rejectPageTarget = newPageResult.result.targetId;
+              await logger.log('info', `📎 Created new page target for reject: ${rejectPageTarget}`);
+              
+              // Attach to new target
+              const attachRejectResult: any = await sendCommand('Target.attachToTarget', {
+                targetId: rejectPageTarget,
+                flatten: true
+              });
+              
+              const rejectPageSessionId = attachRejectResult.result.sessionId;
+              await logger.log('info', `✅ Attached to reject page session: ${rejectPageSessionId}`);
+              
+              // Enable CDP domains on new session
+              await sendCommand('Page.enable', {}, rejectPageSessionId);
+              await sendCommand('Runtime.enable', {}, rejectPageSessionId);
+              await sendCommand('Network.enable', {
+                maxTotalBufferSize: 10_000_000,
+                maxResourceBufferSize: 5_000_000
+              }, rejectPageSessionId);
+              await sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, rejectPageSessionId);
+              await sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, rejectPageSessionId);
+              
+              // Navigate to URL in new context
               phaseController.setReject();
-              await logger.log('info', `❌ CMP Reject clicked: ${JSON.stringify(rejectResult.details)}`);
+              await sendCommand('Page.navigate', { url }, rejectPageSessionId);
+              await onceLoadFired(ws, rejectPageSessionId).catch(async () => {
+                await logger.log('warn', '⏰ Reject navigation timeout, proceeding');
+              });
               
               // Wait for global idle
               await sessionManager.waitForGlobalIdle(1500, 8000);
               
-              // Take post-reject snapshot
-              postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', pageSessionId);
+              // Try reject flow in new context
+              const rejectResult = await cmpHunter.findAndClickCMP('reject', rejectPageSessionId);
               
-              await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
-                pre: eventsPipeline.setCookieEvents_pre.length,
-                post_accept: eventsPipeline.setCookieEvents_post_accept.length,
-                post_reject: eventsPipeline.setCookieEvents_post_reject.length,
-                trace_id: traceId
-              });
+              if (rejectResult.clicked) {
+                await logger.log('info', `❌ CMP Reject clicked in new context: ${JSON.stringify(rejectResult.details)}`);
+                
+                // Wait for global idle
+                await sessionManager.waitForGlobalIdle(1500, 8000);
+                
+                // Take post-reject snapshot
+                postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', rejectPageSessionId);
+                
+                await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
+                  pre: eventsPipeline.setCookieEvents_pre.length,
+                  post_accept: eventsPipeline.setCookieEvents_post_accept.length,
+                  post_reject: eventsPipeline.setCookieEvents_post_reject.length,
+                  trace_id: traceId
+                });
+              } else {
+                await logger.log('info', '❌ CMP Reject click failed in new context - no reject button found');
+              }
+              
+              // Close reject context
+              await sendCommand('Target.closeTarget', { targetId: rejectPageTarget });
             } else {
-              await logger.log('info', '❌ CMP Reject click failed - no reject button found');
+              await logger.log('warn', '❌ Failed to create new target for reject flow - using fallback');
             }
           } else {
             await logger.log('info', '❌ CMP Accept click failed - no CMP detected or button not found');
@@ -1280,9 +1380,10 @@ serve(async (req) => {
           const requests_post_accept = postAcceptSnapshot?.requests || [];
           const requests_post_reject = postRejectSnapshot?.requests || [];
           
-          const storage_pre = preSnapshot?.storage ? [preSnapshot.storage] : [];
-          const storage_post_accept = postAcceptSnapshot?.storage ? [postAcceptSnapshot.storage] : [];
-          const storage_post_reject = postRejectSnapshot?.storage ? [postRejectSnapshot.storage] : [];
+          // POINT 5: Fixed storage metrics using correct format
+          const storage_pre = preSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
+          const storage_post_accept = postAcceptSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
+          const storage_post_reject = postRejectSnapshot?.storage?.storageMetrics?.uniqueKeys || [];
           
           // Use server-set cookies as primary data source
           const setCookieEvents_pre = eventsPipeline.setCookieEvents_pre;
@@ -1291,7 +1392,7 @@ serve(async (req) => {
           
           // Build legacy-compatible maps
           const requestMap = eventsPipeline.requestMap;
-          const postDataMap = new Map(); // Legacy compatibility - empty for now
+          const postDataMap = eventsPipeline.postDataMap; // POINT 6: Use collected POST data
           
           // Phase 5: Calculate tracking parameters and data sending
           const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
@@ -1501,15 +1602,13 @@ serve(async (req) => {
               },
               cmp: { detected: false }, // CMP detection results from modular architecture
               metrics,
-              raw: {
+                raw: {
                 requests: Array.from(requestMap.values()).map(r => ({ 
                   ...r, 
                   postData: postDataMap.get(r.requestId) 
                 })),
+                // POINT 7: Remove legacy pseudo cookie fields, keep only real data
                 cookies: {
-                  pre_load: cookies_pre_load,
-                  pre_idle: cookies_pre_idle,
-                  pre_extra: cookies_pre_extra,
                   post_accept: cookies_post_accept,
                   post_reject: cookies_post_reject
                 },
