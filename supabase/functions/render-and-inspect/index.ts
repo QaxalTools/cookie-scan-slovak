@@ -1457,17 +1457,17 @@ serve(async (req) => {
           };
           
           resolve(response);
-            expression: 'window.location.href'
-          }, pageSessionId);
           
-          if (pageInfo.result?.result?.value) {
-            finalUrl = pageInfo.result.result.value;
-          }
-          
-          // PHASE 2: CMP INTERACTION (ACCEPT)
-          await logger.log('info', '🎯 PHASE 2: CMP hunting and accept flow');
-          
-          let postAcceptSnapshot: any = null;
+        } catch (error) {
+          await logger.log('error', 'THREE-PHASE execution failed', { error: String(error) });
+          ws.close();
+          resolve({
+            success: false,
+            error_code: 'THREE_PHASE_EXECUTION_FAILED',
+            details: String(error),
+            trace_id: traceId
+          });
+        }
           let postRejectSnapshot: any = null;
           
           const acceptResult = await cmpHunter.findAndClickCMP('accept', pageSessionId);
