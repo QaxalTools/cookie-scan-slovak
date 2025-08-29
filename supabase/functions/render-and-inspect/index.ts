@@ -1111,12 +1111,12 @@ serve(async (req) => {
       ws.onerror = (error) => {
         logger.log('error', 'WebSocket error', { error: String(error) });
         
-        // Build partial metrics if any data was collected
+        // Build partial metrics from what we can access in this scope
         const partialMetrics = {
-          requests_pre: allRequests.filter(r => r.phase === 'pre').length,
-          requests_post_accept: allRequests.filter(r => r.phase === 'post_accept').length,
-          requests_post_reject: allRequests.filter(r => r.phase === 'post_reject').length,
-          cookies_pre: cookies_pre.length,
+          requests_pre: requests_pre.length,
+          requests_post_accept: requests_post_accept.length,
+          requests_post_reject: requests_post_reject.length,
+          cookies_pre: cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length,
           cookies_post_accept: cookies_post_accept.length,
           cookies_post_reject: cookies_post_reject.length,
           setCookie_pre: setCookieEvents_pre.length,
@@ -1125,16 +1125,19 @@ serve(async (req) => {
           storage_pre_items: storage_pre.length
         };
         
+        const totalRequests = requests_pre.length + requests_post_accept.length + requests_post_reject.length;
+        const totalCookies = partialMetrics.cookies_pre + partialMetrics.cookies_post_accept + partialMetrics.cookies_post_reject;
+        
         resolve({
           success: false,
           error_code: 'WEBSOCKET_ERROR',
           details: String(error),
-          partial: allRequests.length > 0 || cookies_pre.length > 0 ? {
+          partial: totalRequests > 0 || totalCookies > 0 ? {
             metrics: partialMetrics,
             phase: currentPhase,
             data_collected: {
-              requests: allRequests.length,
-              cookies: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+              requests: totalRequests,
+              cookies: totalCookies,
               storage: storage_pre.length
             }
           } : undefined
@@ -1146,30 +1149,40 @@ serve(async (req) => {
         await logger.log('error', '⏰ Global timeout after 60 seconds');
         
         // Build partial metrics from collected data so far
+        const totalRequests = requests_pre.length + requests_post_accept.length + requests_post_reject.length;
+        const totalCookies = (cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length) + 
+                           cookies_post_accept.length + cookies_post_reject.length;
+        
         const partialMetrics = {
-          requests_pre: allRequests.filter(r => r.phase === 'pre').length,
-          requests_post_accept: allRequests.filter(r => r.phase === 'post_accept').length,
-          requests_post_reject: allRequests.filter(r => r.phase === 'post_reject').length,
-          cookies_pre: cookies_pre.length,
+          requests_pre: requests_pre.length,
+          requests_post_accept: requests_post_accept.length,
+          requests_post_reject: requests_post_reject.length,
+          cookies_pre: cookies_pre_load.length + cookies_pre_idle.length + cookies_pre_extra.length,
           cookies_post_accept: cookies_post_accept.length,
           cookies_post_reject: cookies_post_reject.length,
           setCookie_pre: setCookieEvents_pre.length,
           setCookie_post_accept: setCookieEvents_post_accept.length,
           setCookie_post_reject: setCookieEvents_post_reject.length,
           storage_pre_items: storage_pre.length,
-          third_party_hosts: new Set(allRequests.map(r => getETldPlusOneLite(new URL(r.url).hostname))).size,
-          tracking_params_count: allRequests.filter(r => 
-            new URL(r.url).search && SIGNIFICANT_PARAMS.some(param => new URL(r.url).searchParams.has(param))
-          ).length
+          third_party_hosts: requests_pre.concat(requests_post_accept, requests_post_reject)
+            .map(r => { try { return getETldPlusOneLite(new URL(r.url).hostname); } catch { return ''; } })
+            .filter(h => h).length,
+          tracking_params_count: requests_pre.concat(requests_post_accept, requests_post_reject)
+            .filter(r => { 
+              try { 
+                const url = new URL(r.url);
+                return url.search && SIGNIFICANT_PARAMS.some(param => url.searchParams.has(param));
+              } catch { return false; }
+            }).length
         };
 
         // Log structured partial summary
         await logger.log('error', '⏰ Global timeout - partial collection summary', {
-          url: inputUrl,
+          url: url,
           phase: currentPhase,
           partial_metrics: partialMetrics,
-          requests_collected: allRequests.length,
-          cookies_collected: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+          requests_collected: totalRequests,
+          cookies_collected: totalCookies,
           storage_collected: storage_pre.length
         });
         
@@ -1182,8 +1195,8 @@ serve(async (req) => {
             metrics: partialMetrics,
             phase: currentPhase,
             data_collected: {
-              requests: allRequests.length,
-              cookies: cookies_pre.length + cookies_post_accept.length + cookies_post_reject.length,
+              requests: totalRequests,
+              cookies: totalCookies,
               storage: storage_pre.length
             }
           }
@@ -1200,7 +1213,7 @@ serve(async (req) => {
       if ((analysisResult as any).partial) {
         const partial = (analysisResult as any).partial;
         await logger.log('info', 'Final collection summary (partial)', {
-          url: inputUrl,
+          url: url,
           partial_data: partial,
           phase: partial.phase,
           metrics: partial.metrics
@@ -1298,7 +1311,7 @@ serve(async (req) => {
 
     // Log structured final summary with collected data
     await logger.log('info', 'Final collection summary', {
-      url: inputUrl,
+      url: url,
       metrics: data.metrics,
       thirdParties: data.thirdParties?.length || 0,
       beacons: data.beacons?.length || 0,
