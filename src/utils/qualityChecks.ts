@@ -10,8 +10,9 @@ export function addQualityChecks(
   const issues: string[] = [];
   let isIncomplete = false;
 
-  // Quality Check 1: Network capture validation - use proper metrics
-  const reqsPre = renderData?.requests_pre?.length || 0;
+  // Quality Check 1: Network capture validation - use metrics from new structure
+  const metrics = renderData?.metrics;
+  const reqsPre = metrics?.requests_pre || renderData?.requests_pre?.length || 0;
   const requestsTotal = renderData?.requests?.length || 0;
   const networkOk = reqsPre > 0 || requestsTotal > 0;
   
@@ -20,16 +21,21 @@ export function addQualityChecks(
     isIncomplete = true;
   }
 
-  // Quality Check 2: Cookie enumeration consistency - normalized counting
+  // Quality Check 2: Cookie enumeration consistency - use proper normalization
   const norm = (d?: string) => (d || '').replace(/^\./, '');
   const mergedCookieMap = new Map<string, any>();
   
-  // Merge cookies with normalized domains
-  [...(renderData?.cookies_pre || []), ...(renderData?.cookies_post_accept || []), ...(renderData?.cookies_post_reject || [])]
-    .forEach(cookie => {
-      const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
-      mergedCookieMap.set(key, cookie);
-    });
+  // Merge cookies with normalized domains - use new structure
+  const allCookies = [
+    ...(renderData?.cookies_pre || []), 
+    ...(renderData?.cookies_post_accept || []), 
+    ...(renderData?.cookies_post_reject || [])
+  ];
+  
+  allCookies.forEach(cookie => {
+    const key = `${cookie.name}|${norm(cookie.domain)}|${cookie.path || '/'}`;
+    mergedCookieMap.set(key, cookie);
+  });
   
   const cookiesSummaryCount = mergedCookieMap.size;
   const cookiesTableCount = internalJson.cookies.length;
@@ -59,7 +65,7 @@ export function addQualityChecks(
     isIncomplete = true;
   }
 
-  // Quality Check 4: Data sending validation (only flag for third-party tracking)
+  // Quality Check 4: Data sending validation - use metrics
   const hasThirdPartyTracking = internalJson.beacons.some(beacon => {
     const beaconHost = getHostFromUrl(beacon.sample_url);
     const beaconDomain = getETldPlusOne(beaconHost);
@@ -67,9 +73,11 @@ export function addQualityChecks(
            beaconDomain !== mainDomain &&
            beaconHost !== 'unknown';
   });
-  const hasDataSending = renderData?.data_sent_to_third_parties?.length > 0;
   
-  console.log(`🔍 Quality check - Data sending: hasThirdPartyTracking=${hasThirdPartyTracking}, hasDataSending=${hasDataSending}`);
+  const dataSentCount = metrics?.data_sent_to_third_parties || renderData?.data_sent_to_third_parties?.length || 0;
+  const hasDataSending = dataSentCount > 0;
+  
+  console.log(`🔍 Quality check - Data sending: hasThirdPartyTracking=${hasThirdPartyTracking}, hasDataSending=${hasDataSending}, count=${dataSentCount}`);
   
   if (hasThirdPartyTracking && !hasDataSending) {
     issues.push('Data sending section empty despite third-party tracking requests with parameters');

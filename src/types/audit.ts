@@ -7,6 +7,17 @@ export interface AuditQualityGate {
   details?: any;
 }
 
+// Audit metrics structure from Edge function
+export interface AuditMetrics {
+  requests_pre: number;
+  cookies_pre: number;
+  setCookie_pre: number;
+  setCookie_post_accept: number;
+  setCookie_post_reject: number;
+  storage_pre_items: number;
+  data_sent_to_third_parties: number;
+}
+
 // Self-check summary structure
 export interface AuditSelfCheck {
   summary: {
@@ -203,4 +214,21 @@ export interface AuditData {
   // Self-check results
   self_check: AuditSelfCheck;
   quality_gates: AuditQualityGate[];
+  
+  // Audit metrics from Edge function
+  metrics?: AuditMetrics;
+  
+  // Set-Cookie events from headers
+  set_cookie_headers_pre?: any[];
+  set_cookie_headers_post_accept?: any[];
+  set_cookie_headers_post_reject?: any[];
+  
+  // Simplified metadata for external consumption
+  meta?: {
+    simplified?: {
+      cookies: Array<{ name: string; domain: string; path: string; expires?: string }>;
+      localStorage: Array<{ key: string }>;
+      beacons: Array<{ urlNormalized: string }>;
+    };
+  };
 }

@@ -42,23 +42,36 @@ export const DevLogOverlay: React.FC<DevLogOverlayProps> = ({
   const errorCount = logs.filter(log => log.type === 'error').length;
   const warnCount = logs.filter(log => log.type === 'warn').length;
 
+  // Check for audit trace_id in logs
+  const auditLogs = logs.filter(log => log.traceId);
+  const latestTrace = auditLogs.length > 0 ? auditLogs[auditLogs.length - 1].traceId : null;
+
   return (
     <div className="fixed bottom-4 right-4 z-50 max-w-md">
       {!isVisible && (
-        <Button
-          onClick={onToggle}
-          size="sm"
-          variant="outline"
-          className="mb-2 bg-background/80 backdrop-blur-sm border shadow-md"
-        >
-          <Bug className="h-4 w-4 mr-2" />
-          Debug Log
-          {(errorCount > 0 || warnCount > 0) && (
-            <Badge variant="destructive" className="ml-2 text-xs">
-              {errorCount + warnCount}
-            </Badge>
+        <div className="space-y-2">
+          {latestTrace && (
+            <div className="bg-background/95 border rounded-lg p-2 text-sm backdrop-blur">
+              <div className="font-mono text-xs text-muted-foreground">
+                Trace: {latestTrace.slice(0, 8)}...
+              </div>
+            </div>
           )}
-        </Button>
+          <Button
+            onClick={onToggle}
+            size="sm"
+            variant="outline"
+            className="mb-2 bg-background/80 backdrop-blur-sm border shadow-md"
+          >
+            <Bug className="h-4 w-4 mr-2" />
+            Debug Log
+            {(errorCount > 0 || warnCount > 0) && (
+              <Badge variant="destructive" className="ml-2 text-xs">
+                {errorCount + warnCount}
+              </Badge>
+            )}
+          </Button>
+        </div>
       )}
       
       {isVisible && (

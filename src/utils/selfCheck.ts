@@ -49,9 +49,12 @@ export function performSelfCheck(
   // Analyze tracking requests
   const trackerAnalysis = analyzeTrackers(renderData, internalJson, mainDomain);
 
-  // Build summary
+  // Build summary - use metrics if available
+  const metrics = renderData?.metrics;
+  const requestsPreCount = metrics?.requests_pre || renderData?.requests_pre?.length || 0;
+  
   const summary = {
-    requests_pre_cdp: renderData?.requests_pre?.length || 0,
+    requests_pre_cdp: requestsPreCount,
     requests_pre_fallback: renderData?.requests_fallback?.length || 0,
     requests_post_accept: renderData?.requests_post_accept?.length,
     requests_post_reject: renderData?.requests_post_reject?.length,
