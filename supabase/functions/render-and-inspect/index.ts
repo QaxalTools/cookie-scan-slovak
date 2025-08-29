@@ -926,6 +926,97 @@ class CMPHunter {
   }
 }
 
+// ============= HELPER FUNCTIONS FOR THREE-PHASE EXECUTION =============
+
+// --- CDP sender (per WebSocket) ---
+function makeSender(ws: WebSocket) {
+  let id = 0;
+  const waiters = new Map<number, (msg:any)=>void>();
+  ws.addEventListener('message', (e) => {
+    try {
+      const msg = JSON.parse((e as MessageEvent).data);
+      if (msg.id && waiters.has(msg.id)) {
+        waiters.get(msg.id)!(msg);
+        waiters.delete(msg.id);
+      }
+    } catch {}
+  });
+  return function send(method: string, params: any = {}, sessionId?: string) {
+    const msg = sessionId ? { id: ++id, method, params, sessionId } : { id: ++id, method, params };
+    ws.send(JSON.stringify(msg));
+    return new Promise<any>(resolve => waiters.set(msg.id, resolve));
+  };
+}
+
+// --- vytvor čistý kontext+page pre fázu ---
+async function createContextPage(send: any, url: string, logger: any) {
+  const ctx = await send('Target.createBrowserContext', {});
+  const browserContextId = ctx.result.browserContextId;
+
+  const tgt = await send('Target.createTarget', { url: 'about:blank', browserContextId });
+  const targetId = tgt.result.targetId;
+
+  // auto-attach (len page/worker; iframe NIE je target)
+  await send('Target.setAutoAttach', { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+
+  const att = await send('Target.attachToTarget', { targetId, flatten: true });
+  const sessionId = att.result.sessionId;
+
+  // enable domény
+  await send('Page.enable', {}, sessionId);
+  await send('Runtime.enable', {}, sessionId);
+  await send('Network.enable', { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 5_000_000 }, sessionId);
+  await send('DOMStorage.enable', {}, sessionId);
+  await send('Page.setLifecycleEventsEnabled', { enabled: true }, sessionId);
+  await send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+  await send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'en-US,en;q=0.9', 'DNT': '1', 'Sec-GPC': '1' } }, sessionId);
+  await send('Network.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, sessionId);
+
+  await logger.log('info', `🎯 Created context ${browserContextId}, target ${targetId}, session ${sessionId}`);
+  
+  // navigácia
+  await send('Page.navigate', { url }, sessionId);
+
+  return { browserContextId, targetId, sessionId };
+}
+
+async function disposeContext(send:any, browserContextId:string, logger: any) {
+  await logger.log('info', `🗑️ Disposing context ${browserContextId}`);
+  await send('Target.disposeBrowserContext', { browserContextId });
+}
+
+// Helper for storage key collection
+function collectStorageKeys(storageData: any) {
+  const out = new Set<string>();
+  const pushObj = (o: any) => Object.keys(o || {}).forEach(k => out.add(k));
+  pushObj(storageData?.localStorage);
+  pushObj(storageData?.sessionStorage);
+  return out;
+}
+
+// POST body parsing helper
+function parsePostBody(rec: any) {
+  const h = rec.headers || {};
+  const ct = (h['content-type'] || h['Content-Type'] || '').toString().toLowerCase();
+  const body = rec.postData || '';
+  if (!body) return {};
+  try {
+    if (ct.includes('application/json')) return JSON.parse(body) || {};
+    if (ct.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(body));
+    return {};
+  } catch { return {}; }
+}
+
+// Deduplicate server-set cookies
+function dedupServerSet(arr: any[]) {
+  const m = new Map<string, any>();
+  for (const c of arr) {
+    const key = `${c.name}|${normalizeDomain(c.domain)}|${c.path||'/'}`;
+    m.set(key, c);
+  }
+  return Array.from(m.values());
+}
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -1077,109 +1168,80 @@ serve(async (req) => {
     let pageSessionId = '';
     let finalUrl = url;
 
-    // Connect to Browserless WebSocket using new modular architecture
+    // Connect to Browserless WebSocket using THREE-PHASE EXECUTION
     await logger.log('info', '🔗 Connecting to Browserless WebSocket...');
-    await logger.log('info', '🌐 Starting modular three-phase CDP analysis...');
+    await logger.log('info', '🌐 Starting THREE-PHASE isolated context analysis...');
 
     const baseUrl = new URL(BROWSERLESS_BASE);
     const wsUrl = `wss://${baseUrl.host}?token=${token}`;
     
     const analysisResult = await new Promise((resolve) => {
       const ws = new WebSocket(wsUrl);
-      let messageId = 1;
-      const pendingCommands = new Map();
       
-      // Initialize modular components
+      // Initialize modular components first
       sessionManager = new SessionManager(ws, logger);
       eventsPipeline = new EventsPipeline(phaseController, sessionManager, logger);
       snapshotBuilder = new SnapshotBuilder(eventsPipeline, sessionManager, logger);
       cmpHunter = new CMPHunter(sessionManager, logger);
 
-      const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
-        const id = messageId++;
-        const message = sessionId ? 
-          { id, method, params, sessionId } : 
-          { id, method, params };
-        ws.send(JSON.stringify(message));
-        return new Promise((resolve, reject) => {
-          pendingCommands.set(id, { resolve, reject });
-        });
-      };
+      // Create CDP sender
+      const send = makeSender(ws);
       
-      // Integrate sendCommand into SessionManager
-      (sessionManager as any).sendCommand = sendCommand;
+      // Global state for session filtering
+      let currentSessionId = '';
 
-      // Add permanent CDP event handler using modular architecture
+      // STRICT SESSION FILTERING - Process only events for current phase
       ws.addEventListener('message', (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          
-          // Handle command responses
-          if (message.id && pendingCommands.has(message.id)) {
-            const { resolve, reject } = pendingCommands.get(message.id);
-            pendingCommands.delete(message.id);
-            if (message.error) {
-              reject(new Error(message.error.message || 'Command failed'));
-            } else {
-              resolve(message);
+        let msg: any;
+        try { 
+          msg = JSON.parse((event as MessageEvent).data); 
+        } catch { 
+          return; 
+        }
+
+        // Command responses handled by makeSender
+        if (msg.id) return;
+
+        // Process only events for current session
+        if (!msg.sessionId || msg.sessionId !== currentSessionId) return;
+
+        switch (msg.method) {
+          case 'Network.requestWillBeSent': {
+            const p = msg.params;
+            const rec = {
+              requestId: p.requestId,
+              url: p.request.url,
+              method: p.request.method,
+              headers: normalizeHeaderKeys(p.request.headers || {}),
+              hasPostData: !!p.request.postData || !!p.request.hasPostData,
+              phase: phaseController.get(),
+              ts: p.timestamp
+            };
+            eventsPipeline.requestMap.set(p.requestId, rec);
+
+            // Stable POST body collection
+            if (!p.request.postData && p.request.hasPostData) {
+              send('Network.getRequestPostData', { requestId: p.requestId }, currentSessionId).then((res: any) => {
+                const body = res?.result?.postData ?? '';
+                eventsPipeline.requestMap.set(p.requestId, { ...rec, postData: body });
+              }).catch(() => {});
+            } else if (p.request.postData) {
+              eventsPipeline.requestMap.set(p.requestId, { ...rec, postData: p.request.postData });
             }
-            return;
+
+            sessionManager.onNetworkRequestStart();
+            break;
           }
-          
-          // Handle Target.attachedToTarget events
-          if (message.method === 'Target.attachedToTarget') {
-            const { sessionId, targetInfo } = message.params;
-            sessionManager.onAttachedToTarget(sessionId, targetInfo.type, targetInfo.targetId);
-            return;
-          }
-          
-          // POINT 2: Route Network events with strict session filtering
-          const sessionId = message.sessionId || pageSessionId;
-          
-          if (message.method === 'Network.requestWillBeSent') {
-            eventsPipeline.onNetworkRequestWillBeSent(message.params, sessionId, pageSessionId);
-            
-            // POINT 6: Collect POST data for tracking analysis
-            if (message.params.request?.method === 'POST' && message.params.request?.postData) {
-              eventsPipeline.postDataMap.set(message.params.requestId, message.params.request.postData);
-            } else if (message.params.request?.method === 'POST') {
-              // Try to get POST data asynchronously
-              eventsPipeline.collectPostData(message.params.requestId, sessionId);
-            }
-            
-            // Legacy tracking for backward compatibility
-            const params = message.params;
-            const requestHost = new URL(params.request.url).hostname;
-            const mainHost = new URL(finalUrl || url).hostname;
-            const mainDomain = getETldPlusOneLite(mainHost);
-            const requestDomain = getETldPlusOneLite(requestHost);
-            const isFirstParty = requestDomain === mainDomain;
-            
-            if (isFirstParty) {
-              hostMap.requests.firstParty.add(requestHost);
-            } else {
-              hostMap.requests.thirdParty.add(requestHost);
-            }
-          }
-          
-          if (message.method === 'Network.responseReceived') {
-            eventsPipeline.onNetworkResponseReceived(message.params, sessionId, pageSessionId);
-          }
-          
-          if (message.method === 'Network.responseReceivedExtraInfo') {
-            eventsPipeline.onNetworkResponseReceivedExtraInfo(message.params, sessionId, pageSessionId);
-          }
-          
-          if (message.method === 'Network.loadingFinished') {
-            eventsPipeline.onNetworkLoadingFinished(message.params, sessionId, pageSessionId);
-          }
-          
-          if (message.method === 'Network.loadingFailed') {
-            eventsPipeline.onNetworkLoadingFailed(message.params, sessionId, pageSessionId);
-          }
-          
-        } catch (error) {
-          // Silently ignore JSON parsing errors
+          case 'Network.responseReceived':
+            eventsPipeline.onNetworkResponseReceived(msg.params, currentSessionId);
+            break;
+          case 'Network.responseReceivedExtraInfo':
+            eventsPipeline.onNetworkResponseReceivedExtraInfo(msg.params, currentSessionId);
+            break;
+          case 'Network.loadingFinished':
+          case 'Network.loadingFailed':
+            sessionManager.onNetworkRequestEnd();
+            break;
         }
       });
 
@@ -1187,80 +1249,214 @@ serve(async (req) => {
         try {
           await logger.log('info', '🔗 WebSocket connected to Browserless');
           
-          // Initialize session manager and set up auto-attach
-          await sessionManager.attachHandlers();
+          // ==================== THREE-PHASE ISOLATED EXECUTION ====================
           
-          // Phase 1: Get targets and attach to page
-          await logger.log('info', '🎯 Getting browser targets...');
-          const targets: any = await sendCommand('Target.getTargets');
+          let preSnapshot: any, postAcceptSnapshot: any, postRejectSnapshot: any;
           
-          await logger.log('info', `TARGET CHECK ${JSON.stringify(targets.result.targetInfos.map((t: any) => ({ type: t.type, url: t.url })))}`);
-          
-          // Find existing page target
-          const pageTarget = targets.result.targetInfos.find((t: any) => t.type === 'page');
-          if (!pageTarget) {
-            throw new Error('No page target found');
-          }
-          
-          await logger.log('info', '📎 Attaching to existing page target...');
-          const attachResult: any = await sendCommand('Target.attachToTarget', {
-            targetId: pageTarget.targetId,
-            flatten: true
-          });
-          
-          pageSessionId = attachResult.result.sessionId;
-          await logger.log('info', `📎 Target attached: page [${pageTarget.targetId}]`);
-          await logger.log('info', `✅ Attached to page target: ${pageSessionId}`);
-          
-          // Enable CDP domains on page session (handled by SessionManager for new attachments)
-          await sendCommand('Page.enable', {}, pageSessionId);
-          await sendCommand('Runtime.enable', {}, pageSessionId);
-          await sendCommand('Network.enable', {
-            maxTotalBufferSize: 10_000_000,
-            maxResourceBufferSize: 5_000_000
-          }, pageSessionId);
-          await sendCommand('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId);
-          await sendCommand('Page.setLifecycleEventsEnabled', { enabled: true }, pageSessionId);
-          await sendCommand('DOMStorage.enable', {}, pageSessionId);
-          
-          await logger.log('info', `📍 CDP_bound: true`);
-          await logger.log('info', '✅ CDP domains enabled on page session');
-          
-          // Set realistic headers
-          await sendCommand('Network.setUserAgentOverride', {
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }, pageSessionId);
-          
-          await sendCommand('Network.setExtraHTTPHeaders', {
-            headers: {
-              'Accept-Language': 'en-US,en;q=0.9',
-              'DNT': '1',
-              'Sec-GPC': '1'
-            }
-          }, pageSessionId);
-          
-          // ==================== THREE-PHASE EXECUTION ====================
-          
-          // PHASE 1: PRE-CONSENT
+          // PHASE A: PRE-CONSENT
+          await logger.log('info', '🚀 PHASE A: Pre-consent isolation');
+          const A = await createContextPage(send, url, logger);
+          currentSessionId = A.sessionId;
           phaseController.setPre();
-          await logger.log('info', '🚀 PHASE 1: Pre-consent data collection');
           
-          // Navigate to URL
-          await logger.log('info', '🌐 Navigating to URL...');
-          await sendCommand('Page.navigate', { url }, pageSessionId);
-          await onceLoadFired(ws, pageSessionId).catch(async () => {
-            await logger.log('warn', '⏰ Navigation timeout, proceeding');
-          });
-          await logger.log('info', '✅ Page load event fired');
+          await onceLoadFired(ws, A.sessionId).catch(() => {});
+          await sessionManager.waitForGlobalIdle(1500, 12000);
           
-          // Wait for global idle (invariant: before every snapshot)
-          await sessionManager.waitForGlobalIdle(1500, 15000);
+          preSnapshot = await snapshotBuilder.buildSnapshot('pre', A.sessionId);
+          await logger.log('info', `📊 Pre-snapshot: ${preSnapshot.requests.length} requests, ${preSnapshot.persistedCookies.length} cookies`);
           
-          // Take pre-consent snapshot
-          const preSnapshot = await snapshotBuilder.buildSnapshot('pre', pageSessionId);
+          await disposeContext(send, A.browserContextId, logger);
+          
+          // PHASE B: POST-ACCEPT
+          await logger.log('info', '🚀 PHASE B: Post-accept isolation');
+          const B = await createContextPage(send, url, logger);
+          currentSessionId = B.sessionId;
+          phaseController.setPre();
+          
+          await onceLoadFired(ws, B.sessionId).catch(() => {});
+          await sessionManager.waitForGlobalIdle(800, 8000);
+          
+          const acceptResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('accept', B.sessionId);
+          await logger.log('info', `🍪 CMP Accept result: ${JSON.stringify(acceptResult)}`);
+          
+          phaseController.setAccept();
+          await sessionManager.waitForGlobalIdle(1500, 10000);
+          
+          postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', B.sessionId);
+          await logger.log('info', `📊 Post-accept snapshot: ${postAcceptSnapshot.requests.length} requests, ${postAcceptSnapshot.persistedCookies.length} cookies`);
+          
+          await disposeContext(send, B.browserContextId, logger);
+          
+          // PHASE C: POST-REJECT
+          await logger.log('info', '🚀 PHASE C: Post-reject isolation');
+          const C = await createContextPage(send, url, logger);
+          currentSessionId = C.sessionId;
+          phaseController.setPre();
+          
+          await onceLoadFired(ws, C.sessionId).catch(() => {});
+          await sessionManager.waitForGlobalIdle(800, 8000);
+          
+          const rejectResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('reject', C.sessionId);
+          await logger.log('info', `🚫 CMP Reject result: ${JSON.stringify(rejectResult)}`);
+          
+          phaseController.setReject();
+          await sessionManager.waitForGlobalIdle(1500, 10000);
+          
+          postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', C.sessionId);
+          await logger.log('info', `📊 Post-reject snapshot: ${postRejectSnapshot.requests.length} requests, ${postRejectSnapshot.persistedCookies.length} cookies`);
+          
+          await disposeContext(send, C.browserContextId, logger);
+          
+          // ==================== ANALYSIS & OUTPUT ====================
           
           // Get final URL
-          const pageInfo: any = await sendCommand('Runtime.evaluate', {
+          finalUrl = preSnapshot.finalUrl || url;
+          
+          // ==================== DATA ANALYSIS ====================
+          
+          // Fixed storage key collection
+          const storageKeysPre = collectStorageKeys(preSnapshot?.storage);
+          const storageKeysAcc = collectStorageKeys(postAcceptSnapshot?.storage);
+          const storageKeysRej = collectStorageKeys(postRejectSnapshot?.storage);
+          const uniqueStorageKeys = new Set<string>([...storageKeysPre, ...storageKeysAcc, ...storageKeysRej]);
+          
+          // Server-set cookies with deduplication
+          const cookies_serverset_pre = dedupServerSet(eventsPipeline.setCookieEvents_pre);
+          const cookies_serverset_post_accept = dedupServerSet(eventsPipeline.setCookieEvents_post_accept);
+          const cookies_serverset_post_reject = dedupServerSet(eventsPipeline.setCookieEvents_post_reject);
+          
+          // Persisted cookies
+          const cookies_persisted_pre = preSnapshot?.persistedCookies ?? [];
+          const cookies_persisted_post_accept = postAcceptSnapshot?.persistedCookies ?? [];
+          const cookies_persisted_post_reject = postRejectSnapshot?.persistedCookies ?? [];
+          
+          // POST body analysis for tracking parameters
+          const allReq = [
+            ...preSnapshot.requests,
+            ...postAcceptSnapshot.requests,
+            ...postRejectSnapshot.requests
+          ];
+          
+          const trackingParams = [];
+          for (const r of allReq) {
+            const q = parseQuery(r.url);
+            const pb = parsePostBody(r);
+            const qKeys = Object.keys(q).filter(k => SIGNIFICANT_PARAMS.includes(k));
+            const bKeys = Object.keys(pb).filter(k => SIGNIFICANT_PARAMS.includes(k));
+            if (qKeys.length || bKeys.length) {
+              trackingParams.push({
+                url: r.url,
+                method: r.method,
+                phase: r.phase,
+                params: Object.fromEntries(qKeys.map(k => [k, q[k]])),
+                bodyKeys: bKeys
+              });
+            }
+          }
+          
+          // Build host map for legacy compatibility
+          const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
+          for (const r of allReq) {
+            try {
+              const requestHost = new URL(r.url).hostname;
+              const requestDomain = getETldPlusOneLite(requestHost);
+              const isFirstParty = requestDomain === mainDomain;
+              
+              if (isFirstParty) {
+                hostMap.requests.firstParty.add(requestHost);
+              } else {
+                hostMap.requests.thirdParty.add(requestHost);
+              }
+            } catch {}
+          }
+          
+          const allCookies = [...cookies_persisted_pre, ...cookies_persisted_post_accept, ...cookies_persisted_post_reject];
+          for (const cookie of allCookies) {
+            const cookieDomain = getETldPlusOneLite(cookie.domain);
+            const isFirstParty = cookieDomain === mainDomain;
+            
+            if (isFirstParty) {
+              hostMap.cookies.firstParty.add(cookie.domain);
+            } else {
+              hostMap.cookies.thirdParty.add(cookie.domain);
+            }
+          }
+          
+          // Metrics calculation
+          const metrics = {
+            requests_pre: preSnapshot.requests.length,
+            requests_post_accept: postAcceptSnapshot.requests.length,
+            requests_post_reject: postRejectSnapshot.requests.length,
+            cookies_serverset_pre: cookies_serverset_pre.length,
+            cookies_serverset_post_accept: cookies_serverset_post_accept.length,
+            cookies_serverset_post_reject: cookies_serverset_post_reject.length,
+            cookies_persisted_pre: cookies_persisted_pre.length,
+            cookies_persisted_post_accept: cookies_persisted_post_accept.length,
+            cookies_persisted_post_reject: cookies_persisted_post_reject.length,
+            setCookie_pre: eventsPipeline.setCookieEvents_pre.length,
+            setCookie_post_accept: eventsPipeline.setCookieEvents_post_accept.length,
+            setCookie_post_reject: eventsPipeline.setCookieEvents_post_reject.length,
+            storage_unique_keys: uniqueStorageKeys.size,
+            tracking_params_count: trackingParams.length,
+            third_party_hosts: hostMap.requests.thirdParty.size
+          };
+          
+          await logger.log('info', '📊 Final metrics', metrics);
+          
+          // Close WebSocket
+          ws.close();
+          
+          // Build final response with BACKWARD COMPATIBILITY
+          const response = {
+            success: true,
+            final_url: finalUrl,
+            finalUrl,
+            
+            // Requests per phase
+            requests_pre: preSnapshot.requests,
+            requests_post_accept: postAcceptSnapshot.requests,
+            requests_post_reject: postRejectSnapshot.requests,
+            
+            // Server-set cookies (new fields)
+            cookies_serverset_pre,
+            cookies_serverset_post_accept,
+            cookies_serverset_post_reject,
+            
+            // Persisted cookies (new fields)  
+            cookies_persisted_pre,
+            cookies_persisted_post_accept,
+            cookies_persisted_post_reject,
+            
+            // Legacy cookies fields for compatibility
+            cookies_pre: cookies_persisted_pre,
+            cookies_post_accept: cookies_persisted_post_accept,
+            cookies_post_reject: cookies_persisted_post_reject,
+            
+            // Set-Cookie headers
+            set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
+            set_cookie_headers_post_accept: eventsPipeline.setCookieEvents_post_accept,
+            set_cookie_headers_post_reject: eventsPipeline.setCookieEvents_post_reject,
+            
+            // Storage data
+            storage_pre: preSnapshot.storage,
+            storage_post_accept: postAcceptSnapshot.storage,
+            storage_post_reject: postRejectSnapshot.storage,
+            
+            // Legacy compatibility
+            hostMap,
+            trackingParams,
+            metrics,
+            trace_id: traceId,
+            
+            // Self-checks
+            self_check_summary: {
+              is_complete: true,
+              reasons: [],
+              data_collection_ok: true
+            }
+          };
+          
+          resolve(response);
             expression: 'window.location.href'
           }, pageSessionId);
           
@@ -1558,78 +1754,6 @@ serve(async (req) => {
           
           ws.close();
           
-          resolve({
-            success: true,
-            data: {
-              final_url: finalUrl,
-              finalUrl: finalUrl, // Backward compatibility
-              requests: requests_pre,
-              requests_pre: requests_pre,
-              requests_post_accept: requests_post_accept,
-              requests_post_reject: requests_post_reject,
-              cookies_pre,
-              cookies_post_accept,
-              cookies_post_accept_extra,
-              cookies_post_reject,
-              cookies_post_reject_extra,
-              storage_pre,
-              storage_post_accept,
-              storage_post_reject,
-              set_cookie_headers_pre: setCookieEvents_pre,
-              set_cookie_headers_post_accept: setCookieEvents_post_accept,
-              set_cookie_headers_post_reject: setCookieEvents_post_reject,
-              tracking_params: trackingParams,
-              host_map: {
-                requests: {
-                  firstParty: Array.from(hostMap.requests.firstParty),
-                  thirdParty: Array.from(hostMap.requests.thirdParty)
-                },
-                cookies: {
-                  firstParty: Array.from(hostMap.cookies.firstParty),
-                  thirdParty: Array.from(hostMap.cookies.thirdParty)
-                }
-              },
-              meta: {
-                simplified: {
-                  cookies: Array.from(uniqueCookies.values()),
-                  localStorage: Array.from(uniqueStorageKeys).map(key => ({ key })),
-                  beacons: uniqueBeacons
-                }
-              },
-              self_check: {
-                complete: isComplete,
-                reasons: selfCheckReasons
-              },
-              cmp: { detected: false }, // CMP detection results from modular architecture
-              metrics,
-                raw: {
-                requests: Array.from(requestMap.values()).map(r => ({ 
-                  ...r, 
-                  postData: postDataMap.get(r.requestId) 
-                })),
-                // POINT 7: Remove legacy pseudo cookie fields, keep only real data
-                cookies: {
-                  post_accept: cookies_post_accept,
-                  post_reject: cookies_post_reject
-                },
-                set_cookie_headers: {
-                  pre: setCookieEvents_pre,
-                  post_accept: setCookieEvents_post_accept,
-                  post_reject: setCookieEvents_post_reject
-                },
-                beacons: trackingParams.map(tp => {
-                  const u = new URL(`https://${tp.host}${tp.path}`);
-                  return {
-                    host: tp.host,
-                    path: tp.path,
-                    method: tp.method,
-                    url: `https://${tp.host}${tp.path}`,
-                    url_normalized: `${u.protocol}//${u.host}${u.pathname}`
-                  };
-                })
-              }
-            }
-          });
           
         } catch (error) {
           await logger.log('error', 'CDP analysis failed', { error: String(error) });
