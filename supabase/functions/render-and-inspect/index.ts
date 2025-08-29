@@ -36,6 +36,26 @@ const corsHeaders = {
 // =================== SINGLE SOURCE OF TRUTH HELPERS ===================
 // These functions are defined once and used throughout the Edge function
 
+function onceLoadFired(ws: WebSocket, sessionId: string, timeoutMs = 20000) {
+  return new Promise<void>((resolve, reject) => {
+    const onMsg = (event: MessageEvent) => {
+      try {
+        const msg = JSON.parse((event as any).data);
+        if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) {
+          ws.removeEventListener('message', onMsg);
+          clearTimeout(to);
+          resolve();
+        }
+      } catch {}
+    };
+    const to = setTimeout(() => {
+      ws.removeEventListener('message', onMsg);
+      reject(new Error('NAVIGATION_TIMEOUT'));
+    }, timeoutMs);
+    ws.addEventListener('message', onMsg);
+  });
+}
+
 function normalizeDomain(input?: string): string {
   return (input ?? '').trim().replace(/^\./, '');
 }
@@ -464,7 +484,9 @@ serve(async (req) => {
       const cookies_pre_idle: any[] = [];
       const cookies_pre_extra: any[] = [];
       const cookies_post_accept: any[] = [];
+      const cookies_post_accept_extra: any[] = [];
       const cookies_post_reject: any[] = [];
+      const cookies_post_reject_extra: any[] = [];
       const storage_pre: any[] = [];
       const storage_post_accept: any[] = [];
       const storage_post_reject: any[] = [];
@@ -482,6 +504,128 @@ serve(async (req) => {
           pendingCommands.set(id, { resolve, reject });
         });
       };
+
+      // Add permanent CDP event handler using addEventListener to prevent overwrites
+      ws.addEventListener('message', (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          // Handle command responses
+          if (message.id && pendingCommands.has(message.id)) {
+            const { resolve, reject } = pendingCommands.get(message.id);
+            pendingCommands.delete(message.id);
+            if (message.error) {
+              reject(new Error(message.error.message || 'Command failed'));
+            } else {
+              resolve(message);
+            }
+            return;
+          }
+          
+          // Filter events by sessionId (only handle page session events)
+          if (message.sessionId && message.sessionId !== pageSessionId) {
+            return;
+          }
+          
+          // Handle Network events for request tracking
+          if (message.method === 'Network.requestWillBeSent') {
+            const params = message.params;
+            const requestHost = new URL(params.request.url).hostname;
+            const mainHost = new URL(finalUrl || url).hostname;
+            const mainDomain = getETldPlusOneLite(mainHost);
+            const requestDomain = getETldPlusOneLite(requestHost);
+            const isFirstParty = requestDomain === mainDomain;
+            
+            requestMap.set(params.requestId, {
+              requestId: params.requestId,
+              url: params.request.url,
+              method: params.request.method,
+              host: requestHost,
+              phase: currentPhase,
+              isFirstParty,
+              timestamp: params.timestamp,
+              type: params.type,
+              headers: params.request.headers
+            });
+            
+            // Extract POST data if available
+            if (params.request.postData) {
+              try {
+                const contentType = params.request.headers['Content-Type'] || params.request.headers['content-type'] || '';
+                if (contentType.includes('application/json')) {
+                  postDataMap.set(params.requestId, safeJsonParse(params.request.postData));
+                } else if (contentType.includes('application/x-www-form-urlencoded')) {
+                  postDataMap.set(params.requestId, parseFormUrlEncoded(params.request.postData));
+                } else {
+                  postDataMap.set(params.requestId, params.request.postData);
+                }
+              } catch {
+                // Ignore POST data parsing errors
+              }
+            }
+            
+            if (isFirstParty) {
+              hostMap.requests.firstParty.add(requestHost);
+            } else {
+              hostMap.requests.thirdParty.add(requestHost);
+            }
+          }
+          
+          // Handle response info
+          if (message.method === 'Network.responseReceived') {
+            const params = message.params;
+            responseInfo.set(params.requestId, {
+              url: params.response.url,
+              status: params.response.status,
+              headers: params.response.headers,
+              mimeType: params.response.mimeType
+            });
+          }
+          
+          // Handle Set-Cookie headers
+          if (message.method === 'Network.responseReceivedExtraInfo') {
+            const params = message.params;
+            responseExtraInfo.set(params.requestId, params);
+            
+            if (params.headers && params.headers['set-cookie']) {
+              const setCookieHeaders = Array.isArray(params.headers['set-cookie']) 
+                ? params.headers['set-cookie'] 
+                : [params.headers['set-cookie']];
+              
+              const responseUrl = responseInfo.get(params.requestId)?.url || url;
+              
+              for (const setCookieValue of setCookieHeaders) {
+                const parsedCookie = parseSetCookieHeader(setCookieValue, responseUrl);
+                
+                // Store in appropriate phase array
+                if (currentPhase === 'pre') {
+                  setCookieEvents_pre.push(parsedCookie);
+                } else if (currentPhase === 'post_accept') {
+                  setCookieEvents_post_accept.push(parsedCookie);
+                } else if (currentPhase === 'post_reject') {
+                  setCookieEvents_post_reject.push(parsedCookie);
+                }
+              }
+            }
+          }
+          
+          // Handle POST data
+          if (message.method === 'Network.requestWillBeSentExtraInfo') {
+            const params = message.params;
+            if (params.headers && params.headers['content-type']?.includes('application/x-www-form-urlencoded')) {
+              // We'll get the actual POST data in a separate event
+            }
+          }
+          
+          // Handle request POST data
+          if (message.method === 'Network.getRequestPostData') {
+            // This is a response to our manual getRequestPostData call
+          }
+          
+        } catch (error) {
+          // Silently ignore JSON parsing errors
+        }
+      });
 
       ws.onopen = async () => {
         try {
@@ -555,45 +699,12 @@ serve(async (req) => {
           // Navigate to URL
           await logger.log('info', '🌐 Navigating to URL...');
           await sendCommand('Page.navigate', { url }, pageSessionId);
-          
-          // Wait for load event with 20s timeout
-          const NAVIGATION_TIMEOUT = 20000;
-          let navigationTimedOut = false;
-          
-          await Promise.race([
-            new Promise<void>((resolveLoad) => {
-              const checkLoad = (message: any) => {
-                if (message.method === 'Page.loadEventFired' && message.sessionId === pageSessionId) {
-                  resolveLoad();
-                }
-              };
-              
-              const originalOnMessage = ws.onmessage;
-              ws.onmessage = (event) => {
-                const message = JSON.parse(event.data);
-                checkLoad(message);
-                if (originalOnMessage) originalOnMessage(event);
-              };
-            }),
-            new Promise<void>((_, reject) => {
-              setTimeout(() => {
-                navigationTimedOut = true;
-                reject(new Error('NAVIGATION_TIMEOUT'));
-              }, NAVIGATION_TIMEOUT);
-            })
-          ]).catch(async (error) => {
-            if (error.message === 'NAVIGATION_TIMEOUT') {
-              await logger.log('warn', '⏰ Navigation timeout after 20s, proceeding with partial data');
-            } else {
-              throw error;
-            }
+          await onceLoadFired(ws, pageSessionId).catch(async () => {
+            await logger.log('warn', '⏰ Navigation timeout, proceeding');
           });
-          
-          if (!navigationTimedOut) {
-            await logger.log('info', '✅ Page load event fired');
-          } else {
-            await logger.log('info', '⚠️ Proceeding with partial data after navigation timeout');
-          }
+          await logger.log('info', '✅ Page load event fired');
+          await new Promise(r => setTimeout(r, 3000));  // idle
+          await new Promise(r => setTimeout(r, 6000));  // extra-idle
           
           // Phase 2: Multi-timing cookie collection
           
@@ -766,27 +877,23 @@ serve(async (req) => {
               cookies_post_accept.push(...(postAcceptCookies.result?.cookies || []));
               requests_post_accept = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_accept');
               
-              await logger.log('info', `📊 Post-accept: cookies=${cookies_post_accept.length}, requests=${requests_post_accept.length}`);
+              // Extra wait and collect post-accept-extra data
+              await new Promise(resolve => setTimeout(resolve, 6000));
+              
+              const postAcceptExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
+              cookies_post_accept_extra.push(...(postAcceptExtraCookies.result?.cookies || []));
+              
+              await logger.log('info', `📊 Post-accept: cookies=${cookies_post_accept.length}, extra=${cookies_post_accept_extra.length}, requests=${requests_post_accept.length}`);
               
               // Reload page for reject test
               currentPhase = 'pre';
               requestMap.clear();
               await sendCommand('Page.reload', {}, pageSessionId);
-              await new Promise((resolveReload) => {
-                const checkReload = (message: any) => {
-                  if (message.method === 'Page.loadEventFired' && message.sessionId === pageSessionId) {
-                    resolveReload();
-                  }
-                };
-                const originalOnMessage = ws.onmessage;
-                ws.onmessage = (event) => {
-                  const message = JSON.parse(event.data);
-                  checkReload(message);
-                  if (originalOnMessage) originalOnMessage(event);
-                };
+              await onceLoadFired(ws, pageSessionId).catch(async () => {
+                await logger.log('warn', '⏰ Reload timeout, proceeding');
               });
-              
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              await new Promise(r => setTimeout(r, 3000));  // idle
+              await new Promise(r => setTimeout(r, 6000));  // extra-idle
               
               // Try Reject flow
               currentPhase = 'post_reject';
@@ -819,7 +926,13 @@ serve(async (req) => {
                 cookies_post_reject.push(...(postRejectCookies.result?.cookies || []));
                 requests_post_reject = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_reject');
                 
-                await logger.log('info', `📊 Post-reject: cookies=${cookies_post_reject.length}, requests=${requests_post_reject.length}`);
+                // Extra wait and collect post-reject-extra data
+                await new Promise(resolve => setTimeout(resolve, 6000));
+                
+                const postRejectExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
+                cookies_post_reject_extra.push(...(postRejectExtraCookies.result?.cookies || []));
+                
+                await logger.log('info', `📊 Post-reject: cookies=${cookies_post_reject.length}, extra=${cookies_post_reject_extra.length}, requests=${requests_post_reject.length}`);
               }
             }
           }
@@ -980,7 +1093,9 @@ serve(async (req) => {
               requests_post_reject: requests_post_reject,
               cookies_pre,
               cookies_post_accept,
+              cookies_post_accept_extra,
               cookies_post_reject,
+              cookies_post_reject_extra,
               storage_pre,
               storage_post_accept,
               storage_post_reject,
@@ -1025,84 +1140,7 @@ serve(async (req) => {
         }
       };
       
-      ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        
-        // Handle command responses
-        if (message.id && pendingCommands.has(message.id)) {
-          const { resolve } = pendingCommands.get(message.id);
-          pendingCommands.delete(message.id);
-          resolve(message);
-        }
-        
-        // Handle events - filter by pageSessionId
-        if (message.method && message.sessionId === pageSessionId) {
-          switch (message.method) {
-            case 'Network.requestWillBeSent':
-              const request = message.params;
-              requestMap.set(request.requestId, {
-                url: request.request.url,
-                method: request.request.method,
-                headers: request.request.headers,
-                timestamp: request.timestamp,
-                phase: currentPhase,
-                requestId: request.requestId
-              });
-              
-              // Extract POST data if available
-              if (request.request.postData) {
-                try {
-                  const contentType = request.request.headers['Content-Type'] || request.request.headers['content-type'] || '';
-                  if (contentType.includes('application/json')) {
-                    postDataMap.set(request.requestId, safeJsonParse(request.request.postData));
-                  } else if (contentType.includes('application/x-www-form-urlencoded')) {
-                    postDataMap.set(request.requestId, parseFormUrlEncoded(request.request.postData));
-                  } else {
-                    postDataMap.set(request.requestId, request.request.postData);
-                  }
-                } catch {
-                  // Ignore POST data parsing errors
-                }
-              }
-              break;
-              
-            case 'Network.responseReceived':
-              responseInfo.set(message.params.requestId, {
-                url: message.params.response.url,
-                status: message.params.response.status
-              });
-              break;
-              
-            case 'Network.responseReceivedExtraInfo':
-              // Parse Set-Cookie headers
-              if (message.params.headers) {
-                const setCookieHeaders = message.params.headers['Set-Cookie'] || message.params.headers['set-cookie'];
-                if (setCookieHeaders) {
-                  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
-                  const requestInfo = responseInfo.get(message.params.requestId);
-                  const responseUrl = requestInfo?.url || finalUrl;
-                  
-                  for (const header of headers) {
-                    const parsedCookie = parseSetCookieHeader(header, responseUrl);
-                    
-                    switch (currentPhase) {
-                      case 'pre':
-                        setCookieEvents_pre.push(parsedCookie);
-                        break;
-                      case 'post_accept':
-                        setCookieEvents_post_accept.push(parsedCookie);
-                        break;
-                      case 'post_reject':
-                        setCookieEvents_post_reject.push(parsedCookie);
-                        break;
-                    }
-                  }
-                }
-              }
-              break;
-          }
-        }
-      };
+      // Event handling now done via addEventListener above - no ws.onmessage needed
       
       ws.onclose = async () => {
         await logger.log('info', '🔌 WebSocket connection closed');
