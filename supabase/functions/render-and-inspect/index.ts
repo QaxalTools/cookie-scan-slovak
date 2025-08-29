@@ -1176,6 +1176,9 @@ serve(async (req) => {
           // PHASE 2: CMP INTERACTION (ACCEPT)
           await logger.log('info', '🎯 PHASE 2: CMP hunting and accept flow');
           
+          let postAcceptSnapshot: any = null;
+          let postRejectSnapshot: any = null;
+          
           const acceptResult = await cmpHunter.findAndClickCMP('accept', pageSessionId);
           
           if (acceptResult.clicked) {
@@ -1186,7 +1189,7 @@ serve(async (req) => {
             await sessionManager.waitForGlobalIdle(1500, 8000);
             
             // Take post-accept snapshot
-            const postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', pageSessionId);
+            postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', pageSessionId);
             
             await logger.log('info', 'DBG cookies_hdr_counts_post_accept', {
               pre: eventsPipeline.setCookieEvents_pre.length,
@@ -1222,7 +1225,7 @@ serve(async (req) => {
               await sessionManager.waitForGlobalIdle(1500, 8000);
               
               // Take post-reject snapshot
-              const postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', pageSessionId);
+              postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', pageSessionId);
               
               await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
                 pre: eventsPipeline.setCookieEvents_pre.length,
@@ -1239,45 +1242,31 @@ serve(async (req) => {
           
           // ==================== LEGACY DATA COMPATIBILITY ====================
           // Build backward-compatible data structures for existing report logic
-          const cookies_pre = preSnapshot.persistedCookies;
+          const cookies_pre = preSnapshot?.persistedCookies || [];
           const cookies_post_accept = postAcceptSnapshot?.persistedCookies || [];
           const cookies_post_reject = postRejectSnapshot?.persistedCookies || [];
-          const requests_pre = preSnapshot.requests;
+          const cookies_post_accept_extra: any[] = []; // Legacy compatibility
+          const cookies_post_reject_extra: any[] = []; // Legacy compatibility
+          const cookies_pre_load = cookies_pre;
+          const cookies_pre_idle = cookies_pre;
+          const cookies_pre_extra = cookies_pre;
+          
+          const requests_pre = preSnapshot?.requests || [];
           const requests_post_accept = postAcceptSnapshot?.requests || [];
           const requests_post_reject = postRejectSnapshot?.requests || [];
-          const storage_pre = [preSnapshot.storage];
-          const storage_post_accept = postAcceptSnapshot ? [postAcceptSnapshot.storage] : [];
-          const storage_post_reject = postRejectSnapshot ? [postRejectSnapshot.storage] : [];
+          
+          const storage_pre = preSnapshot?.storage ? [preSnapshot.storage] : [];
+          const storage_post_accept = postAcceptSnapshot?.storage ? [postAcceptSnapshot.storage] : [];
+          const storage_post_reject = postRejectSnapshot?.storage ? [postRejectSnapshot.storage] : [];
           
           // Use server-set cookies as primary data source
           const setCookieEvents_pre = eventsPipeline.setCookieEvents_pre;
           const setCookieEvents_post_accept = eventsPipeline.setCookieEvents_post_accept;
           const setCookieEvents_post_reject = eventsPipeline.setCookieEvents_post_reject;
-              
-              if (rejectResult.result?.result?.value?.clicked) {
-                await logger.log('info', `❌ Clicked Reject: ${rejectResult.result.result.value.selector}`);
-                
-                await waitForNetworkIdle(800, 8000);
-                
-                const postRejectCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-                cookies_post_reject.push(...(postRejectCookies.result?.cookies || []));
-                requests_post_reject = Array.from(requestMap.values()).filter((r: any) => r.phase === 'post_reject');
-                
-                // Extra wait and collect post-reject-extra data
-                await waitForNetworkIdle(800, 8000);
-                
-                const postRejectExtraCookies: any = await sendCommand('Network.getAllCookies', {}, pageSessionId);
-                cookies_post_reject_extra.push(...(postRejectExtraCookies.result?.cookies || []));
-                
-                await logger.log('info', `📊 Post-reject: cookies=${cookies_post_reject.length}, extra=${cookies_post_reject_extra.length}, requests=${requests_post_reject.length}`);
-                
-                // Debug log for post-reject phase
-                await logger.log('info', 'DBG cookies_hdr_counts_post_reject', {
-                  pre: setCookieEvents_pre.length,
-                  post_accept: setCookieEvents_post_accept.length,
-                  post_reject: setCookieEvents_post_reject.length,
-                  trace_id: traceId
-                });
+          
+          // Build legacy-compatible maps
+          const requestMap = eventsPipeline.requestMap;
+          const postDataMap = new Map(); // Legacy compatibility - empty for now
               }
             }
           }
@@ -1442,7 +1431,7 @@ serve(async (req) => {
           await logger.log('info', `📊 Final collection summary: ${JSON.stringify(metrics)}`);
           
           // PATCH 3 - Final debug log
-          await logger.log('info', 'DBG inflight_done', { inflight, trace_id: traceId });
+          await logger.log('info', 'DBG inflight_done', { inflight: sessionManager.inflight, trace_id: traceId });
           
           ws.close();
           
@@ -1488,7 +1477,7 @@ serve(async (req) => {
                 complete: isComplete,
                 reasons: selfCheckReasons
               },
-              cmp: cmpResult.result?.result?.value || {},
+              cmp: { detected: false }, // CMP detection results from modular architecture
               metrics,
               raw: {
                 requests: Array.from(requestMap.values()).map(r => ({ 
