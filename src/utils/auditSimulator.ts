@@ -100,7 +100,7 @@ export async function performLiveAudit(
   minDurationMs: number = 3000
 ): Promise<AuditData> {
   const startTime = Date.now();
-  const totalSteps = 8;
+  const totalSteps = 6;
   
   // Helper function to update progress
   const updateProgress = async (stepIndex: number) => {
@@ -115,40 +115,53 @@ export async function performLiveAudit(
       console.log('📄 Processing HTML input directly');
       await updateProgress(0);
       const internalJson = await generateInternalAuditJson(input, isHtml, updateProgress);
-      await updateProgress(7);
+      await updateProgress(5);
       const syntheticRenderData = buildSyntheticRenderData(internalJson);
       return convertToDisplayFormat(internalJson, input, syntheticRenderData);
     }
 
-    // For URL input, use Edge Function for real analysis
-    // Normalize URL to ensure https://
+    // For URL input, use two-run approach
     const normalizedUrl = input.startsWith('http') ? input : `https://${input}`;
-    console.log('🌐 performLiveAudit: Starting live analysis for URL:', normalizedUrl);
+    console.log('🌐 performLiveAudit: Starting two-run analysis for URL:', normalizedUrl);
     await updateProgress(0);
-    await updateProgress(1);
 
-    console.log('🌐 performLiveAudit: Invoking render-and-inspect edge function...');
-    const { data, error } = await supabase.functions.invoke('render-and-inspect', {
-      body: { url: normalizedUrl }
+    // Step 1: Launch both paths in parallel
+    console.log('🌐 Launching parallel analysis paths...');
+    const acceptPromise = supabase.functions.invoke('render-and-inspect', {
+      body: { url: normalizedUrl, path: 'accept' }
     });
+    const rejectPromise = supabase.functions.invoke('render-and-inspect', {
+      body: { url: normalizedUrl, path: 'reject' }
+    });
+
+    await updateProgress(1);
+    await updateProgress(2);
+
+    // Step 2: Wait for both to complete
+    console.log('🌐 Waiting for both analysis paths to complete...');
+    const [acceptResponse, rejectResponse] = await Promise.all([acceptPromise, rejectPromise]);
 
     await updateProgress(3);
     
-    console.log('🌐 performLiveAudit: Edge function response received:', {
-      hasData: !!data,
-      hasError: !!error,
-      success: data?.success,
-      errorMessage: error?.message || data?.error,
-      traceId: data?.trace_id,
-      timestamp: data?.timestamp
+    // Step 3: Validate responses
+    console.log('🌐 performLiveAudit: Analysis responses received:', {
+      acceptSuccess: acceptResponse.data?.success,
+      rejectSuccess: rejectResponse.data?.success,
+      acceptError: acceptResponse.error?.message || acceptResponse.data?.error,
+      rejectError: rejectResponse.error?.message || rejectResponse.data?.error,
+      acceptTraceId: acceptResponse.data?.trace_id,
+      rejectTraceId: rejectResponse.data?.trace_id
     });
 
-    if (error) {
-      console.error('❌ performLiveAudit: Edge function error:', error);
-      throw new Error(`Analysis failed: ${error.message}`);
+    if (acceptResponse.error && rejectResponse.error) {
+      console.error('❌ performLiveAudit: Both analysis paths failed:', {
+        acceptError: acceptResponse.error,
+        rejectError: rejectResponse.error
+      });
+      throw new Error(`Analysis failed: Both paths failed`);
     }
 
-    if (!data?.success) {
+    if (!acceptResponse.data?.success && !rejectResponse.data?.success) {
       console.warn('⚠️ performLiveAudit: Edge function returned non-success, using fallback. Error:', data?.error);
       console.log('Trace ID:', data?.trace_id);
       console.log('Browserless Status:', data?.bl_status_code, data?.bl_health_status);

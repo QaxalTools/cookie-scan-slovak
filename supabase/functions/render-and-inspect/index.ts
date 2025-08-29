@@ -34,7 +34,10 @@ const corsHeaders = {
 };
 
 // =================== TIME BUDGET HELPERS ===================
-const TIME_BUDGET_MS = 55000; // 55 second budget
+const TIME_BUDGET_MS = 35000; // 35 second budget for single path
+
+// Path mode type for two-run approach
+type PathMode = 'accept' | 'reject';
 
 function createTimeBudgetHelpers(startTime: number) {
   const nowMs = () => Date.now() - startTime;
@@ -137,7 +140,7 @@ function normalizeToken(token?: string): string {
   if (!token) return '';
   
   // Remove quotes if present
-  let normalized = token.replace(/^["']|["']$/g, '');
+  let normalized = token.replace(/^[\"']|[\"']$/g, '');
   
   // Remove 'Bearer ' prefix if present
   if (normalized.startsWith('Bearer ')) {
@@ -447,36 +450,37 @@ class SnapshotBuilder {
       .filter((r: any) => r.phase === phase);
     
     // Get persisted cookies via Network.getAllCookies
-    let persistedCookies: any[] = [];
+    let cookies: any[] = [];
     try {
       const cookiesResult: any = await this.sessionManager.sendCommand('Network.getAllCookies', {}, sessionId);
-      persistedCookies = cookiesResult?.result?.cookies || [];
+      cookies = cookiesResult?.result?.cookies || [];
     } catch (error) {
       await this.logger.log('warn', `Failed to get cookies for ${phase}`, { error: String(error) });
     }
     
-    // POINT 5: Get storage data with correct format
+    // Get storage data
     const storage = await this.getStorageData(sessionId);
     
-    // Get final URL
-    let finalUrl = '';
-    try {
-      const urlResult: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
-        expression: 'window.location.href'
-      }, sessionId);
-      finalUrl = urlResult?.result?.result?.value || '';
-    } catch {}
+    // Get Set-Cookie headers for this phase
+    let setCookieHeaders: ParsedCookie[] = [];
+    if (phase === 'pre') {
+      setCookieHeaders = this.eventsPipeline.setCookieEvents_pre;
+    } else if (phase === 'post_accept') {
+      setCookieHeaders = this.eventsPipeline.setCookieEvents_post_accept;
+    } else if (phase === 'post_reject') {
+      setCookieHeaders = this.eventsPipeline.setCookieEvents_post_reject;
+    }
     
     const snapshot = {
       phase,
       requests,
-      persistedCookies,
+      cookies,
       storage,
-      finalUrl,
+      setCookieHeaders,
       timestamp: Date.now()
     };
     
-    await this.logger.log('info', `📊 ${phase} snapshot: ${requests.length} requests, ${persistedCookies.length} cookies`);
+    await this.logger.log('info', `📊 ${phase} snapshot: ${requests.length} requests, ${cookies.length} cookies`);
     
     return snapshot;
   }
@@ -500,252 +504,245 @@ class SnapshotBuilder {
       const localStorage = Object.fromEntries(localStorageItems);
       const sessionStorage = Object.fromEntries(sessionStorageItems);
       
-      return {
-        localStorage,
-        sessionStorage,
-        storageMetrics: {
-          localStorageItems: localStorageItems.length,
-          sessionStorageItems: sessionStorageItems.length,
-          uniqueKeys: [...new Set([...Object.keys(localStorage), ...Object.keys(sessionStorage)])]
-        }
-      };
+      return [
+        ...Object.entries(localStorage).map(([key, value]) => ({
+          type: 'localStorage',
+          key,
+          value: maskSensitiveStorageValue(value)
+        })),
+        ...Object.entries(sessionStorage).map(([key, value]) => ({
+          type: 'sessionStorage', 
+          key,
+          value: maskSensitiveStorageValue(value)
+        }))
+      ];
     } catch (error) {
       await this.logger.log('warn', 'Failed to get storage data', { error: String(error) });
-      return {
-        localStorage: {},
-        sessionStorage: {},
-        storageMetrics: { localStorageItems: 0, sessionStorageItems: 0, uniqueKeys: [] }
-      };
+      return [];
     }
   }
 }
 
 // =================== CMP HUNTER ===================
+const CMP_SELECTORS = {
+  accept: [
+    // English variants
+    'button:contains("Accept")', 'button:contains("Accept All")', 'button:contains("Allow All")',
+    'a:contains("Accept")', '[data-testid*="accept"]', '[id*="accept"]',
+    
+    // Slovak variants
+    'button:contains("Prijať")', 'button:contains("Súhlasiť")', 'button:contains("Povoliť")',
+    'button:contains("Prijať všetko")', 'button:contains("Súhlasiť so všetkým")',
+    
+    // Czech variants
+    'button:contains("Přijmout")', 'button:contains("Souhlasím")', 'button:contains("Povolit")',
+    'button:contains("Přijmout vše")', 'button:contains("Souhlasím se vším")',
+    
+    // Generic class/id patterns
+    '.accept-all', '.cookie-accept', '.consent-accept', '#acceptCookies'
+  ],
+  reject: [
+    // English variants
+    'button:contains("Reject")', 'button:contains("Decline")', 'button:contains("Reject All")',
+    'a:contains("Reject")', '[data-testid*="reject"]', '[id*="reject"]',
+    
+    // Slovak variants
+    'button:contains("Odmietnuť")', 'button:contains("Zamietnuť")', 'button:contains("Nepovoliť")',
+    'button:contains("Odmietnuť všetko")', 'button:contains("Nesúhlasiť")',
+    
+    // Czech variants
+    'button:contains("Odmítnout")', 'button:contains("Nesouhlasím")', 'button:contains("Nepovolit")',
+    'button:contains("Odmítnout vše")', 'button:contains("Nesouhlasím s ničím")',
+    
+    // Generic class/id patterns
+    '.reject-all', '.cookie-reject', '.consent-reject', '#rejectCookies'
+  ]
+};
+
 class CMPHunter {
   constructor(
     private sessionManager: SessionManager,
     private logger: any
   ) {}
 
-  async findAndClickCMP(action: 'accept' | 'reject', pageSessionId: string) {
-    await this.logger.log('info', `🎯 Hunting CMP for ${action} action`);
-    
-    try {
-      // POINT 4: CMP click across all frames in the page session
-      const frameTreeResult: any = await this.sessionManager.sendCommand('Page.getFrameTree', {}, pageSessionId);
-      const allFrames = this.extractAllFrames(frameTreeResult?.result?.frameTree);
-      
-      for (const frame of allFrames) {
-        try {
-          // Create isolated world for this frame
-          await this.sessionManager.sendCommand('Page.createIsolatedWorld', {
-            frameId: frame.id,
-            worldName: `cmp-hunter-${Date.now()}`,
-            grantUniveralAccess: true
-          }, pageSessionId);
-          
-          const result = await this.attemptCMPClick(action, pageSessionId, frame.id);
-          if (result.clicked) {
-            await this.logger.log('info', `✅ CMP ${action} successful in frame ${frame.id}`);
-            return result;
-          }
-        } catch (error) {
-          await this.logger.log('warn', `CMP click failed in frame ${frame.id}`, { error: String(error) });
-        }
-      }
-      
-      await this.logger.log('info', `❌ CMP ${action} failed in all frames`);
-      return { clicked: false };
-      
-    } catch (error) {
-      await this.logger.log('error', `CMP hunting failed`, { error: String(error) });
-      return { clicked: false };
-    }
-  }
+  async findAndClickCMP(action: 'accept' | 'reject', sessionId: string): Promise<{ found: boolean; clicked: boolean; method?: string }> {
+    await this.logger.log('info', `🍪 Looking for CMP ${action} button`);
 
-  private extractAllFrames(frameTree: any): any[] {
-    if (!frameTree) return [];
-    
-    const frames = [frameTree.frame];
-    if (frameTree.childFrames) {
-      for (const child of frameTree.childFrames) {
-        frames.push(...this.extractAllFrames(child));
-      }
-    }
-    return frames;
-  }
-
-  private async attemptCMPClick(action: 'accept' | 'reject', sessionId: string, frameId?: string) {
-    const selectors = action === 'accept' ? [
-      '[data-testid="accept-all"]',
-      '[id*="accept"]',
-      '[class*="accept"]',
-      'button:contains("Accept")',
-      'button:contains("Agree")',
-      'button:contains("Allow")'
-    ] : [
-      '[data-testid="reject-all"]',
-      '[id*="reject"]',
-      '[class*="reject"]',
-      'button:contains("Reject")',
-      'button:contains("Decline")',
-      'button:contains("Deny")'
-    ];
-
+    // Try direct selector matching first
+    const selectors = CMP_SELECTORS[action];
     for (const selector of selectors) {
       try {
-        const clickExpression = `
-          try {
-            const element = document.querySelector('${selector}');
-            if (element && element.offsetParent !== null) {
-              element.click();
-              true;
-            } else {
-              false;
-            }
-          } catch {
-            false;
-          }
-        `;
-
-        const result: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
-          expression: clickExpression
-        }, sessionId);
-
-        if (result?.result?.result?.value === true) {
-          return { clicked: true, selector, frameId };
+        const result = await this.clickBySelector(selector, sessionId);
+        if (result.clicked) {
+          await this.logger.log('info', `✅ CMP ${action} clicked via selector: ${selector}`);
+          return { found: true, clicked: true, method: 'selector' };
         }
-      } catch {}
+      } catch (error) {
+        // Continue to next selector
+      }
     }
 
-    return { clicked: false };
+    // Try text-based clicking as fallback
+    const textPatterns = action === 'accept' 
+      ? ['Accept', 'Accept All', 'Allow All', 'Prijať', 'Súhlasiť', 'Povoliť', 'Přijmout', 'Souhlasím']
+      : ['Reject', 'Decline', 'Reject All', 'Odmietnuť', 'Zamietnuť', 'Nesúhlasiť', 'Odmítnout', 'Nesouhlasím'];
+
+    for (const text of textPatterns) {
+      try {
+        const result = await this.clickByText(text, sessionId);
+        if (result.clicked) {
+          await this.logger.log('info', `✅ CMP ${action} clicked via text: "${text}"`);
+          return { found: true, clicked: true, method: 'text' };
+        }
+      } catch (error) {
+        // Continue to next pattern
+      }
+    }
+
+    await this.logger.log('info', `❌ No CMP ${action} button found`);
+    return { found: false, clicked: false };
+  }
+
+  private async clickBySelector(selector: string, sessionId: string): Promise<{ clicked: boolean }> {
+    try {
+      const result: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const elements = document.querySelectorAll('${selector}');
+            if (elements.length > 0) {
+              elements[0].click();
+              return { clicked: true };
+            }
+            return { clicked: false };
+          })()
+        `
+      }, sessionId);
+      
+      return result?.result?.result?.value || { clicked: false };
+    } catch {
+      return { clicked: false };
+    }
+  }
+
+  private async clickByText(text: string, sessionId: string): Promise<{ clicked: boolean }> {
+    try {
+      const result: any = await this.sessionManager.sendCommand('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const xpath = \`//button[contains(text(), "${text}")] | //a[contains(text(), "${text}")]\`;
+            const elements = document.evaluate(xpath, document, null, XPathResult.UNORDERED_NODE_SNAPSHOT_TYPE, null);
+            if (elements.snapshotLength > 0) {
+              elements.snapshotItem(0).click();
+              return { clicked: true };
+            }
+            return { clicked: false };
+          })()
+        `
+      }, sessionId);
+      
+      return result?.result?.result?.value || { clicked: false };
+    } catch {
+      return { clicked: false };
+    }
   }
 }
 
-// ============= HELPER FUNCTIONS FOR THREE-PHASE EXECUTION =============
-
-// --- CDP sender (per WebSocket) ---
+// =================== CDP UTILITIES ===================
 function makeSender(ws: WebSocket) {
-  let id = 0;
-  const waiters = new Map<number, (msg:any)=>void>();
-  ws.addEventListener('message', (e) => {
-    try {
-      const msg = JSON.parse((e as MessageEvent).data);
-      if (msg.id && waiters.has(msg.id)) {
-        waiters.get(msg.id)!(msg);
-        waiters.delete(msg.id);
-      }
-    } catch {}
-  });
-  return function send(method: string, params: any = {}, sessionId?: string) {
-    const msg = sessionId ? { id: ++id, method, params, sessionId } : { id: ++id, method, params };
-    ws.send(JSON.stringify(msg));
-    return new Promise<any>(resolve => waiters.set(msg.id, resolve));
+  return function send(method: string, params: any = {}, sessionId?: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const id = Math.random();
+      const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
+      
+      const handler = (event: MessageEvent) => {
+        try {
+          const response = JSON.parse(event.data);
+          if (response.id === id) {
+            ws.removeEventListener('message', handler);
+            if (response.error) {
+              reject(new Error(response.error.message || 'Command failed'));
+            } else {
+              resolve(response);
+            }
+          }
+        } catch {}
+      };
+      
+      ws.addEventListener('message', handler);
+      ws.send(JSON.stringify(message));
+    });
   };
 }
 
-// --- vytvor čistý kontext+page pre fázu ---
-async function createContextPage(send: any, url: string, logger: any) {
-  const ctx = await send('Target.createBrowserContext', {});
-  const browserContextId = ctx.result.browserContextId;
-
-  const tgt = await send('Target.createTarget', { url: 'about:blank', browserContextId });
-  const targetId = tgt.result.targetId;
-
-  // auto-attach (len page/worker; iframe NIE je target)
-  await send('Target.setAutoAttach', { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
-
-  const att = await send('Target.attachToTarget', { targetId, flatten: true });
-  const sessionId = att.result.sessionId;
-
-  // enable domény
+async function createContextPage(send: Function, url: string, logger: any): Promise<{ browserContextId: string; sessionId: string }> {
+  await logger.log('info', '🎯 Creating isolated browser context');
+  
+  const contextResult: any = await send('Target.createBrowserContext');
+  const browserContextId = contextResult.result.browserContextId;
+  
+  const pageResult: any = await send('Target.createTarget', {
+    url: 'about:blank',
+    browserContextId
+  });
+  const targetId = pageResult.result.targetId;
+  
+  const sessionResult: any = await send('Target.attachToTarget', {
+    targetId,
+    flatten: true
+  });
+  const sessionId = sessionResult.result.sessionId;
+  
+  // Enable required domains
+  await send('Network.enable', {}, sessionId);
   await send('Page.enable', {}, sessionId);
   await send('Runtime.enable', {}, sessionId);
-  await send('Network.enable', { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 5_000_000 }, sessionId);
-  await send('DOMStorage.enable', {}, sessionId);
-  await send('Page.setLifecycleEventsEnabled', { enabled: true }, sessionId);
-  await send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
-  await send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'en-US,en;q=0.9', 'DNT': '1', 'Sec-GPC': '1' } }, sessionId);
-  await send('Network.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, sessionId);
-
-  // Block heavy assets to speed up loading
-  await send('Network.setBlockedURLs', { 
-    urls: [
-      '*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.svg',
-      '*.mp4', '*.webm', '*.avi', '*.mov',
-      '*.woff', '*.woff2', '*.ttf', '*.otf',
-      '*.pdf', '*.zip', '*.rar'
-    ] 
-  }, sessionId);
-
-  await logger.log('info', `🎯 Created context ${browserContextId}, target ${targetId}, session ${sessionId}`);
   
-  // navigácia
+  // Block heavy resources but keep images for pixel tracking
+  await send('Network.setBlockedURLs', {
+    urls: [
+      '*.woff', '*.woff2', '*.ttf', '*.otf',
+      '*.mp4', '*.webm', '*.ogg', '*.avi', '*.mov',
+      '*.pdf', '*.zip', '*.rar', '*.7z'
+    ]
+  }, sessionId);
+  
+  // Navigate to target URL
   await send('Page.navigate', { url }, sessionId);
-
-  return { browserContextId, targetId, sessionId };
+  
+  return { browserContextId, sessionId };
 }
 
-async function disposeContext(send:any, browserContextId:string, logger: any) {
-  await logger.log('info', `🗑️ Disposing context ${browserContextId}`);
-  await send('Target.disposeBrowserContext', { browserContextId });
-}
-
-// Helper for storage key collection
-function collectStorageKeys(storageData: any) {
-  const out = new Set<string>();
-  const pushObj = (o: any) => Object.keys(o || {}).forEach(k => out.add(k));
-  pushObj(storageData?.localStorage);
-  pushObj(storageData?.sessionStorage);
-  return out;
-}
-
-// POST body parsing helper
-function parsePostBody(rec: any) {
-  const h = rec.headers || {};
-  const ct = (h['content-type'] || h['Content-Type'] || '').toString().toLowerCase();
-  const body = rec.postData || '';
-  if (!body) return {};
+async function disposeContext(send: Function, browserContextId: string, logger: any): Promise<void> {
   try {
-    if (ct.includes('application/json')) return JSON.parse(body) || {};
-    if (ct.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(body));
-    return {};
-  } catch { return {}; }
-}
-
-// Deduplicate server-set cookies
-function dedupServerSet(arr: any[]) {
-  const m = new Map<string, any>();
-  for (const c of arr) {
-    const key = `${c.name}|${normalizeDomain(c.domain)}|${c.path||'/'}`;
-    m.set(key, c);
+    await send('Target.disposeBrowserContext', { browserContextId });
+    await logger.log('info', '🗑️ Browser context disposed');
+  } catch (error) {
+    await logger.log('warn', 'Failed to dispose context', { error: String(error) });
   }
-  return Array.from(m.values());
 }
 
-// Helper to wait for Page.loadEventFired with budget-aware timeout
-function onceLoadFired(ws: WebSocket, sessionId: string, timeoutMs: number = 10000): Promise<void> {
+async function onceLoadFired(ws: WebSocket, sessionId: string, timeout: number): Promise<void> {
   return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ws.removeEventListener('message', handler);
+      resolve();
+    }, timeout);
+
     const handler = (event: MessageEvent) => {
       try {
-        const message = JSON.parse(event.data);
-        if (message.method === 'Page.loadEventFired' && message.sessionId === sessionId) {
+        const msg = JSON.parse(event.data);
+        if (msg.sessionId === sessionId && msg.method === 'Page.loadEventFired') {
+          clearTimeout(timer);
           ws.removeEventListener('message', handler);
           resolve();
         }
       } catch {}
     };
+
     ws.addEventListener('message', handler);
-    
-    // Timeout with custom duration
-    setTimeout(() => {
-      ws.removeEventListener('message', handler);
-      resolve();
-    }, timeoutMs);
   });
 }
 
-// Budget-aware fast wait helper
 function createWaitLoadFast(budget: any) {
   return async function waitLoadFast(ws: WebSocket, sessionId: string): Promise<void> {
     const maxTimeout = Math.min(8000, budget.remainingMs() - 2000);
@@ -789,9 +786,12 @@ serve(async (req) => {
   try {
     await logger.log('info', `🚀 Starting render-and-inspect function [${traceId}]`);
 
-    // Parse request
-    const { url } = await req.json();
-    await logger.log('info', `📝 Analyzing URL: ${url}`);
+    // Parse request with path mode
+    const body = await req.json();
+    const url = body.url;
+    const pathMode: PathMode = (body.path === 'reject' ? 'reject' : 'accept');
+    
+    await logger.log('info', `📝 Analyzing URL: ${url} (mode: ${pathMode})`);
 
     if (!url) {
       const error = { success: false, error_code: 'MISSING_URL', details: 'URL parameter is required', trace_id: traceId };
@@ -802,14 +802,15 @@ serve(async (req) => {
       });
     }
 
-    // Create initial audit_runs entry
+    // Create initial audit_runs entry with mode
     const { data: auditRun, error: insertError } = await supabase
       .from('audit_runs')
       .insert({
         trace_id: traceId,
         input_url: url,
         status: 'running',
-        started_at: new Date().toISOString()
+        started_at: new Date().toISOString(),
+        mode: `pre+${pathMode}`
       })
       .select()
       .single();
@@ -823,7 +824,7 @@ serve(async (req) => {
       });
     }
 
-    await logger.log('info', `📝 Created audit run record: ${auditRun?.id}`);
+    await logger.log('info', `📝 Created audit run record: ${auditRun?.id} (mode: pre+${pathMode})`);
 
     // Get and validate Browserless token
     const rawToken = Deno.env.get('BROWSERLESS_TOKEN') || Deno.env.get('BROWSERLESS_API_KEY');
@@ -842,7 +843,8 @@ serve(async (req) => {
           error_code: 'BROWSERLESS_AUTH_FAILED',
           error_message: 'No Browserless token configured',
           ended_at: new Date().toISOString(),
-          duration_ms: Date.now() - startTime
+          duration_ms: Date.now() - startTime,
+          mode: `pre+${pathMode}`
         })
         .eq('trace_id', traceId);
 
@@ -878,7 +880,8 @@ serve(async (req) => {
           error_message: `Auth status: ${authCheck.status}`,
           ended_at: new Date().toISOString(),
           duration_ms: Date.now() - startTime,
-          bl_health_status: authCheck.status
+          bl_health_status: authCheck.status,
+          mode: `pre+${pathMode}`
         })
         .eq('trace_id', traceId);
 
@@ -888,8 +891,8 @@ serve(async (req) => {
       });
     }
 
-    // Initialize new modular architecture
-    await logger.log('info', '🏗️ Initializing modular three-phase architecture');
+    // Initialize modular architecture
+    await logger.log('info', `🏗️ Initializing two-phase architecture (mode: ${pathMode})`);
     
     const phaseController = new PhaseController();
     let sessionManager: SessionManager;
@@ -897,20 +900,11 @@ serve(async (req) => {
     let snapshotBuilder: SnapshotBuilder;
     let cmpHunter: CMPHunter;
     
-    // Legacy data structures for backward compatibility
-    const trackingParams: any[] = [];
-    const hostMap = {
-      requests: { firstParty: new Set(), thirdParty: new Set() },
-      cookies: { firstParty: new Set(), thirdParty: new Set() },
-      storage: { firstParty: new Set(), thirdParty: new Set() },
-      links: { firstParty: new Set(), thirdParty: new Set() }
-    };
-    
     let finalUrl = url;
 
-    // Connect to Browserless WebSocket using THREE-PHASE EXECUTION
+    // Connect to Browserless WebSocket
     await logger.log('info', '🔗 Connecting to Browserless WebSocket...');
-    await logger.log('info', '🌐 Starting THREE-PHASE isolated context analysis...');
+    await logger.log('info', `🌐 Starting TWO-PHASE analysis (PRE + ${pathMode.toUpperCase()})...`);
 
     // Construct WebSocket URL using correct authentication method
     const baseUrl = new URL(BROWSERLESS_BASE);
@@ -999,18 +993,16 @@ serve(async (req) => {
           
           // Hoist snapshot variables for timeout handler access
           let preSnapshot: any = null;
-          let postAcceptSnapshot: any = null;
-          let postRejectSnapshot: any = null;
-          let flags: any = {};
+          let postSnapshot: any = null;
           let phaseDurations: any = {};
           let partial = false;
           
           await logger.log('info', `⏱️ Starting with ${budget.remainingMs()}ms budget`);
           
-          // ==================== THREE-PHASE ISOLATED EXECUTION ====================
+          // ==================== TWO-PHASE EXECUTION ====================
           
           // PHASE A: PRE-CONSENT
-          await logger.log('info', '🚀 PHASE A: Pre-consent isolation');
+          await logger.log('info', '🚀 PHASE A: Pre-consent analysis');
           const endPhaseA = budget.phaseTimer('phase_pre');
           
           const A = await createContextPage(send, url, logger);
@@ -1022,21 +1014,28 @@ serve(async (req) => {
           await sessionManager.waitForGlobalIdle(1000, maxIdleA);
           
           preSnapshot = await snapshotBuilder.buildSnapshot('pre', A.sessionId);
-          await logger.log('info', `📊 Pre-snapshot: ${preSnapshot.requests.length} requests, ${preSnapshot.persistedCookies.length} cookies`);
+          await logger.log('info', `📊 Pre-snapshot: ${preSnapshot.requests.length} requests, ${preSnapshot.cookies.length} cookies`);
+          
+          // Get final URL from pre phase
+          try {
+            const urlResult: any = await send('Runtime.evaluate', {
+              expression: 'window.location.href'
+            }, A.sessionId);
+            finalUrl = urlResult?.result?.result?.value || url;
+          } catch {}
           
           await disposeContext(send, A.browserContextId, logger);
           phaseDurations.pre_ms = endPhaseA();
           
           // Check budget before Phase B
-          if (!budget.budgetEnough(15000)) {
-            await logger.log('info', `⏭️ Skipping phases B & C due to insufficient budget (${budget.remainingMs()}ms remaining)`);
+          if (!budget.budgetEnough(12000)) {
+            await logger.log('info', `⏭️ Skipping phase B due to insufficient budget (${budget.remainingMs()}ms remaining)`);
             partial = true;
-            flags.skipped_phases = ['post_accept', 'post_reject'];
-            // Continue to build response with preSnapshot only
+            // Continue with preSnapshot only
           } else {
-            // PHASE B: POST-ACCEPT
-            await logger.log('info', '🚀 PHASE B: Post-accept isolation');
-            const endPhaseB = budget.phaseTimer('phase_post_accept');
+            // PHASE B: Single path based on mode
+            await logger.log('info', `🚀 PHASE B: ${pathMode} path analysis`);
+            const endPhaseB = budget.phaseTimer('phase_post');
             
             const B = await createContextPage(send, url, logger);
             currentSessionId = B.sessionId;
@@ -1046,444 +1045,195 @@ serve(async (req) => {
             const maxIdlePreCMP = budget.budgetedDelay(4000);
             await sessionManager.waitForGlobalIdle(600, maxIdlePreCMP);
             
-            const acceptResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('accept', B.sessionId);
-            await logger.log('info', `🍪 CMP Accept result: ${JSON.stringify(acceptResult)}`);
+            const cmpResult = await cmpHunter.findAndClickCMP(pathMode, B.sessionId);
+            await logger.log('info', `🍪 CMP ${pathMode} result: ${JSON.stringify(cmpResult)}`);
             
-            phaseController.setAccept();
+            // Set appropriate phase after CMP click
+            if (pathMode === 'accept') {
+              phaseController.setAccept();
+            } else {
+              phaseController.setReject();
+            }
+            
             const maxIdlePostCMP = budget.budgetedDelay(5000);
             await sessionManager.waitForGlobalIdle(1000, maxIdlePostCMP);
             
-            postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', B.sessionId);
-            await logger.log('info', `📊 Post-accept snapshot: ${postAcceptSnapshot.requests.length} requests, ${postAcceptSnapshot.persistedCookies.length} cookies`);
+            postSnapshot = await snapshotBuilder.buildSnapshot(`post_${pathMode}`, B.sessionId);
+            await logger.log('info', `📊 Post-${pathMode} snapshot: ${postSnapshot.requests.length} requests, ${postSnapshot.cookies.length} cookies`);
             
             await disposeContext(send, B.browserContextId, logger);
-            phaseDurations.post_accept_ms = endPhaseB();
-            
-            // Check budget before Phase C
-            if (!budget.budgetEnough(12000)) {
-              await logger.log('info', `⏭️ Skipping phase C due to insufficient budget (${budget.remainingMs()}ms remaining)`);
-              partial = true;
-              flags.skipped_reject_phase = true;
-            } else {
-              // PHASE C: POST-REJECT
-              await logger.log('info', '🚀 PHASE C: Post-reject isolation');
-              const endPhaseC = budget.phaseTimer('phase_post_reject');
-              
-              const C = await createContextPage(send, url, logger);
-              currentSessionId = C.sessionId;
-              phaseController.setPre();
-              
-              await waitLoadFast(ws, C.sessionId);
-              const maxIdlePreCMPReject = budget.budgetedDelay(4000);
-              await sessionManager.waitForGlobalIdle(600, maxIdlePreCMPReject);
-              
-              const rejectResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('reject', C.sessionId);
-              await logger.log('info', `🚫 CMP Reject result: ${JSON.stringify(rejectResult)}`);
-              
-              phaseController.setReject();
-              const maxIdlePostCMPReject = budget.budgetedDelay(5000);
-              await sessionManager.waitForGlobalIdle(1000, maxIdlePostCMPReject);
-              
-              postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', C.sessionId);
-              await logger.log('info', `📊 Post-reject snapshot: ${postRejectSnapshot.requests.length} requests, ${postRejectSnapshot.persistedCookies.length} cookies`);
-              
-              await disposeContext(send, C.browserContextId, logger);
-              phaseDurations.post_reject_ms = endPhaseC();
-            }
+            phaseDurations.post_ms = endPhaseB();
           }
           
           phaseDurations.total_ms = budget.nowMs();
           await logger.log('info', `⏱️ Phase durations: ${JSON.stringify(phaseDurations)}`);
           
-          // ==================== ANALYSIS & OUTPUT ====================
+          // ==================== BUILD RESPONSE ====================
           
-          // Helper function to build response with partial data support
-          const buildResponse = (includePhaseB = true, includePhaseC = true) => {
-            // Get final URL from pre-snapshot
-            const finalUrlToUse = preSnapshot?.finalUrl || url;
-            
-            // Storage key collection with safety checks
-            const storageKeysPre = collectStorageKeys(preSnapshot?.storage);
-            const storageKeysAcc = includePhaseB ? collectStorageKeys(postAcceptSnapshot?.storage) : new Set();
-            const storageKeysRej = includePhaseC ? collectStorageKeys(postRejectSnapshot?.storage) : new Set();
-            const uniqueStorageKeys = new Set<string>([...storageKeysPre, ...storageKeysAcc, ...storageKeysRej]);
-            
-            // Server-set cookies with deduplication
-            const cookies_serverset_pre = dedupServerSet(eventsPipeline.setCookieEvents_pre);
-            const cookies_serverset_post_accept = includePhaseB ? dedupServerSet(eventsPipeline.setCookieEvents_post_accept) : [];
-            const cookies_serverset_post_reject = includePhaseC ? dedupServerSet(eventsPipeline.setCookieEvents_post_reject) : [];
-            
-            // Persisted cookies with safety
-            const cookies_persisted_pre = preSnapshot?.persistedCookies ?? [];
-            const cookies_persisted_post_accept = includePhaseB ? (postAcceptSnapshot?.persistedCookies ?? []) : [];
-            const cookies_persisted_post_reject = includePhaseC ? (postRejectSnapshot?.persistedCookies ?? []) : [];
-            
-            // POST body analysis for tracking parameters
-            const allReq = [
-              ...(preSnapshot?.requests || []),
-              ...(includePhaseB ? (postAcceptSnapshot?.requests || []) : []),
-              ...(includePhaseC ? (postRejectSnapshot?.requests || []) : [])
-            ];
-            
-            const trackingParams = [];
-            for (const r of allReq) {
-              const q = parseQuery(r.url);
-              const pb = parsePostBody(r);
-              const qKeys = Object.keys(q).filter(k => SIGNIFICANT_PARAMS.includes(k));
-              const bKeys = Object.keys(pb).filter(k => SIGNIFICANT_PARAMS.includes(k));
-              if (qKeys.length || bKeys.length) {
-                trackingParams.push({
-                  url: r.url,
-                  method: r.method,
-                  phase: r.phase,
-                  params: Object.fromEntries(qKeys.map(k => [k, q[k]])),
-                  bodyKeys: bKeys
-                });
+          // Aggregate data from phases (single path)
+          const cookies_pre = preSnapshot?.cookies || [];
+          const cookies_post_accept = pathMode === 'accept' ? (postSnapshot?.cookies || []) : [];
+          const cookies_post_reject = pathMode === 'reject' ? (postSnapshot?.cookies || []) : [];
+          
+          const storage_pre = preSnapshot?.storage || [];
+          const storage_post_accept = pathMode === 'accept' ? (postSnapshot?.storage || []) : [];
+          const storage_post_reject = pathMode === 'reject' ? (postSnapshot?.storage || []) : [];
+          
+          const requests_pre = preSnapshot?.requests || [];
+          const requests_post_accept = pathMode === 'accept' ? (postSnapshot?.requests || []) : [];
+          const requests_post_reject = pathMode === 'reject' ? (postSnapshot?.requests || []) : [];
+
+          const setCookie_pre = preSnapshot?.setCookieHeaders || [];
+          const setCookie_post_accept = pathMode === 'accept' ? (postSnapshot?.setCookieHeaders || []) : [];
+          const setCookie_post_reject = pathMode === 'reject' ? (postSnapshot?.setCookieHeaders || []) : [];
+          
+          // Build legacy tracking params and host map for compatibility
+          const allRequests = [...requests_pre, ...requests_post_accept, ...requests_post_reject];
+          const uniqueThirdParties = new Set(
+            allRequests
+              .map(r => safeGetHostname(r.url))
+              .filter(h => h && h !== safeGetHostname(finalUrl))
+          );
+          
+          const trackingParams = new Set();
+          allRequests.forEach(req => {
+            const params = parseQuery(req.url);
+            Object.keys(params).forEach(param => {
+              if (SIGNIFICANT_PARAMS.includes(param.toLowerCase())) {
+                trackingParams.add(param);
               }
-            }
-            
-            // Build host map for legacy compatibility
-            const mainDomain = getETldPlusOneLite(new URL(finalUrlToUse).hostname);
-            for (const r of allReq) {
-              try {
-                const requestHost = new URL(r.url).hostname;
-                const requestDomain = getETldPlusOneLite(requestHost);
-                const isFirstParty = requestDomain === mainDomain;
-                
-                if (isFirstParty) {
-                  hostMap.requests.firstParty.add(requestHost);
-                } else {
-                  hostMap.requests.thirdParty.add(requestHost);
-                }
-              } catch {}
-            }
-            
-            const allCookies = [...cookies_persisted_pre, ...cookies_persisted_post_accept, ...cookies_persisted_post_reject];
-            for (const cookie of allCookies) {
-              const cookieDomain = getETldPlusOneLite(cookie.domain);
-              const isFirstParty = cookieDomain === mainDomain;
-              
-              if (isFirstParty) {
-                hostMap.cookies.firstParty.add(cookie.domain);
-              } else {
-                hostMap.cookies.thirdParty.add(cookie.domain);
-              }
-            }
-            
-            // Metrics calculation
-            const metrics = {
-              requests_pre: preSnapshot?.requests?.length || 0,
-              requests_post_accept: includePhaseB ? (postAcceptSnapshot?.requests?.length || 0) : 0,
-              requests_post_reject: includePhaseC ? (postRejectSnapshot?.requests?.length || 0) : 0,
-              cookies_serverset_pre: cookies_serverset_pre.length,
-              cookies_serverset_post_accept: cookies_serverset_post_accept.length,
-              cookies_serverset_post_reject: cookies_serverset_post_reject.length,
-              cookies_persisted_pre: cookies_persisted_pre.length,
-              cookies_persisted_post_accept: cookies_persisted_post_accept.length,
-              cookies_persisted_post_reject: cookies_persisted_post_reject.length,
-              setCookie_pre: eventsPipeline.setCookieEvents_pre.length,
-              setCookie_post_accept: includePhaseB ? eventsPipeline.setCookieEvents_post_accept.length : 0,
-              setCookie_post_reject: includePhaseC ? eventsPipeline.setCookieEvents_post_reject.length : 0,
-              storage_unique_keys: uniqueStorageKeys.size,
-              tracking_params_count: trackingParams.length,
-              third_party_hosts: hostMap.requests.thirdParty.size
-            };
-            
-            const reasons = [];
-            if (partial) {
-              reasons.push('time_budget_exceeded');
-              if (flags.skipped_phases?.includes('post_accept')) reasons.push('skipped_phase_b');
-              if (flags.skipped_reject_phase) reasons.push('skipped_phase_c');
-            }
-            
-            return {
-              success: true,
-              partial,
-              final_url: finalUrlToUse,
-              finalUrl: finalUrlToUse,
-              
-              // Requests per phase
-              requests_pre: preSnapshot?.requests || [],
-              requests_post_accept: includePhaseB ? (postAcceptSnapshot?.requests || []) : [],
-              requests_post_reject: includePhaseC ? (postRejectSnapshot?.requests || []) : [],
-              
-              // Server-set cookies (new fields)
-              cookies_serverset_pre,
-              cookies_serverset_post_accept,
-              cookies_serverset_post_reject,
-              
-              // Persisted cookies (new fields)  
-              cookies_persisted_pre,
-              cookies_persisted_post_accept,
-              cookies_persisted_post_reject,
-              
-              // Legacy cookies fields for compatibility
-              cookies_pre: cookies_persisted_pre,
-              cookies_post_accept: cookies_persisted_post_accept,
-              cookies_post_reject: cookies_persisted_post_reject,
-              
-              // Set-Cookie headers
-              set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
-              set_cookie_headers_post_accept: includePhaseB ? eventsPipeline.setCookieEvents_post_accept : [],
-              set_cookie_headers_post_reject: includePhaseC ? eventsPipeline.setCookieEvents_post_reject : [],
-              
-              // Storage data
-              storage_pre: preSnapshot?.storage || {},
-              storage_post_accept: includePhaseB ? (postAcceptSnapshot?.storage || {}) : {},
-              storage_post_reject: includePhaseC ? (postRejectSnapshot?.storage || {}) : {},
-              
-              // Legacy compatibility
-              hostMap,
-              trackingParams,
-              metrics,
-              trace_id: traceId,
-              
-              // Phase metadata
-              flags,
-              phase_durations: phaseDurations,
-              timestamp: new Date().toISOString(),
-              errorMessage: partial ? 'Partial results due to time budget constraints' : undefined,
-              
-              // Self-checks
-              self_check_summary: {
-                is_complete: !partial,
-                reasons,
-                data_collection_ok: !!preSnapshot
-              }
-            };
+            });
+          });
+          
+          // Build final metrics
+          const metrics = {
+            requests_total: allRequests.length,
+            requests_pre_consent: requests_pre.length,
+            third_parties_count: uniqueThirdParties.size,
+            beacons_count: trackingParams.size,
+            cookies_pre_count: cookies_pre.length,
+            cookies_post_count: Math.max(cookies_post_accept.length, cookies_post_reject.length),
+            segment: `pre+${pathMode}`,
           };
-          
-          // Close WebSocket
-          ws.close();
-          
-          // Build final response based on what data we have
-          const includePhaseB = !!postAcceptSnapshot && !flags.skipped_phases?.includes('post_accept');
-          const includePhaseC = !!postRejectSnapshot && !flags.skipped_reject_phase;
-          
-          const response = buildResponse(includePhaseB, includePhaseC);
-          
-          await logger.log('info', '📊 Final metrics', response.metrics);
-          await logger.log('info', `✅ Analysis completed. Partial: ${partial}, Phases: A${includePhaseB ? '+B' : ''}${includePhaseC ? '+C' : ''}`);
-          
-          resolve(response);
+
+          // Update audit run with completion
+          await supabase
+            .from('audit_runs')
+            .update({
+              status: 'completed',
+              ended_at: new Date().toISOString(),
+              duration_ms: phaseDurations.total_ms,
+              normalized_url: finalUrl,
+              requests_total: metrics.requests_total,
+              requests_pre_consent: metrics.requests_pre_consent,
+              third_parties_count: metrics.third_parties_count,
+              beacons_count: metrics.beacons_count,
+              cookies_pre_count: metrics.cookies_pre_count,
+              cookies_post_count: metrics.cookies_post_count,
+              bl_status_code: 200,
+              bl_health_status: 'healthy',
+              data_source: 'browserless',
+              mode: `pre+${pathMode}`
+            })
+            .eq('id', auditRun.id);
+
+          await logger.log('info', `✅ Analysis completed successfully (segment: pre+${pathMode})`);
+
+          // Return successful response with segment structure
+          resolve({
+            success: true,
+            trace_id: traceId,
+            segment: `pre+${pathMode}`,
+            final_url: finalUrl,
+            metrics,
+            data: {
+              pre: {
+                cookies: cookies_pre,
+                storage: storage_pre,
+                requests: requests_pre,
+                set_cookie_headers: setCookie_pre
+              },
+              post: pathMode === 'accept' 
+                ? {
+                    kind: 'accept',
+                    cookies: cookies_post_accept,
+                    storage: storage_post_accept,
+                    requests: requests_post_accept,
+                    set_cookie_headers: setCookie_post_accept
+                  }
+                : {
+                    kind: 'reject',
+                    cookies: cookies_post_reject,
+                    storage: storage_post_reject,
+                    requests: requests_post_reject,
+                    set_cookie_headers: setCookie_post_reject
+                  }
+            },
+            // Legacy flat structure for compatibility
+            cookies_pre,
+            cookies_post_accept,
+            cookies_post_reject,
+            storage_pre,
+            storage_post_accept,
+            storage_post_reject,
+            requests_pre,
+            requests_post_accept,
+            requests_post_reject,
+            set_cookie_headers_pre: setCookie_pre,
+            set_cookie_headers_post_accept: setCookie_post_accept,
+            set_cookie_headers_post_reject: setCookie_post_reject,
+            phase_durations: {
+              phase_a: phaseDurations.pre_ms,
+              phase_b: phaseDurations.post_ms,
+              total: phaseDurations.total_ms
+            },
+            partial
+          });
           
         } catch (error) {
-          await logger.log('error', 'THREE-PHASE execution failed', { error: String(error) });
+          await logger.log('error', 'WebSocket execution error', { error: String(error) });
+          resolve({ success: false, error: String(error), trace_id: traceId });
+        } finally {
           ws.close();
-          
-          // If we have at least preSnapshot, return partial results instead of error
-          if (preSnapshot) {
-            await logger.log('info', '🔄 Returning partial results due to error in later phases');
-            const partialResponse = {
-              success: true,
-              partial: true,
-              final_url: preSnapshot.finalUrl || url,
-              finalUrl: preSnapshot.finalUrl || url,
-              requests_pre: preSnapshot.requests || [],
-              requests_post_accept: [],
-              requests_post_reject: [],
-              cookies_serverset_pre: dedupServerSet(eventsPipeline.setCookieEvents_pre),
-              cookies_serverset_post_accept: [],
-              cookies_serverset_post_reject: [],
-              cookies_persisted_pre: preSnapshot.persistedCookies || [],
-              cookies_persisted_post_accept: [],
-              cookies_persisted_post_reject: [],
-              cookies_pre: preSnapshot.persistedCookies || [],
-              cookies_post_accept: [],
-              cookies_post_reject: [],
-              set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
-              set_cookie_headers_post_accept: [],
-              set_cookie_headers_post_reject: [],
-              storage_pre: preSnapshot.storage || {},
-              storage_post_accept: {},
-              storage_post_reject: {},
-              hostMap: { requests: { firstParty: new Set(), thirdParty: new Set() }, cookies: { firstParty: new Set(), thirdParty: new Set() }, storage: { firstParty: new Set(), thirdParty: new Set() }, links: { firstParty: new Set(), thirdParty: new Set() } },
-              trackingParams: [],
-              metrics: { requests_pre: preSnapshot.requests?.length || 0, requests_post_accept: 0, requests_post_reject: 0 },
-              trace_id: traceId,
-              flags: { error_recovery: true },
-              phase_durations: phaseDurations,
-              timestamp: new Date().toISOString(),
-              errorMessage: `Error in execution: ${String(error)}`,
-              self_check_summary: { is_complete: false, reasons: ['error_recovery'], data_collection_ok: true }
-            };
-            resolve(partialResponse);
-          } else {
-            resolve({
-              success: false,
-              error_code: 'THREE_PHASE_EXECUTION_FAILED',
-              details: String(error),
-              trace_id: traceId,
-              timestamp: new Date().toISOString()
-            });
-          }
         }
       };
       
-      ws.onclose = async () => {
-        await logger.log('info', '🔌 WebSocket connection closed');
-      };
-      
       ws.onerror = (error) => {
-        logger.log('error', 'WebSocket error', { error: String(error) });
-        
-        resolve({
-          success: false,
-          error_code: 'WEBSOCKET_ERROR',
-          details: String(error),
-          trace_id: traceId
-        });
+        logger.log('error', 'WebSocket connection error', { error: String(error) });
+        resolve({ success: false, error: 'WebSocket connection failed', trace_id: traceId });
       };
       
-      // Timeout - now returns partial results if available
-      setTimeout(async () => {
-        await logger.log('warn', '⏰ Global timeout after 60 seconds, attempting partial response');
-        
-        // Since variables are scoped in ws.onopen, we need to rely on minimal fallback response
-        resolve({
-          success: true,
-          partial: true,
-          final_url: url,
-          finalUrl: url,
-          requests_pre: [],
-          requests_post_accept: [],
-          requests_post_reject: [],
-          cookies_serverset_pre: [],
-          cookies_serverset_post_accept: [],
-          cookies_serverset_post_reject: [],
-          cookies_persisted_pre: [],
-          cookies_persisted_post_accept: [],
-          cookies_persisted_post_reject: [],
-          cookies_pre: [],
-          cookies_post_accept: [],
-          cookies_post_reject: [],
-          set_cookie_headers_pre: [],
-          set_cookie_headers_post_accept: [],
-          set_cookie_headers_post_reject: [],
-          storage_pre: {},
-          storage_post_accept: {},
-          storage_post_reject: {},
-          hostMap: { 
-            requests: { firstParty: new Set(), thirdParty: new Set() }, 
-            cookies: { firstParty: new Set(), thirdParty: new Set() }, 
-            storage: { firstParty: new Set(), thirdParty: new Set() }, 
-            links: { firstParty: new Set(), thirdParty: new Set() } 
-          },
-          trackingParams: [],
-          metrics: { 
-            requests_pre: 0, 
-            requests_post_accept: 0,
-            requests_post_reject: 0,
-            cookies_serverset_pre: 0,
-            cookies_serverset_post_accept: 0,
-            cookies_serverset_post_reject: 0,
-            cookies_persisted_pre: 0,
-            cookies_persisted_post_accept: 0,
-            cookies_persisted_post_reject: 0
-          },
-          trace_id: traceId,
-          flags: { global_timeout: true },
-          phase_durations: {},
-          timestamp: new Date().toISOString(),
-          errorMessage: 'Analysis timed out after 60 seconds before data collection started',
-          self_check_summary: { 
-            is_complete: false, 
-            reasons: ['global_timeout'], 
-            data_collection_ok: false 
-          }
-        });
-      }, 60000);
+      ws.onclose = () => {
+        logger.log('info', 'WebSocket connection closed');
+      };
     });
 
-    const duration = Date.now() - startTime;
-    
-    if (!analysisResult.success) {
-      // Update audit_runs with failure
-      await supabase
-        .from('audit_runs')
-        .update({
-          status: 'failed',
-          error_code: analysisResult.error_code,
-          error_message: analysisResult.details,
-          ended_at: new Date().toISOString(),
-          duration_ms: duration
-        })
-        .eq('trace_id', traceId);
-
-      return new Response(JSON.stringify(analysisResult), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
-    
-    await logger.log('info', `✅ Analysis completed successfully${analysisResult.partial ? ' (partial results)' : ''}`);
-    
-    // Log partial completion info if applicable
-    if (analysisResult.partial) {
-      await logger.log('info', '📋 Partial results due to time budget', { 
-        flags: analysisResult.flags,
-        phase_durations: analysisResult.phase_durations,
-        partial: true
-      });
-    }
-    
-    // Update audit_runs with success (including partial results)
-    await supabase
-      .from('audit_runs')
-      .update({
-        status: 'completed',
-        ended_at: new Date().toISOString(),
-        duration_ms: duration,
-        bl_status_code: 200,
-        bl_health_status: analysisResult.partial ? 'partial' : 'ok',
-        normalized_url: analysisResult.final_url || analysisResult.finalUrl
-      })
-      .eq('trace_id', traceId);
-
-    await logger.log('info', '✅ Analysis function completed successfully');
-
-    return new Response(JSON.stringify({
-      success: true,
-      duration_ms: duration,
-      trace_id: traceId,
-      bl_status_code: 200,
-      bl_health_status: 'ok',
-      data: analysisResult
-    }), {
-      status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    return new Response(JSON.stringify(analysisResult), {
+      headers: corsHeaders
     });
 
   } catch (error) {
-    const duration = Date.now() - startTime;
-    const errorResponse = {
+    await logger.log('error', 'Function execution error', { error: String(error) });
+    
+    // Update audit run with error
+    await supabase
+      .from('audit_runs')
+      .update({
+        status: 'failed',
+        ended_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        error_message: error.message,
+        error_code: 'EXECUTION_ERROR',
+        mode: auditRun ? `pre+${pathMode}` : null
+      })
+      .eq('id', auditRun?.id)
+      .then(() => {}, () => {}); // Ignore update errors
+
+    return new Response(JSON.stringify({
       success: false,
-      error_code: 'UNEXPECTED_ERROR',
-      details: String(error),
-      duration_ms: duration,
+      error: error.message,
       trace_id: traceId
-    };
-    
-    await logger.log('error', 'Unexpected error in analysis function', errorResponse);
-    
-    // Update audit_runs with unexpected error
-    try {
-      await supabase
-        .from('audit_runs')
-        .update({
-          status: 'failed',
-          error_code: 'UNEXPECTED_ERROR',
-          error_message: String(error),
-          ended_at: new Date().toISOString(),
-          duration_ms: duration,
-          bl_status_code: 500
-        })
-        .eq('trace_id', traceId);
-    } catch (updateError) {
-      await logger.log('error', 'Failed to update audit_runs on unexpected error', { updateError: String(updateError) });
-    }
-    
-    return new Response(JSON.stringify(errorResponse), {
+    }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });

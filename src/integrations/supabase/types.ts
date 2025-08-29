@@ -59,6 +59,7 @@ export type Database = {
           id: string
           input_url: string
           meta: Json | null
+          mode: string | null
           normalized_url: string | null
           requests_pre_consent: number | null
           requests_total: number | null
@@ -81,6 +82,7 @@ export type Database = {
           id?: string
           input_url: string
           meta?: Json | null
+          mode?: string | null
           normalized_url?: string | null
           requests_pre_consent?: number | null
           requests_total?: number | null
@@ -103,6 +105,7 @@ export type Database = {
           id?: string
           input_url?: string
           meta?: Json | null
+          mode?: string | null
           normalized_url?: string | null
           requests_pre_consent?: number | null
           requests_total?: number | null
