@@ -113,30 +113,91 @@ function maskSensitiveStorageValue(value: any): any {
 }
 
 // =================== BROWSERLESS AUTH CHECK ===================
-const BROWSERLESS_BASE = 'browserless.io';
+const BROWSERLESS_BASE = Deno.env.get('BROWSERLESS_BASE') || 'https://production-sfo.browserless.io';
 
-function normalizeToken(rawToken: string | undefined): string {
-  if (!rawToken) return '';
+function normalizeToken(token?: string): string {
+  if (!token) return '';
+  
+  // Remove quotes if present
+  let normalized = token.replace(/^["']|["']$/g, '');
+  
   // Remove 'Bearer ' prefix if present
-  return rawToken.startsWith('Bearer ') ? rawToken.slice(7) : rawToken;
+  if (normalized.startsWith('Bearer ')) {
+    normalized = normalized.slice(7);
+  }
+  
+  // Trim whitespace
+  return normalized.trim();
 }
 
-async function checkBrowserlessAuth(token: string): Promise<{ status: string; details: any }> {
+async function checkBrowserlessAuth(rawToken: string): Promise<{ status: string; details: any; active_token_source?: string }> {
+  const activeToken = normalizeToken(rawToken);
+  
+  if (!activeToken) {
+    return { status: 'no_token', details: { message: 'No token provided' } };
+  }
+
+  // First try query parameter authentication (like diagnostics)
   try {
-    const url = `https://${token}@${BROWSERLESS_BASE}/json/version`;
-    const response = await fetch(url, { method: 'GET' });
+    const queryAuthUrl = `${BROWSERLESS_BASE}/json/version?token=${activeToken}`;
+    console.log(`Testing query auth: ${queryAuthUrl}`);
     
-    if (response.status === 200) {
-      const data = await response.json();
-      return { status: 'ok', details: data };
-    } else if (response.status === 401) {
-      return { status: 'unauthorized', details: { code: 401 } };
-    } else {
-      return { status: 'error', details: { code: response.status } };
+    const queryResponse = await fetch(queryAuthUrl, { method: 'GET' });
+    console.log(`Query auth status: ${queryResponse.status}`);
+    
+    if (queryResponse.status === 200) {
+      const data = await queryResponse.json();
+      console.log(`Query auth success:`, data);
+      return { 
+        status: 'ok', 
+        details: data, 
+        active_token_source: 'query_parameter' 
+      };
     }
   } catch (error) {
-    return { status: 'network_error', details: String(error) };
+    console.log(`Query auth error:`, error);
   }
+
+  // Second try X-API-Key header authentication (like diagnostics)
+  try {
+    const headerAuthUrl = `${BROWSERLESS_BASE}/json/version`;
+    console.log(`Testing header auth: ${headerAuthUrl}`);
+    
+    const headerResponse = await fetch(headerAuthUrl, { 
+      method: 'GET',
+      headers: { 'X-API-Key': activeToken }
+    });
+    console.log(`Header auth status: ${headerResponse.status}`);
+    
+    if (headerResponse.status === 200) {
+      const data = await headerResponse.json();
+      console.log(`Header auth success:`, data);
+      return { 
+        status: 'ok', 
+        details: data, 
+        active_token_source: 'x_api_key_header' 
+      };
+    } else if (headerResponse.status === 401) {
+      return { 
+        status: 'unauthorized', 
+        details: { code: 401, message: 'Invalid token' },
+        active_token_source: 'x_api_key_header'
+      };
+    }
+  } catch (error) {
+    console.log(`Header auth error:`, error);
+    return { 
+      status: 'network_error', 
+      details: String(error),
+      active_token_source: 'x_api_key_header'
+    };
+  }
+
+  return { 
+    status: 'failed_all_methods', 
+    details: { message: 'Both query and header auth failed' },
+    active_token_source: 'none'
+  };
 }
 
 // =================== TRACKING PARAMETER CONSTANTS ===================
@@ -757,12 +818,15 @@ serve(async (req) => {
     await logger.log('info', '🏥 Checking Browserless authentication...');
     const authCheck = await checkBrowserlessAuth(token);
     
+    await logger.log('info', `🔑 Auth result: ${authCheck.status}, source: ${authCheck.active_token_source || 'unknown'}`);
+    
     if (authCheck.status !== 'ok') {
       const error = { 
         success: false, 
         error_code: 'BROWSERLESS_AUTH_FAILED', 
-        details: `Auth status: ${authCheck.status}`,
+        details: `Auth status: ${authCheck.status}, source: ${authCheck.active_token_source || 'unknown'}`,
         auth_details: authCheck.details,
+        active_token_source: authCheck.active_token_source,
         trace_id: traceId
       };
       await logger.log('error', 'Browserless authentication failed', error);
@@ -810,8 +874,12 @@ serve(async (req) => {
     await logger.log('info', '🔗 Connecting to Browserless WebSocket...');
     await logger.log('info', '🌐 Starting THREE-PHASE isolated context analysis...');
 
+    // Construct WebSocket URL using correct authentication method
     const baseUrl = new URL(BROWSERLESS_BASE);
-    const wsUrl = `wss://${baseUrl.host}?token=${token}`;
+    const protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${baseUrl.host}?token=${token}`;
+    
+    await logger.log('info', `🔗 WebSocket URL: ${wsUrl}`);
     
     const analysisResult = await new Promise((resolve) => {
       const ws = new WebSocket(wsUrl);
