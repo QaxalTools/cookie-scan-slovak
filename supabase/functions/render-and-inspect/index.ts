@@ -1267,9 +1267,6 @@ serve(async (req) => {
           // Build legacy-compatible maps
           const requestMap = eventsPipeline.requestMap;
           const postDataMap = new Map(); // Legacy compatibility - empty for now
-              }
-            }
-          }
           
           // Phase 5: Calculate tracking parameters and data sending
           const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
