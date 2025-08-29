@@ -317,6 +317,7 @@ serve(async (req) => {
       try {
         await supabase.from('audit_logs').insert({
           trace_id: traceId,
+          source: 'render-and-inspect',
           level,
           message,
           data
@@ -422,7 +423,9 @@ serve(async (req) => {
 
       const sendCommand = (method: string, params: any = {}, sessionId?: string) => {
         const id = messageId++;
-        const message = { id, method, params: sessionId ? { ...params, sessionId } : params };
+        const message = sessionId ? 
+          { id, method, params, sessionId } : 
+          { id, method, params };
         ws.send(JSON.stringify(message));
         return new Promise((resolve, reject) => {
           pendingCommands.set(id, { resolve, reject });
@@ -439,13 +442,22 @@ serve(async (req) => {
           
           await logger.log('info', `TARGET CHECK ${JSON.stringify(targets.result.targetInfos.map((t: any) => ({ type: t.type, url: t.url })))}`);
           
-          // Set auto-attach for new page targets
-          await sendCommand('Target.setAutoAttach', {
-            autoAttach: true,
-            flatten: true,
-            waitForDebuggerOnStart: false,
-            filter: [{ type: 'page' }]
-          });
+          // Set auto-attach for new page targets with fallback
+          try {
+            await sendCommand('Target.setAutoAttach', {
+              autoAttach: true,
+              flatten: true,
+              waitForDebuggerOnStart: false,
+              filter: [{ type: 'page' }]
+            });
+          } catch (error) {
+            await logger.log('warn', 'Target.setAutoAttach with filter failed, retrying without filter', { error: String(error) });
+            await sendCommand('Target.setAutoAttach', {
+              autoAttach: true,
+              flatten: true,
+              waitForDebuggerOnStart: false
+            });
+          }
           
           // Find existing page target
           const pageTarget = targets.result.targetInfos.find((t: any) => t.type === 'page');
@@ -493,23 +505,44 @@ serve(async (req) => {
           await logger.log('info', '🌐 Navigating to URL...');
           await sendCommand('Page.navigate', { url }, pageSessionId);
           
-          // Wait for load event
-          await new Promise<void>((resolveLoad) => {
-            const checkLoad = (message: any) => {
-              if (message.method === 'Page.loadEventFired' && message.sessionId === pageSessionId) {
-                resolveLoad();
-              }
-            };
-            
-            const originalOnMessage = ws.onmessage;
-            ws.onmessage = (event) => {
-              const message = JSON.parse(event.data);
-              checkLoad(message);
-              if (originalOnMessage) originalOnMessage(event);
-            };
+          // Wait for load event with 20s timeout
+          const NAVIGATION_TIMEOUT = 20000;
+          let navigationTimedOut = false;
+          
+          await Promise.race([
+            new Promise<void>((resolveLoad) => {
+              const checkLoad = (message: any) => {
+                if (message.method === 'Page.loadEventFired' && message.sessionId === pageSessionId) {
+                  resolveLoad();
+                }
+              };
+              
+              const originalOnMessage = ws.onmessage;
+              ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                checkLoad(message);
+                if (originalOnMessage) originalOnMessage(event);
+              };
+            }),
+            new Promise<void>((_, reject) => {
+              setTimeout(() => {
+                navigationTimedOut = true;
+                reject(new Error('NAVIGATION_TIMEOUT'));
+              }, NAVIGATION_TIMEOUT);
+            })
+          ]).catch(async (error) => {
+            if (error.message === 'NAVIGATION_TIMEOUT') {
+              await logger.log('warn', '⏰ Navigation timeout after 20s, proceeding with partial data');
+            } else {
+              throw error;
+            }
           });
           
-          await logger.log('info', '✅ Page load event fired');
+          if (!navigationTimedOut) {
+            await logger.log('info', '✅ Page load event fired');
+          } else {
+            await logger.log('info', '⚠️ Proceeding with partial data after navigation timeout');
+          }
           
           // Phase 2: Multi-timing cookie collection
           
