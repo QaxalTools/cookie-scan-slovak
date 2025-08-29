@@ -33,6 +33,24 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// =================== TIME BUDGET HELPERS ===================
+const TIME_BUDGET_MS = 55000; // 55 second budget
+
+function createTimeBudgetHelpers(startTime: number) {
+  const nowMs = () => Date.now() - startTime;
+  const remainingMs = () => TIME_BUDGET_MS - nowMs();
+  const budgetEnough = (needed: number) => remainingMs() > needed;
+  const budgetedDelay = (requested: number, buffer: number = 1500) => 
+    Math.min(requested, Math.max(1000, remainingMs() - buffer));
+  
+  const phaseTimer = (phaseName: string) => {
+    const phaseStart = Date.now();
+    return () => Date.now() - phaseStart;
+  };
+  
+  return { nowMs, remainingMs, budgetEnough, budgetedDelay, phaseTimer };
+}
+
 // =================== SINGLE SOURCE OF TRUTH HELPERS ===================
 // These functions are defined once and used throughout the Edge function
 
@@ -650,6 +668,16 @@ async function createContextPage(send: any, url: string, logger: any) {
   await send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'en-US,en;q=0.9', 'DNT': '1', 'Sec-GPC': '1' } }, sessionId);
   await send('Network.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, sessionId);
 
+  // Block heavy assets to speed up loading
+  await send('Network.setBlockedURLs', { 
+    urls: [
+      '*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.svg',
+      '*.mp4', '*.webm', '*.avi', '*.mov',
+      '*.woff', '*.woff2', '*.ttf', '*.otf',
+      '*.pdf', '*.zip', '*.rar'
+    ] 
+  }, sessionId);
+
   await logger.log('info', `🎯 Created context ${browserContextId}, target ${targetId}, session ${sessionId}`);
   
   // navigácia
@@ -695,8 +723,8 @@ function dedupServerSet(arr: any[]) {
   return Array.from(m.values());
 }
 
-// Helper to wait for Page.loadEventFired
-function onceLoadFired(ws: WebSocket, sessionId: string): Promise<void> {
+// Helper to wait for Page.loadEventFired with budget-aware timeout
+function onceLoadFired(ws: WebSocket, sessionId: string, timeoutMs: number = 10000): Promise<void> {
   return new Promise((resolve) => {
     const handler = (event: MessageEvent) => {
       try {
@@ -709,12 +737,22 @@ function onceLoadFired(ws: WebSocket, sessionId: string): Promise<void> {
     };
     ws.addEventListener('message', handler);
     
-    // Timeout after 10 seconds
+    // Timeout with custom duration
     setTimeout(() => {
       ws.removeEventListener('message', handler);
       resolve();
-    }, 10000);
+    }, timeoutMs);
   });
+}
+
+// Budget-aware fast wait helper
+function createWaitLoadFast(budget: any) {
+  return async function waitLoadFast(ws: WebSocket, sessionId: string): Promise<void> {
+    const maxTimeout = Math.min(8000, budget.remainingMs() - 2000);
+    if (maxTimeout > 0) {
+      await onceLoadFired(ws, sessionId, maxTimeout);
+    }
+  };
 }
 
 serve(async (req) => {
@@ -955,224 +993,330 @@ serve(async (req) => {
         try {
           await logger.log('info', '🔗 WebSocket connected to Browserless');
           
-          // ==================== THREE-PHASE ISOLATED EXECUTION ====================
+          // Initialize time budget helpers
+          const budget = createTimeBudgetHelpers(startTime);
+          const waitLoadFast = createWaitLoadFast(budget);
           
-          let preSnapshot: any, postAcceptSnapshot: any, postRejectSnapshot: any;
+          // Hoist snapshot variables for timeout handler access
+          let preSnapshot: any = null;
+          let postAcceptSnapshot: any = null;
+          let postRejectSnapshot: any = null;
+          let flags: any = {};
+          let phaseDurations: any = {};
+          let partial = false;
+          
+          await logger.log('info', `⏱️ Starting with ${budget.remainingMs()}ms budget`);
+          
+          // ==================== THREE-PHASE ISOLATED EXECUTION ====================
           
           // PHASE A: PRE-CONSENT
           await logger.log('info', '🚀 PHASE A: Pre-consent isolation');
+          const endPhaseA = budget.phaseTimer('phase_pre');
+          
           const A = await createContextPage(send, url, logger);
           currentSessionId = A.sessionId;
           phaseController.setPre();
           
-          await onceLoadFired(ws, A.sessionId).catch(() => {});
-          await sessionManager.waitForGlobalIdle(1500, 12000);
+          await waitLoadFast(ws, A.sessionId);
+          const maxIdleA = budget.budgetedDelay(6000);
+          await sessionManager.waitForGlobalIdle(1000, maxIdleA);
           
           preSnapshot = await snapshotBuilder.buildSnapshot('pre', A.sessionId);
           await logger.log('info', `📊 Pre-snapshot: ${preSnapshot.requests.length} requests, ${preSnapshot.persistedCookies.length} cookies`);
           
           await disposeContext(send, A.browserContextId, logger);
+          phaseDurations.pre_ms = endPhaseA();
           
-          // PHASE B: POST-ACCEPT
-          await logger.log('info', '🚀 PHASE B: Post-accept isolation');
-          const B = await createContextPage(send, url, logger);
-          currentSessionId = B.sessionId;
-          phaseController.setPre();
+          // Check budget before Phase B
+          if (!budget.budgetEnough(15000)) {
+            await logger.log('info', `⏭️ Skipping phases B & C due to insufficient budget (${budget.remainingMs()}ms remaining)`);
+            partial = true;
+            flags.skipped_phases = ['post_accept', 'post_reject'];
+            // Continue to build response with preSnapshot only
+          } else {
+            // PHASE B: POST-ACCEPT
+            await logger.log('info', '🚀 PHASE B: Post-accept isolation');
+            const endPhaseB = budget.phaseTimer('phase_post_accept');
+            
+            const B = await createContextPage(send, url, logger);
+            currentSessionId = B.sessionId;
+            phaseController.setPre();
+            
+            await waitLoadFast(ws, B.sessionId);
+            const maxIdlePreCMP = budget.budgetedDelay(4000);
+            await sessionManager.waitForGlobalIdle(600, maxIdlePreCMP);
+            
+            const acceptResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('accept', B.sessionId);
+            await logger.log('info', `🍪 CMP Accept result: ${JSON.stringify(acceptResult)}`);
+            
+            phaseController.setAccept();
+            const maxIdlePostCMP = budget.budgetedDelay(5000);
+            await sessionManager.waitForGlobalIdle(1000, maxIdlePostCMP);
+            
+            postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', B.sessionId);
+            await logger.log('info', `📊 Post-accept snapshot: ${postAcceptSnapshot.requests.length} requests, ${postAcceptSnapshot.persistedCookies.length} cookies`);
+            
+            await disposeContext(send, B.browserContextId, logger);
+            phaseDurations.post_accept_ms = endPhaseB();
+            
+            // Check budget before Phase C
+            if (!budget.budgetEnough(12000)) {
+              await logger.log('info', `⏭️ Skipping phase C due to insufficient budget (${budget.remainingMs()}ms remaining)`);
+              partial = true;
+              flags.skipped_reject_phase = true;
+            } else {
+              // PHASE C: POST-REJECT
+              await logger.log('info', '🚀 PHASE C: Post-reject isolation');
+              const endPhaseC = budget.phaseTimer('phase_post_reject');
+              
+              const C = await createContextPage(send, url, logger);
+              currentSessionId = C.sessionId;
+              phaseController.setPre();
+              
+              await waitLoadFast(ws, C.sessionId);
+              const maxIdlePreCMPReject = budget.budgetedDelay(4000);
+              await sessionManager.waitForGlobalIdle(600, maxIdlePreCMPReject);
+              
+              const rejectResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('reject', C.sessionId);
+              await logger.log('info', `🚫 CMP Reject result: ${JSON.stringify(rejectResult)}`);
+              
+              phaseController.setReject();
+              const maxIdlePostCMPReject = budget.budgetedDelay(5000);
+              await sessionManager.waitForGlobalIdle(1000, maxIdlePostCMPReject);
+              
+              postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', C.sessionId);
+              await logger.log('info', `📊 Post-reject snapshot: ${postRejectSnapshot.requests.length} requests, ${postRejectSnapshot.persistedCookies.length} cookies`);
+              
+              await disposeContext(send, C.browserContextId, logger);
+              phaseDurations.post_reject_ms = endPhaseC();
+            }
+          }
           
-          await onceLoadFired(ws, B.sessionId).catch(() => {});
-          await sessionManager.waitForGlobalIdle(800, 8000);
-          
-          const acceptResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('accept', B.sessionId);
-          await logger.log('info', `🍪 CMP Accept result: ${JSON.stringify(acceptResult)}`);
-          
-          phaseController.setAccept();
-          await sessionManager.waitForGlobalIdle(1500, 10000);
-          
-          postAcceptSnapshot = await snapshotBuilder.buildSnapshot('post_accept', B.sessionId);
-          await logger.log('info', `📊 Post-accept snapshot: ${postAcceptSnapshot.requests.length} requests, ${postAcceptSnapshot.persistedCookies.length} cookies`);
-          
-          await disposeContext(send, B.browserContextId, logger);
-          
-          // PHASE C: POST-REJECT
-          await logger.log('info', '🚀 PHASE C: Post-reject isolation');
-          const C = await createContextPage(send, url, logger);
-          currentSessionId = C.sessionId;
-          phaseController.setPre();
-          
-          await onceLoadFired(ws, C.sessionId).catch(() => {});
-          await sessionManager.waitForGlobalIdle(800, 8000);
-          
-          const rejectResult = await (new CMPHunter(sessionManager, logger)).findAndClickCMP('reject', C.sessionId);
-          await logger.log('info', `🚫 CMP Reject result: ${JSON.stringify(rejectResult)}`);
-          
-          phaseController.setReject();
-          await sessionManager.waitForGlobalIdle(1500, 10000);
-          
-          postRejectSnapshot = await snapshotBuilder.buildSnapshot('post_reject', C.sessionId);
-          await logger.log('info', `📊 Post-reject snapshot: ${postRejectSnapshot.requests.length} requests, ${postRejectSnapshot.persistedCookies.length} cookies`);
-          
-          await disposeContext(send, C.browserContextId, logger);
+          phaseDurations.total_ms = budget.nowMs();
+          await logger.log('info', `⏱️ Phase durations: ${JSON.stringify(phaseDurations)}`);
           
           // ==================== ANALYSIS & OUTPUT ====================
           
-          // Get final URL from pre-snapshot
-          finalUrl = preSnapshot.finalUrl || url;
-          
-          // ==================== DATA ANALYSIS ====================
-          
-          // Fixed storage key collection
-          const storageKeysPre = collectStorageKeys(preSnapshot?.storage);
-          const storageKeysAcc = collectStorageKeys(postAcceptSnapshot?.storage);
-          const storageKeysRej = collectStorageKeys(postRejectSnapshot?.storage);
-          const uniqueStorageKeys = new Set<string>([...storageKeysPre, ...storageKeysAcc, ...storageKeysRej]);
-          
-          // Server-set cookies with deduplication
-          const cookies_serverset_pre = dedupServerSet(eventsPipeline.setCookieEvents_pre);
-          const cookies_serverset_post_accept = dedupServerSet(eventsPipeline.setCookieEvents_post_accept);
-          const cookies_serverset_post_reject = dedupServerSet(eventsPipeline.setCookieEvents_post_reject);
-          
-          // Persisted cookies
-          const cookies_persisted_pre = preSnapshot?.persistedCookies ?? [];
-          const cookies_persisted_post_accept = postAcceptSnapshot?.persistedCookies ?? [];
-          const cookies_persisted_post_reject = postRejectSnapshot?.persistedCookies ?? [];
-          
-          // POST body analysis for tracking parameters
-          const allReq = [
-            ...preSnapshot.requests,
-            ...postAcceptSnapshot.requests,
-            ...postRejectSnapshot.requests
-          ];
-          
-          const trackingParams = [];
-          for (const r of allReq) {
-            const q = parseQuery(r.url);
-            const pb = parsePostBody(r);
-            const qKeys = Object.keys(q).filter(k => SIGNIFICANT_PARAMS.includes(k));
-            const bKeys = Object.keys(pb).filter(k => SIGNIFICANT_PARAMS.includes(k));
-            if (qKeys.length || bKeys.length) {
-              trackingParams.push({
-                url: r.url,
-                method: r.method,
-                phase: r.phase,
-                params: Object.fromEntries(qKeys.map(k => [k, q[k]])),
-                bodyKeys: bKeys
-              });
+          // Helper function to build response with partial data support
+          const buildResponse = (includePhaseB = true, includePhaseC = true) => {
+            // Get final URL from pre-snapshot
+            const finalUrlToUse = preSnapshot?.finalUrl || url;
+            
+            // Storage key collection with safety checks
+            const storageKeysPre = collectStorageKeys(preSnapshot?.storage);
+            const storageKeysAcc = includePhaseB ? collectStorageKeys(postAcceptSnapshot?.storage) : new Set();
+            const storageKeysRej = includePhaseC ? collectStorageKeys(postRejectSnapshot?.storage) : new Set();
+            const uniqueStorageKeys = new Set<string>([...storageKeysPre, ...storageKeysAcc, ...storageKeysRej]);
+            
+            // Server-set cookies with deduplication
+            const cookies_serverset_pre = dedupServerSet(eventsPipeline.setCookieEvents_pre);
+            const cookies_serverset_post_accept = includePhaseB ? dedupServerSet(eventsPipeline.setCookieEvents_post_accept) : [];
+            const cookies_serverset_post_reject = includePhaseC ? dedupServerSet(eventsPipeline.setCookieEvents_post_reject) : [];
+            
+            // Persisted cookies with safety
+            const cookies_persisted_pre = preSnapshot?.persistedCookies ?? [];
+            const cookies_persisted_post_accept = includePhaseB ? (postAcceptSnapshot?.persistedCookies ?? []) : [];
+            const cookies_persisted_post_reject = includePhaseC ? (postRejectSnapshot?.persistedCookies ?? []) : [];
+            
+            // POST body analysis for tracking parameters
+            const allReq = [
+              ...(preSnapshot?.requests || []),
+              ...(includePhaseB ? (postAcceptSnapshot?.requests || []) : []),
+              ...(includePhaseC ? (postRejectSnapshot?.requests || []) : [])
+            ];
+            
+            const trackingParams = [];
+            for (const r of allReq) {
+              const q = parseQuery(r.url);
+              const pb = parsePostBody(r);
+              const qKeys = Object.keys(q).filter(k => SIGNIFICANT_PARAMS.includes(k));
+              const bKeys = Object.keys(pb).filter(k => SIGNIFICANT_PARAMS.includes(k));
+              if (qKeys.length || bKeys.length) {
+                trackingParams.push({
+                  url: r.url,
+                  method: r.method,
+                  phase: r.phase,
+                  params: Object.fromEntries(qKeys.map(k => [k, q[k]])),
+                  bodyKeys: bKeys
+                });
+              }
             }
-          }
-          
-          // Build host map for legacy compatibility
-          const mainDomain = getETldPlusOneLite(new URL(finalUrl).hostname);
-          for (const r of allReq) {
-            try {
-              const requestHost = new URL(r.url).hostname;
-              const requestDomain = getETldPlusOneLite(requestHost);
-              const isFirstParty = requestDomain === mainDomain;
+            
+            // Build host map for legacy compatibility
+            const mainDomain = getETldPlusOneLite(new URL(finalUrlToUse).hostname);
+            for (const r of allReq) {
+              try {
+                const requestHost = new URL(r.url).hostname;
+                const requestDomain = getETldPlusOneLite(requestHost);
+                const isFirstParty = requestDomain === mainDomain;
+                
+                if (isFirstParty) {
+                  hostMap.requests.firstParty.add(requestHost);
+                } else {
+                  hostMap.requests.thirdParty.add(requestHost);
+                }
+              } catch {}
+            }
+            
+            const allCookies = [...cookies_persisted_pre, ...cookies_persisted_post_accept, ...cookies_persisted_post_reject];
+            for (const cookie of allCookies) {
+              const cookieDomain = getETldPlusOneLite(cookie.domain);
+              const isFirstParty = cookieDomain === mainDomain;
               
               if (isFirstParty) {
-                hostMap.requests.firstParty.add(requestHost);
+                hostMap.cookies.firstParty.add(cookie.domain);
               } else {
-                hostMap.requests.thirdParty.add(requestHost);
+                hostMap.cookies.thirdParty.add(cookie.domain);
               }
-            } catch {}
-          }
-          
-          const allCookies = [...cookies_persisted_pre, ...cookies_persisted_post_accept, ...cookies_persisted_post_reject];
-          for (const cookie of allCookies) {
-            const cookieDomain = getETldPlusOneLite(cookie.domain);
-            const isFirstParty = cookieDomain === mainDomain;
-            
-            if (isFirstParty) {
-              hostMap.cookies.firstParty.add(cookie.domain);
-            } else {
-              hostMap.cookies.thirdParty.add(cookie.domain);
             }
-          }
-          
-          // Metrics calculation
-          const metrics = {
-            requests_pre: preSnapshot.requests.length,
-            requests_post_accept: postAcceptSnapshot.requests.length,
-            requests_post_reject: postRejectSnapshot.requests.length,
-            cookies_serverset_pre: cookies_serverset_pre.length,
-            cookies_serverset_post_accept: cookies_serverset_post_accept.length,
-            cookies_serverset_post_reject: cookies_serverset_post_reject.length,
-            cookies_persisted_pre: cookies_persisted_pre.length,
-            cookies_persisted_post_accept: cookies_persisted_post_accept.length,
-            cookies_persisted_post_reject: cookies_persisted_post_reject.length,
-            setCookie_pre: eventsPipeline.setCookieEvents_pre.length,
-            setCookie_post_accept: eventsPipeline.setCookieEvents_post_accept.length,
-            setCookie_post_reject: eventsPipeline.setCookieEvents_post_reject.length,
-            storage_unique_keys: uniqueStorageKeys.size,
-            tracking_params_count: trackingParams.length,
-            third_party_hosts: hostMap.requests.thirdParty.size
+            
+            // Metrics calculation
+            const metrics = {
+              requests_pre: preSnapshot?.requests?.length || 0,
+              requests_post_accept: includePhaseB ? (postAcceptSnapshot?.requests?.length || 0) : 0,
+              requests_post_reject: includePhaseC ? (postRejectSnapshot?.requests?.length || 0) : 0,
+              cookies_serverset_pre: cookies_serverset_pre.length,
+              cookies_serverset_post_accept: cookies_serverset_post_accept.length,
+              cookies_serverset_post_reject: cookies_serverset_post_reject.length,
+              cookies_persisted_pre: cookies_persisted_pre.length,
+              cookies_persisted_post_accept: cookies_persisted_post_accept.length,
+              cookies_persisted_post_reject: cookies_persisted_post_reject.length,
+              setCookie_pre: eventsPipeline.setCookieEvents_pre.length,
+              setCookie_post_accept: includePhaseB ? eventsPipeline.setCookieEvents_post_accept.length : 0,
+              setCookie_post_reject: includePhaseC ? eventsPipeline.setCookieEvents_post_reject.length : 0,
+              storage_unique_keys: uniqueStorageKeys.size,
+              tracking_params_count: trackingParams.length,
+              third_party_hosts: hostMap.requests.thirdParty.size
+            };
+            
+            const reasons = [];
+            if (partial) {
+              reasons.push('time_budget_exceeded');
+              if (flags.skipped_phases?.includes('post_accept')) reasons.push('skipped_phase_b');
+              if (flags.skipped_reject_phase) reasons.push('skipped_phase_c');
+            }
+            
+            return {
+              success: true,
+              partial,
+              final_url: finalUrlToUse,
+              finalUrl: finalUrlToUse,
+              
+              // Requests per phase
+              requests_pre: preSnapshot?.requests || [],
+              requests_post_accept: includePhaseB ? (postAcceptSnapshot?.requests || []) : [],
+              requests_post_reject: includePhaseC ? (postRejectSnapshot?.requests || []) : [],
+              
+              // Server-set cookies (new fields)
+              cookies_serverset_pre,
+              cookies_serverset_post_accept,
+              cookies_serverset_post_reject,
+              
+              // Persisted cookies (new fields)  
+              cookies_persisted_pre,
+              cookies_persisted_post_accept,
+              cookies_persisted_post_reject,
+              
+              // Legacy cookies fields for compatibility
+              cookies_pre: cookies_persisted_pre,
+              cookies_post_accept: cookies_persisted_post_accept,
+              cookies_post_reject: cookies_persisted_post_reject,
+              
+              // Set-Cookie headers
+              set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
+              set_cookie_headers_post_accept: includePhaseB ? eventsPipeline.setCookieEvents_post_accept : [],
+              set_cookie_headers_post_reject: includePhaseC ? eventsPipeline.setCookieEvents_post_reject : [],
+              
+              // Storage data
+              storage_pre: preSnapshot?.storage || {},
+              storage_post_accept: includePhaseB ? (postAcceptSnapshot?.storage || {}) : {},
+              storage_post_reject: includePhaseC ? (postRejectSnapshot?.storage || {}) : {},
+              
+              // Legacy compatibility
+              hostMap,
+              trackingParams,
+              metrics,
+              trace_id: traceId,
+              
+              // Phase metadata
+              flags,
+              phase_durations: phaseDurations,
+              timestamp: new Date().toISOString(),
+              errorMessage: partial ? 'Partial results due to time budget constraints' : undefined,
+              
+              // Self-checks
+              self_check_summary: {
+                is_complete: !partial,
+                reasons,
+                data_collection_ok: !!preSnapshot
+              }
+            };
           };
-          
-          await logger.log('info', '📊 Final metrics', metrics);
           
           // Close WebSocket
           ws.close();
           
-          // Build final response with BACKWARD COMPATIBILITY
-          const response = {
-            success: true,
-            final_url: finalUrl,
-            finalUrl,
-            
-            // Requests per phase
-            requests_pre: preSnapshot.requests,
-            requests_post_accept: postAcceptSnapshot.requests,
-            requests_post_reject: postRejectSnapshot.requests,
-            
-            // Server-set cookies (new fields)
-            cookies_serverset_pre,
-            cookies_serverset_post_accept,
-            cookies_serverset_post_reject,
-            
-            // Persisted cookies (new fields)  
-            cookies_persisted_pre,
-            cookies_persisted_post_accept,
-            cookies_persisted_post_reject,
-            
-            // Legacy cookies fields for compatibility
-            cookies_pre: cookies_persisted_pre,
-            cookies_post_accept: cookies_persisted_post_accept,
-            cookies_post_reject: cookies_persisted_post_reject,
-            
-            // Set-Cookie headers
-            set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
-            set_cookie_headers_post_accept: eventsPipeline.setCookieEvents_post_accept,
-            set_cookie_headers_post_reject: eventsPipeline.setCookieEvents_post_reject,
-            
-            // Storage data
-            storage_pre: preSnapshot.storage,
-            storage_post_accept: postAcceptSnapshot.storage,
-            storage_post_reject: postRejectSnapshot.storage,
-            
-            // Legacy compatibility
-            hostMap,
-            trackingParams,
-            metrics,
-            trace_id: traceId,
-            
-            // Self-checks
-            self_check_summary: {
-              is_complete: true,
-              reasons: [],
-              data_collection_ok: true
-            }
-          };
+          // Build final response based on what data we have
+          const includePhaseB = !!postAcceptSnapshot && !flags.skipped_phases?.includes('post_accept');
+          const includePhaseC = !!postRejectSnapshot && !flags.skipped_reject_phase;
+          
+          const response = buildResponse(includePhaseB, includePhaseC);
+          
+          await logger.log('info', '📊 Final metrics', response.metrics);
+          await logger.log('info', `✅ Analysis completed. Partial: ${partial}, Phases: A${includePhaseB ? '+B' : ''}${includePhaseC ? '+C' : ''}`);
           
           resolve(response);
           
         } catch (error) {
           await logger.log('error', 'THREE-PHASE execution failed', { error: String(error) });
           ws.close();
-          resolve({
-            success: false,
-            error_code: 'THREE_PHASE_EXECUTION_FAILED',
-            details: String(error),
-            trace_id: traceId
-          });
+          
+          // If we have at least preSnapshot, return partial results instead of error
+          if (preSnapshot) {
+            await logger.log('info', '🔄 Returning partial results due to error in later phases');
+            const partialResponse = {
+              success: true,
+              partial: true,
+              final_url: preSnapshot.finalUrl || url,
+              finalUrl: preSnapshot.finalUrl || url,
+              requests_pre: preSnapshot.requests || [],
+              requests_post_accept: [],
+              requests_post_reject: [],
+              cookies_serverset_pre: dedupServerSet(eventsPipeline.setCookieEvents_pre),
+              cookies_serverset_post_accept: [],
+              cookies_serverset_post_reject: [],
+              cookies_persisted_pre: preSnapshot.persistedCookies || [],
+              cookies_persisted_post_accept: [],
+              cookies_persisted_post_reject: [],
+              cookies_pre: preSnapshot.persistedCookies || [],
+              cookies_post_accept: [],
+              cookies_post_reject: [],
+              set_cookie_headers_pre: eventsPipeline.setCookieEvents_pre,
+              set_cookie_headers_post_accept: [],
+              set_cookie_headers_post_reject: [],
+              storage_pre: preSnapshot.storage || {},
+              storage_post_accept: {},
+              storage_post_reject: {},
+              hostMap: { requests: { firstParty: new Set(), thirdParty: new Set() }, cookies: { firstParty: new Set(), thirdParty: new Set() }, storage: { firstParty: new Set(), thirdParty: new Set() }, links: { firstParty: new Set(), thirdParty: new Set() } },
+              trackingParams: [],
+              metrics: { requests_pre: preSnapshot.requests?.length || 0, requests_post_accept: 0, requests_post_reject: 0 },
+              trace_id: traceId,
+              flags: { error_recovery: true },
+              phase_durations: phaseDurations,
+              timestamp: new Date().toISOString(),
+              errorMessage: `Error in execution: ${String(error)}`,
+              self_check_summary: { is_complete: false, reasons: ['error_recovery'], data_collection_ok: true }
+            };
+            resolve(partialResponse);
+          } else {
+            resolve({
+              success: false,
+              error_code: 'THREE_PHASE_EXECUTION_FAILED',
+              details: String(error),
+              trace_id: traceId,
+              timestamp: new Date().toISOString()
+            });
+          }
         }
       };
       
@@ -1191,15 +1335,62 @@ serve(async (req) => {
         });
       };
       
-      // Timeout
+      // Timeout - now returns partial results if available
       setTimeout(async () => {
-        await logger.log('error', '⏰ Global timeout after 60 seconds');
+        await logger.log('warn', '⏰ Global timeout after 60 seconds, attempting partial response');
         
+        // Since variables are scoped in ws.onopen, we need to rely on minimal fallback response
         resolve({
-          success: false,
-          error_code: 'TIMEOUT',
-          details: 'Analysis timed out after 60 seconds',
-          trace_id: traceId
+          success: true,
+          partial: true,
+          final_url: url,
+          finalUrl: url,
+          requests_pre: [],
+          requests_post_accept: [],
+          requests_post_reject: [],
+          cookies_serverset_pre: [],
+          cookies_serverset_post_accept: [],
+          cookies_serverset_post_reject: [],
+          cookies_persisted_pre: [],
+          cookies_persisted_post_accept: [],
+          cookies_persisted_post_reject: [],
+          cookies_pre: [],
+          cookies_post_accept: [],
+          cookies_post_reject: [],
+          set_cookie_headers_pre: [],
+          set_cookie_headers_post_accept: [],
+          set_cookie_headers_post_reject: [],
+          storage_pre: {},
+          storage_post_accept: {},
+          storage_post_reject: {},
+          hostMap: { 
+            requests: { firstParty: new Set(), thirdParty: new Set() }, 
+            cookies: { firstParty: new Set(), thirdParty: new Set() }, 
+            storage: { firstParty: new Set(), thirdParty: new Set() }, 
+            links: { firstParty: new Set(), thirdParty: new Set() } 
+          },
+          trackingParams: [],
+          metrics: { 
+            requests_pre: 0, 
+            requests_post_accept: 0,
+            requests_post_reject: 0,
+            cookies_serverset_pre: 0,
+            cookies_serverset_post_accept: 0,
+            cookies_serverset_post_reject: 0,
+            cookies_persisted_pre: 0,
+            cookies_persisted_post_accept: 0,
+            cookies_persisted_post_reject: 0
+          },
+          trace_id: traceId,
+          flags: { global_timeout: true },
+          phase_durations: {},
+          timestamp: new Date().toISOString(),
+          errorMessage: 'Analysis timed out after 60 seconds before data collection started',
+          self_check_summary: { 
+            is_complete: false, 
+            reasons: ['global_timeout'], 
+            data_collection_ok: false 
+          }
         });
       }, 60000);
     });
@@ -1225,9 +1416,18 @@ serve(async (req) => {
       });
     }
     
-    await logger.log('info', '✅ Analysis completed successfully');
+    await logger.log('info', `✅ Analysis completed successfully${analysisResult.partial ? ' (partial results)' : ''}`);
     
-    // Update audit_runs with success
+    // Log partial completion info if applicable
+    if (analysisResult.partial) {
+      await logger.log('info', '📋 Partial results due to time budget', { 
+        flags: analysisResult.flags,
+        phase_durations: analysisResult.phase_durations,
+        partial: true
+      });
+    }
+    
+    // Update audit_runs with success (including partial results)
     await supabase
       .from('audit_runs')
       .update({
@@ -1235,7 +1435,7 @@ serve(async (req) => {
         ended_at: new Date().toISOString(),
         duration_ms: duration,
         bl_status_code: 200,
-        bl_health_status: 'ok',
+        bl_health_status: analysisResult.partial ? 'partial' : 'ok',
         normalized_url: analysisResult.final_url || analysisResult.finalUrl
       })
       .eq('trace_id', traceId);
